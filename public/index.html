@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DocLight · 轻量文档站</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%235b5bd6"/><g fill="%23fff"><rect x="19" y="17" width="26" height="5" rx="2.5"/><rect x="19" y="29.5" width="26" height="5" rx="2.5"/><rect x="19" y="42" width="15" height="5" rx="2.5"/></g></svg>'>
+
+<!-- 主题预置脚本：在样式绘制前执行，避免深浅色闪烁 -->
+<script>
+(function () {
+  var pref;
+  try { pref = localStorage.getItem('doclight-theme') || 'auto'; } catch (e) { pref = 'auto'; }
+  var dark = pref === 'dark' || (pref !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+  var el = document.documentElement;
+  el.classList.add(dark ? 'theme-dark' : 'theme-light');
+  el.dataset.themePref = pref;
+})();
+</script>
+<link rel="stylesheet" href="/style.css?v=12">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="tb-left">
+    <button id="btn-menu" class="icon-btn" aria-label="打开导航" title="导航">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <a class="brand" href="/" data-nav aria-label="DocLight 空间总览">
+      <span class="brand-mark" aria-hidden="true"></span><span class="brand-name">DocLight</span>
+    </a>
+    <span id="crumb" class="crumb"></span>
+  </div>
+  <div class="tb-right">
+    <button id="btn-auth" class="btn btn-ghost" hidden>登录</button>
+    <div class="dropdown-wrap">
+      <button id="btn-theme" class="icon-btn" aria-label="切换主题" title="外观：跟随系统 / 浅色 / 深色">
+        <svg id="icon-auto" viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
+        <svg id="icon-light" viewBox="0 0 24 24" width="18" height="18" hidden><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <svg id="icon-dark" viewBox="0 0 24 24" width="18" height="18" hidden><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+      <div id="menu-theme" class="menu" role="menu" hidden>
+        <button class="menu-item" data-pref="auto" role="menuitemradio"><span>跟随系统</span><svg viewBox="0 0 24 24" width="15" height="15" class="ck"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button class="menu-item" data-pref="light" role="menuitemradio"><span>浅色</span><svg viewBox="0 0 24 24" width="15" height="15" class="ck"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button class="menu-item" data-pref="dark" role="menuitemradio"><span>深色</span><svg viewBox="0 0 24 24" width="15" height="15" class="ck"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
+    </div>
+
+    <div id="cluster-view" class="cluster" hidden>
+      <div class="dropdown-wrap">
+        <button id="btn-more" class="icon-btn" aria-label="更多操作" title="更多操作">
+          <svg viewBox="0 0 24 24" width="18" height="18"><g fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g></svg>
+        </button>
+        <div id="menu-page" class="menu" hidden>
+          <button class="menu-item" data-act="child"><span>新建子页面…</span></button>
+          <button class="menu-item" data-act="rename"><span>重命名…</span></button>
+          <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+          <button class="menu-item" data-act="move"><span>移动到…</span></button>
+          <button class="menu-item danger" data-act="delete"><span>删除页面…</span></button>
+        </div>
+      </div>
+      <button id="btn-edit" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 20l4.5-1L20 7.5a2.1 2.1 0 0 0-3-3L5.5 16z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        编辑
+      </button>
+    </div>
+
+    <div id="cluster-edit" class="cluster" hidden>
+      <span id="dirty-pill" class="pill" hidden>● 未保存</span>
+      <button id="btn-cancel" class="btn btn-ghost">取消</button>
+      <button id="btn-save" class="btn btn-primary">保存 <kbd>⌘S</kbd></button>
+    </div>
+  </div>
+</header>
+
+<div id="layout">
+
+  <aside id="sidebar">
+    <div class="side-head">
+      <input id="search" type="search" placeholder="搜索文档…" autocomplete="off">
+      <button id="btn-new" class="btn btn-new">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        新建空间
+      </button>
+    </div>
+    <nav id="page-list" aria-label="文档目录"></nav>
+    <div class="side-foot">
+      <span>DocLight v1.0</span>
+      <span id="count-hint"></span>
+    </div>
+  </aside>
+
+  <div id="scrim" hidden></div>
+
+  <main id="main">
+
+    <div id="toolbar-wrap" hidden>
+      <div id="toolbar" role="toolbar" aria-label="格式化工具栏">
+        <button class="tbtn" data-cmd="undo" title="撤销 ⌘Z">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M8.5 4L4 8.5 8.5 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 8.5h9.5a6 6 0 0 1 6 6V15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="tbtn" data-cmd="redo" title="重做 ⇧⌘Z">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15.5 4L20 8.5 15.5 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 8.5h-9.5a6 6 0 0 0-6 6V15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <span class="tsep"></span>
+        <button class="tbtn b" data-block="H1" data-cmd="formatBlock" data-val="h1" title="一级标题">H1</button>
+        <button class="tbtn b" data-block="H2" data-cmd="formatBlock" data-val="h2" title="二级标题">H2</button>
+        <button class="tbtn b" data-block="H3" data-cmd="formatBlock" data-val="h3" title="三级标题">H3</button>
+        <button class="tbtn b" data-block="P" data-cmd="formatBlock" data-val="p" title="正文段落">¶</button>
+        <span class="tsep"></span>
+        <button class="tbtn b" data-state="bold" data-cmd="bold" title="粗体 ⌘B"><b>B</b></button>
+        <button class="tbtn b i" data-state="italic" data-cmd="italic" title="斜体 ⌘I"><i>I</i></button>
+        <button class="tbtn b u" data-state="underline" data-cmd="underline" title="下划线 ⌘U"><u>U</u></button>
+        <button class="tbtn b s" data-state="strikeThrough" data-cmd="strikeThrough" title="删除线"><s>S</s></button>
+        <button class="tbtn mono" data-cmd="inlinecode" title="行内代码">&lt;/&gt;</button>
+        <span class="tsep"></span>
+        <button class="tbtn" data-state="insertUnorderedList" data-cmd="insertUnorderedList" title="无序列表">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 6h12M8 12h12M8 18h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="6" r="1.6" fill="currentColor"/><circle cx="4" cy="12" r="1.6" fill="currentColor"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/></svg>
+        </button>
+        <button class="tbtn" data-state="insertOrderedList" data-cmd="insertOrderedList" title="有序列表">
+          <svg viewBox="0 0 24 24" width="16" height="16"><text x="2.4" y="9" font-size="8.4" fill="currentColor" font-weight="700">1.</text><text x="2.4" y="20" font-size="8.4" fill="currentColor" font-weight="700">2.</text><path d="M10 6h11M10 17h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="tbtn" data-block="BLOCKQUOTE" data-cmd="formatBlock" data-val="blockquote" title="引用块">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6.5 11c-.9 0-1.6-.7-1.6-1.6S5.6 7.8 6.5 7.8s1.9.8 1.9 2.3c0 2.6-1.5 4.4-3.4 5.1l-.6-1.1c1.3-.5 2.1-1.4 2.4-2.6-.1.1-.2.1-.3.1zM14 11c-.9 0-1.6-.7-1.6-1.6s.7-1.6 1.6-1.6 1.9.8 1.9 2.3c0 2.6-1.5 4.4-3.4 5.1l-.6-1.1c1.3-.5 2.1-1.4 2.4-2.6H14z" fill="currentColor"/></svg>
+        </button>
+        <span class="tsep"></span>
+        <button class="tbtn" data-state="justifyLeft" data-cmd="justifyLeft" title="左对齐">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16M4 10h10M4 15h16M4 20h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="tbtn" data-state="justifyCenter" data-cmd="justifyCenter" title="居中">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16M7 10h10M4 15h16M7 20h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="tbtn" data-state="justifyRight" data-cmd="justifyRight" title="右对齐">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16M10 10h10M4 15h16M10 20h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <span class="tsep"></span>
+        <button class="tbtn mono" data-cmd="formatBlock" data-val="pre" data-block="PRE" title="代码块">{ }</button>
+        <button class="tbtn" data-cmd="createlink" title="插入链接">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M10.5 13.5a4 4 0 0 0 6 .4l2.5-2.5a4 4 0 1 0-5.7-5.7l-1.2 1.2M13.5 10.5a4 4 0 0 0-6-.4L5 12.6a4 4 0 1 0 5.7 5.7l1.2-1.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="tbtn" data-cmd="insertimage" title="插入图片">
+          <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="10" r="1.7" fill="currentColor"/><path d="M4.5 17.5L10 12l4 4 2.5-2.5 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="tbtn" data-cmd="insertHorizontalRule" title="分隔线">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 12h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <span class="flex-spacer"></span>
+        <button class="tbtn" data-cmd="removeFormat" title="清除格式：段落转正文，去除文字样式、行内代码、链接与对齐">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h12M10 5v10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M14.5 14.5l5 5M19.5 14.5l-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <article id="article" class="container article" tabindex="-1" hidden></article>
+
+      <section id="edit-wrap" class="container edit-wrap" hidden>
+        <input id="title-input" type="text" placeholder="设置页面标题" maxlength="120" autocomplete="off">
+        <div id="editor" contenteditable="true" spellcheck="false" aria-label="文档编辑区"></div>
+        <p class="edit-hint">Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版</p>
+      </section>
+
+      <div id="empty-state" class="empty" hidden>
+        <svg viewBox="0 0 120 120" width="112" height="112" aria-hidden="true">
+          <rect x="22" y="14" width="76" height="92" rx="10" class="e-card"/>
+          <path d="M38 38h44M38 54h44M38 70h28" class="e-line"/>
+        </svg>
+        <h2>还没有选择页面</h2>
+        <p>从左侧挑选一篇文档，或立即开始创作。</p>
+        <button class="btn btn-primary" id="btn-empty-create">＋ 创建第一页</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<div id="menu-row" class="menu row-menu" hidden></div>
+
+<div id="modal-root" class="modal-root" hidden>
+  <div class="modal-backdrop" data-close-modal></div>
+  <div class="modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<noscript><p style="padding:2rem;text-align:center">DocLight 需要启用 JavaScript 才能运行。</p></noscript>
+<script src="/app.js?v=25" defer></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# ---- 运行时产物（每次启动自动生成，无版本价值）----
+.server.log
+.server.pid
+nohup.out
+*.log
+
+# ---- 凭据与账号数据（敏感，绝不入库）----
+data/auth.json
+
+# ---- 用户数据（页面内容，默认入库；不想让文档进版本库就取消下一行注释）----
+# data/pages.json
+
+# ---- 依赖与编辑器 ----
+node_modules/
+.DS_Store
