@@ -16,7 +16,7 @@
       "space": "default",
       "parent": null,
       "title": "欢迎使用 DocLight",
-      "content": "<h1>欢迎使用 DocLight ✦</h1>\n<p>这是一个<b>轻量的可视化文档站</b>：浏览器里直接排版，保存即刻生效。零依赖、单文件后端、数据就是一份 JSON。</p>\n<blockquote><p>设计理念 —— 简洁优雅、开箱即用；写作本身不该比写下的内容更费劲。</p></blockquote>\n<h2>它有什么</h2>\n<ul>\n  <li><b>可视化编辑</b>：所见即所得工具栏，标题、粗斜体、列表、引用、代码块一应俱全</li>\n  <li><b>深浅色适配</b>：自动跟随系统外观，也可手动切换并记住选择</li>\n  <li><b>零依赖</b>：纯 Node.js 原生模块驱动，无需 npm install</li>\n  <li><b>自动找端口</b>：端口被占用时自动探测下一个空闲端口</li>\n</ul>\n<h2>三步上手</h2>\n<ol>\n  <li>点击右上角 <b>编辑</b> 进入编辑模式；</li>\n  <li>像使用字处理软件一样直接排版；</li>\n  <li>按 <code>Ctrl / ⌘ + S</code> 或点击 <b>保存</b> 即可发布。</li>\n</ol>\n<hr>\n<h2>样式一览</h2>\n<p>行内代码长这样：<code>npm run docs</code>；代码块支持多行：</p>\n<pre><code>// DocLight 无需任何安装步骤\nnode server.js\n// → ✨ http://localhost:4173</code></pre>\n<p>准备好了？去看看<a href=\"#/guide\">《可视化编辑指南》</a>吧。</p>",
+      "content": "<h1>欢迎使用 DocLight ✦</h1>\n<p>这是一个<b>轻量的可视化文档站</b>：浏览器里直接排版，保存即刻生效。TypeScript 源码、浏览器单页应用与数据文件都在同一项目中。</p>\n<blockquote><p>设计理念 —— 简洁优雅、开箱即用；写作本身不该比写下的内容更费劲。</p></blockquote>\n<h2>它有什么</h2>\n<ul>\n  <li><b>可视化编辑</b>：所见即所得工具栏，标题、粗斜体、列表、引用、代码块一应俱全</li>\n  <li><b>深浅色适配</b>：自动跟随系统外观，也可手动切换并记住选择</li>\n  <li><b>TypeScript 构建</b>：首次执行 <code>npm install</code>，再用 <code>npm start</code> 编译并启动</li>\n  <li><b>自动找端口</b>：端口被占用时自动探测下一个空闲端口</li>\n</ul>\n<h2>三步上手</h2>\n<ol>\n  <li>点击右上角 <b>编辑</b> 进入编辑模式；</li>\n  <li>像使用字处理软件一样直接排版；</li>\n  <li>按 <code>Ctrl / ⌘ + S</code> 或点击 <b>保存</b> 即可发布。</li>\n</ol>\n<hr>\n<h2>样式一览</h2>\n<p>行内代码长这样：<code>npm run build</code>；代码块支持多行：</p>\n<pre><code>// 首次运行先安装依赖\nnpm install\nnpm start\n// → http://localhost:4173</code></pre>\n<p>准备好了？去看看<a href=\"#/guide\">《可视化编辑指南》</a>吧。</p>",
       "createdAt": 1787769399200,
       "updatedAt": 1787769399200
     },
@@ -34,7 +34,7 @@
       "space": "default",
       "parent": null,
       "title": "更新日志",
-      "content": "<h1>更新日志</h1>\n<h2>v1.0.0 · 首发</h2>\n<ul>\n  <li>🎉 可视化编辑器：标题、文本样式、列表、引用、代码块、链接与图片</li>\n  <li>🌗 深浅色主题：跟随系统 + 手动三态切换，偏好本地记忆</li>\n  <li>📄 页面管理：新建、重命名、删除、侧栏搜索</li>\n  <li>🛡 服务端内容清洗，拦截脚本注入</li>\n  <li>🔌 零依赖启动，空闲端口自动探测</li>\n</ul>",
+      "content": "<h1>更新日志</h1>\n<h2>v1.0.0 · 首发</h2>\n<ul>\n  <li>🎉 可视化编辑器：标题、文本样式、列表、引用、代码块、链接与图片</li>\n  <li>🌗 深浅色主题：跟随系统 + 手动三态切换，偏好本地记忆</li>\n  <li>📄 页面管理：新建、重命名、删除、侧栏搜索</li>\n  <li>🛡 服务端内容清洗，拦截脚本注入</li>\n  <li>🔌 TypeScript 构建，空闲端口自动探测</li>\n</ul>",
       "createdAt": 1787769399198,
       "updatedAt": 1787769399198
     }

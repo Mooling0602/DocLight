@@ -1,33 +1,102 @@
 /* ============================================================
-   DocLight · app.js — 前端单页应用（无框架）
+   DocLight · app.ts — 前端单页应用（无框架）
    v3 空间模型：spaces[] / pages[]（页面归属空间，空间内嵌套）
    ============================================================ */
 'use strict';
+
+interface Space {
+  slug: string;
+  title: string;
+  desc: string;
+  home: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface PageMeta {
+  slug: string;
+  space: string;
+  parent: string | null;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface Page extends PageMeta {
+  content: string;
+}
+
+interface TreeResponse {
+  spaces: Space[];
+  pages: PageMeta[];
+}
+
+interface AuthStateResponse {
+  mode: 'setup' | 'ready';
+  authed: boolean;
+  user: string | null;
+  salt: string;
+  iters: number;
+}
+
+interface AuthChallengeResponse {
+  nonce: string;
+  salt: string;
+  iters: number;
+  user: string;
+}
+
+interface DeleteSpaceResponse {
+  ok: true;
+  removedSpace: string;
+  removedPages: string[];
+}
+
+interface ApiError {
+  error?: string;
+  needAuth?: boolean;
+}
+
+interface AppState {
+  spaces: Space[];
+  pages: PageMeta[];
+  page: Page | null;
+  space: Space | null;
+  dirty: boolean;
+  pendingEdit: string | null;
+  authed: boolean;
+  authSetup: boolean;
+  accountName: string | null;
+  user: string | null;
+  salt: string;
+  iters: number;
+}
 
 /* ---------------- 工具函数 ---------------- */
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
-function esc(str) {
+function esc(str: unknown): string {
   return String(str ?? '').replace(/[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-async function api(path, opts = {}) {
+async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const res = await fetch('/api/' + path, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   });
-  let data = {};
+  let data: T | ApiError = {};
   try { data = await res.json(); } catch { /* ignore */ }
   if (!res.ok) {
-    if (res.status === 401 && data.needAuth) { S.authed = false; renderAuthUI(); }
-    throw new Error(data.error || `请求失败 (${res.status})`);
+    const error = data as ApiError;
+    if (res.status === 401 && error.needAuth) { S.authed = false; renderAuthUI(); }
+    throw new Error(error.error || `请求失败 (${res.status})`);
   }
-  return data;
+  return data as T;
 }
 
-function relTime(ts) {
+function relTime(ts: number): string {
   const d = Date.now() - ts;
   if (d < 60e3) return '刚刚';
   if (d < 3600e3) return Math.floor(d / 60e3) + ' 分钟前';
@@ -36,9 +105,9 @@ function relTime(ts) {
   return new Date(ts).toLocaleDateString('zh-CN');
 }
 
-function wordCount(html) {
+function wordCount(html: unknown): number {
   const box = document.createElement('div');
-  box.innerHTML = html || '';
+  box.innerHTML = String(html || '');
   const text = box.textContent.trim();
   if (!text) return 0;
   const cjk = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
@@ -46,13 +115,13 @@ function wordCount(html) {
   return cjk + words;
 }
 
-function normalizeUrl(u) {
-  u = String(u || '').trim();
-  if (!u) return '';
-  if (/^(https?:\/\/|mailto:|#|\/)/i.test(u)) return u;
-  return 'https://' + u;
+function normalizeUrl(u: unknown): string {
+  const value = String(u || '').trim();
+  if (!value) return '';
+  if (/^(https?:\/\/|mailto:|#|\/)/i.test(value)) return value;
+  return 'https://' + value;
 }
-function isSafeSrc(u) {
+function isSafeSrc(u: unknown): boolean {
   return /^(https?:\/\/|\/|data:image\/)/i.test(String(u));
 }
 
@@ -136,7 +205,7 @@ async function hmacHex(keyHex, msg) {
 }
 
 /* ---------------- 全局状态 ---------------- */
-const S = {
+const S: AppState = {
   spaces: [],         // [{slug,title,desc,home,...}]
   pages: [],          // [{slug,space,parent,title,...}]
   page: null,         // 当前页面详情
@@ -210,7 +279,7 @@ function openModal(innerHTML) {
   return m;
 }
 
-function confirmModal({ title, desc, ok = '确定', danger = false }) {
+function confirmModal({ title, desc, ok = '确定', danger = false }: { title: string; desc?: string; ok?: string; danger?: boolean }): Promise<boolean> {
   return new Promise(resolve => {
     let done = false;
     const finish = v => { if (!done) { done = true; closeModal(); resolve(v); } };
@@ -228,7 +297,7 @@ function confirmModal({ title, desc, ok = '确定', danger = false }) {
   });
 }
 
-function promptModal({ title, label, value = '', placeholder = '', ok = '确定' }) {
+function promptModal({ title, label, value = '', placeholder = '', ok = '确定' }: { title: string; label?: string; value?: string; placeholder?: string; ok?: string }): Promise<string | null> {
   return new Promise(resolve => {
     let done = false;
     const finish = v => { if (!done) { done = true; closeModal(); resolve(v); } };
@@ -329,7 +398,7 @@ applyTheme(savedPref);
    ============================================================ */
 async function refreshAuthState() {
   try {
-    const st = await api('auth/state');
+    const st = await api<AuthStateResponse>('auth/state');
     S.authSetup = st.mode === 'setup';
     S.authed = !!st.authed;
     S.user = st.authed ? (st.user || null) : null;
@@ -358,7 +427,7 @@ function renderAuthUI() {
   };
 }
 
-function showLoginDialog({ setup = false, then } = {}) {
+function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () => void } = {}) {
   const m = openModal(`
     <h3>${setup ? '初始化站长账号' : '登录 DocLight'}</h3>
     <p class="desc">${setup
@@ -388,7 +457,7 @@ function showLoginDialog({ setup = false, then } = {}) {
         const ks = await deriveKeyHex(pass, S.salt, S.iters);
         await api('auth/setup', { method: 'POST', body: JSON.stringify({ user, ks }) });
       } else {
-        const ch = await api('auth/challenge');
+        const ch = await api<AuthChallengeResponse>('auth/challenge');
         const k = await deriveKeyHex(pass, ch.salt, ch.iters);
         const proof = await hmacHex(k, ch.nonce);
         await api('auth/login', { method: 'POST', body: JSON.stringify({ nonce: ch.nonce, proof }) });
@@ -709,7 +778,7 @@ function enterEdit(focus = true) {
 
 async function exitEdit(reloadFromPage) {
   if (reloadFromPage && S.page) {
-    try { S.page = await api('pages/' + encodeURIComponent(S.page.slug)); } catch { /* keep */ }
+    try { S.page = await api<Page>('pages/' + encodeURIComponent(S.page.slug)); } catch { /* keep */ }
   }
   S.dirty = false;
   if (S.page) renderArticle(S.page);
@@ -722,7 +791,7 @@ async function saveDoc() {
   const content = el.editor.innerHTML;
   el.btnSave.disabled = true;
   try {
-    const updated = await api('pages/' + encodeURIComponent(S.page.slug), {
+    const updated = await api<Page>('pages/' + encodeURIComponent(S.page.slug), {
       method: 'PUT',
       body: JSON.stringify({ title, content }),
     });
@@ -767,7 +836,7 @@ function exec(cmd, val = null) {
 function currentBlockTag() {
   let n = getSelection()?.anchorNode;
   while (n && n !== el.editor) {
-    if (n.nodeType === 1 && /^(H1|H2|H3|P|PRE|BLOCKQUOTE)$/.test(n.tagName)) return n.tagName;
+    if (n.nodeType === Node.ELEMENT_NODE && /^(H1|H2|H3|P|PRE|BLOCKQUOTE)$/.test((n as Element).tagName)) return (n as Element).tagName;
     n = n.parentNode;
   }
   return null;
@@ -868,7 +937,7 @@ function clearFormatting() {
 
   const codes = [];
   const walker = document.createTreeWalker(el.editor, NodeFilter.SHOW_ELEMENT, {
-    acceptNode: n => (n.tagName === 'CODE' && !n.closest('pre') && orig.intersectsNode(n))
+    acceptNode: n => ((n as Element).tagName === 'CODE' && !(n as Element).closest('pre') && orig.intersectsNode(n))
       ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
   });
   while (walker.nextNode()) codes.push(walker.currentNode);
@@ -993,7 +1062,7 @@ async function createSpaceFlow() {
   if (title === null) return;
   if (!title) { toast('空间名称不能为空'); return; }
   try {
-    const space = await api('spaces', { method: 'POST', body: JSON.stringify({ title }) });
+    const space = await api<Space>('spaces', { method: 'POST', body: JSON.stringify({ title }) });
     S.spaces.push(space);
     toast('空间已创建 ✓');
     navigate('/' + encodeURIComponent(space.slug));
@@ -1005,7 +1074,7 @@ async function renameSpaceFlow(space) {
   const title = await promptModal({ title: '重命名空间', value: space.title, ok: '保存' });
   if (title === null || !title || title === space.title) return;
   try {
-    const updated = await api('spaces/' + encodeURIComponent(space.slug), {
+    const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
       method: 'PUT', body: JSON.stringify({ title }),
     });
     const i = S.spaces.findIndex(s => s.slug === space.slug);
@@ -1028,7 +1097,7 @@ async function deleteSpaceFlow(space) {
   });
   if (!go) return;
   try {
-    const r = await api('spaces/' + encodeURIComponent(space.slug), { method: 'DELETE' });
+    const r = await api<DeleteSpaceResponse>('spaces/' + encodeURIComponent(space.slug), { method: 'DELETE' });
     S.pages = S.pages.filter(p => p.space !== space.slug);
     S.spaces = S.spaces.filter(s => s.slug !== space.slug);
     toast(r.removedPages.length ? `已删除空间及 ${r.removedPages.length} 个页面` : '已删除空间');
@@ -1051,7 +1120,7 @@ async function createPageFlow(spaceSlug, parent = null) {
   if (title === null) return;
   if (!title) { toast('标题不能为空'); return; }
   try {
-    const page = await api('pages', {
+    const page = await api<Page>('pages', {
       method: 'POST',
       body: JSON.stringify({ title, space: spaceSlug, parent }),
     });
@@ -1062,7 +1131,7 @@ async function createPageFlow(spaceSlug, parent = null) {
   } catch (err) { toast(err.message, 3000); }
 }
 
-async function renameFlow(pg = S.page) {
+async function renameFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const title = await promptModal({ title: '重命名页面', value: pg.title, ok: '保存' });
   if (title === null || !title || title === pg.title) return;
@@ -1079,7 +1148,7 @@ async function renameFlow(pg = S.page) {
   } catch (err) { toast(err.message, 3000); }
 }
 
-async function slugFlow(pg = S.page) {
+async function slugFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const value = await promptModal({
     title: '编辑链接 slug',
@@ -1096,7 +1165,7 @@ async function slugFlow(pg = S.page) {
   if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
   try {
     const old = pg.slug;
-    const updated = await api('pages/' + encodeURIComponent(old), {
+    const updated = await api<Page>('pages/' + encodeURIComponent(old), {
       method: 'PUT', body: JSON.stringify({ slug: ns }),
     });
     S.pages.forEach(p => { if (p.parent === old) p.parent = ns; });
@@ -1109,7 +1178,7 @@ async function slugFlow(pg = S.page) {
   } catch (err) { toast(err.message, 3000); }
 }
 
-async function moveFlow(pg = S.page) {
+async function moveFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const banned = new Set([pg.slug, ...descendantSlugsOf(pg.slug)]);
   const options = [];
@@ -1147,7 +1216,7 @@ async function moveFlow(pg = S.page) {
     const toParent = pick.startsWith('p:') ? pick.slice(2) : null;
     if (toSpace === pg.space && toParent === (pg.parent || null)) { toast('位置未变化'); return; }
     try {
-      const updated = await api('pages/' + encodeURIComponent(pg.slug), {
+      const updated = await api<Page>('pages/' + encodeURIComponent(pg.slug), {
         method: 'PUT', body: JSON.stringify({ space: toSpace, parent: toParent }),
       });
       const i = S.pages.findIndex(p => p.slug === pg.slug);
@@ -1162,7 +1231,7 @@ async function moveFlow(pg = S.page) {
   activeModalDone = () => finish(false);
 }
 
-async function deleteFlow(pg = S.page) {
+async function deleteFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const kidCount = descendantSlugsOf(pg.slug).size;
   const go = await confirmModal({
@@ -1184,6 +1253,17 @@ async function deleteFlow(pg = S.page) {
       renderSidebar(el.search.value);
     }
   } catch (err) { toast(err.message, 3000); }
+}
+
+function dispatchPageAction(action: string, page: PageMeta | null = S.page): void {
+  if (!page) return;
+  switch (action) {
+    case 'child': createPageFlow(page.space, page.slug); break;
+    case 'rename': renameFlow(page); break;
+    case 'slug': slugFlow(page); break;
+    case 'move': moveFlow(page); break;
+    case 'delete': deleteFlow(page); break;
+  }
 }
 
 /* ============================================================
@@ -1276,10 +1356,10 @@ function renderSpace(space) {
   renderSidebar(el.search.value);
 }
 
-async function openPage(slug) {
-  let page;
+async function openPage(slug: string): Promise<void> {
+  let page: Page;
   try {
-    page = await api('pages/' + encodeURIComponent(slug));
+    page = await api<Page>('pages/' + encodeURIComponent(slug));
   } catch {
     toast('页面不存在，已返回空间总览');
     navigate('/');
@@ -1360,10 +1440,10 @@ window.addEventListener('popstate', route);
 
 // 站内链接接管
 document.addEventListener('click', e => {
-  const a = e.target.closest('a[data-nav]');
+  const a = e.target instanceof Element ? e.target.closest('a[data-nav]') : null;
   if (!a || e.metaKey || e.ctrlKey) return;
   e.preventDefault();
-  const go = () => navigate(a.getAttribute('href'));
+  const go = () => navigate(a.getAttribute('href') || '/');
   if (S.dirty && !el.editWrap.hidden) {
     confirmModal({ title: '有未保存的修改', desc: '要在离开前保存吗？', ok: '保存并离开' })
       .then(yes => { if (yes) saveDoc().then(go); else go(); });
@@ -1417,7 +1497,8 @@ $$('#menu-theme .menu-item').forEach(b =>
   b.addEventListener('click', () => { applyTheme(b.dataset.pref); closeMenus(null); }));
 
 document.addEventListener('click', e => {
-  if (!e.target.closest('.dropdown-wrap') && !e.target.closest('.row-menu')) closeMenus(null);
+  const target = e.target instanceof Element ? e.target : null;
+  if (!target?.closest('.dropdown-wrap') && !target?.closest('.row-menu')) closeMenus(null);
 });
 
 $('#title-input').addEventListener('input', markDirty);
@@ -1464,7 +1545,7 @@ el.list.addEventListener('click', e => {
 (async function boot() {
   el.editor.dataset.placeholder = '这里空空如也……开始书写你的第一段文字吧 ✍️';
   try {
-    const tree = await api('tree');
+    const tree = await api<TreeResponse>('tree');
     S.spaces = tree.spaces || [];
     S.pages = tree.pages || [];
   } catch (err) {
