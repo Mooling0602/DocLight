@@ -39,6 +39,20 @@ async function main(): Promise<void> {
   await wait(20);
   assert.equal($('#menu-theme').hidden, true, 'theme menu should close');
 
+  click('#btn-theme');
+  click('#menu-theme [data-pref="light"]');
+  await wait(20);
+  assert.equal($('#icon-light').hidden, false, 'light theme icon should be visible');
+  assert.equal($('#icon-dark').hidden, true, 'dark theme icon should be hidden in light mode');
+  assert.equal($('#icon-light circle').getAttribute('fill'), 'currentColor', 'light icon should have a visible center');
+
+  click('#btn-theme');
+  click('#menu-theme [data-pref="dark"]');
+  await wait(20);
+  assert.equal($('#icon-dark').hidden, false, 'dark theme icon should be visible');
+  assert.equal($('#icon-light').hidden, true, 'light theme icon should be hidden in dark mode');
+  assert.equal($('#icon-dark path').getAttribute('fill'), 'currentColor', 'dark icon should have a visible fill');
+
   $('#cluster-view').hidden = false;
   click('#btn-more');
   await wait(20);
