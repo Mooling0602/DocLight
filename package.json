@@ -1,0 +1,23 @@
+{
+  "name": "doclight",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A lightweight, self-hosted visual documentation site.",
+  "scripts": {
+    "build": "npm run build:server && npm run build:client && npm run build:tests",
+    "build:server": "tsc --project tsconfig.server.json",
+    "build:client": "tsc --project tsconfig.client.json",
+    "build:tests": "tsc --project tsconfig.tests.json",
+    "start": "npm run build && node dist/server.js",
+    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^26.4.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -12,4 +12,6 @@ data/auth.json
 
 # ---- 依赖与编辑器 ----
 node_modules/
+dist/
+public/app.js
 .DS_Store

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * DocLight — 轻量文档站（零依赖）
+ * DocLight - lightweight TypeScript documentation site
  *
- *   node server.js            # 自动探测空闲端口并启动
- *   PORT=8080 node server.js  # 指定起始端口
+ *   npm start                 # 自动探测空闲端口并启动
+ *   PORT=8080 npm start       # 指定起始端口
  *
  * API:
  *   GET    /api/pages        页面列表（不含正文）
@@ -12,14 +12,53 @@
  *   PUT    /api/pages/:slug  更新 { title?, content? }
  *   DELETE /api/pages/:slug  删除
  */
-'use strict';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import * as path from 'node:path';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+interface Space {
+  slug: string;
+  title: string;
+  desc: string;
+  home: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
 
-const ROOT = __dirname;
+interface Page {
+  slug: string;
+  space: string;
+  parent: string | null;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface Database {
+  version: 3;
+  spaces: Space[];
+  pages: Page[];
+}
+
+interface AuthRecord {
+  user: string | null;
+  salt: string;
+  iters: number;
+  stored: string | null;
+}
+
+interface Session {
+  user: string;
+  exp: number;
+}
+
+type RequestBody = Record<string, unknown>;
+
+// The compiled entry point lives in dist/, while public/ and data/ stay at the project root.
+const ROOT = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'pages.json');
@@ -27,7 +66,7 @@ const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- 数据层 */
 
-function seedDb() {
+function seedDb(): Database {
   const now = Date.now();
   return {
     version: 3,
@@ -42,13 +81,13 @@ function seedDb() {
       title: '欢迎使用 DocLight',
       content: [
         '<h1>欢迎使用 DocLight ✦</h1>',
-        '<p>这是一个<b>轻量的可视化文档站</b>：浏览器里直接排版，保存即刻生效。零依赖、单文件后端、数据就是一份 JSON。</p>',
+        '<p>这是一个<b>轻量的可视化文档站</b>：浏览器里直接排版，保存即刻生效。TypeScript 源码、浏览器单页应用与数据文件都在同一项目中。</p>',
         '<blockquote><p>设计理念 —— 简洁优雅、开箱即用；写作本身不该比写下的内容更费劲。</p></blockquote>',
         '<h2>它有什么</h2>',
         '<ul>',
         '  <li><b>可视化编辑</b>：所见即所得工具栏，标题、粗斜体、列表、引用、代码块一应俱全</li>',
         '  <li><b>深浅色适配</b>：自动跟随系统外观，也可手动切换并记住选择</li>',
-        '  <li><b>零依赖</b>：纯 Node.js 原生模块驱动，无需 npm install</li>',
+        '  <li><b>TypeScript 构建</b>：首次执行 <code>npm install</code>，再用 <code>npm start</code> 编译并启动</li>',
         '  <li><b>自动找端口</b>：端口被占用时自动探测下一个空闲端口</li>',
         '</ul>',
         '<h2>三步上手</h2>',
@@ -59,8 +98,8 @@ function seedDb() {
         '</ol>',
         '<hr>',
         '<h2>样式一览</h2>',
-        '<p>行内代码长这样：<code>npm run docs</code>；代码块支持多行：</p>',
-        '<pre><code>// DocLight 无需任何安装步骤\nnode server.js\n// → ✨ http://localhost:4173</code></pre>',
+        '<p>行内代码长这样：<code>npm run build</code>；代码块支持多行：</p>',
+        '<pre><code>// 首次运行先安装依赖\nnpm install\nnpm start\n// → http://localhost:4173</code></pre>',
         '<p>准备好了？去看看<a href="#/guide">《可视化编辑指南》</a>吧。</p>',
       ].join('\n'),
       createdAt: now,
@@ -123,7 +162,7 @@ function seedDb() {
         '  <li>🌗 深浅色主题：跟随系统 + 手动三态切换，偏好本地记忆</li>',
         '  <li>📄 页面管理：新建、重命名、删除、侧栏搜索</li>',
         '  <li>🛡 服务端内容清洗，拦截脚本注入</li>',
-        '  <li>🔌 零依赖启动，空闲端口自动探测</li>',
+        '  <li>🔌 TypeScript 构建，空闲端口自动探测</li>',
         '</ul>',
       ].join('\n'),
       createdAt: now - 2,
@@ -133,7 +172,7 @@ function seedDb() {
   };
 }
 
-function ensureData() {
+function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) {
     writeDb(seedDb());
@@ -141,8 +180,8 @@ function ensureData() {
   }
 }
 
-function descendantsOf(list, slug) {
-  const out = new Set();
+function descendantsOf(list: Page[], slug: string): Set<string> {
+  const out = new Set<string>();
   let grew = true;
   while (grew) {
     grew = false;
@@ -152,7 +191,7 @@ function descendantsOf(list, slug) {
   }
   return out;
 }
-function readDb() {
+function readDb(): Database {
   try {
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     if (raw && raw.version === 3) return { version: 3, spaces: raw.spaces || [], pages: raw.pages || [] };
@@ -162,7 +201,7 @@ function readDb() {
   writeDb(fresh);
   return fresh;
 }
-function writeDb(db) {
+function writeDb(db: Database): void {
   const tmp = DATA_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
   fs.renameSync(tmp, DATA_FILE);
@@ -170,7 +209,7 @@ function writeDb(db) {
 
 /* ---------------------------------------------------------- 内容清洗(XSS) */
 
-function sanitizeHtml(html) {
+function sanitizeHtml(html: unknown): string {
   return String(html || '')
     .replace(/<\s*(script|style|iframe|object|embed|link|meta|base|form)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
     .replace(/<\/?\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*>/gi, '')
@@ -180,7 +219,7 @@ function sanitizeHtml(html) {
     .slice(0, 500 * 1024);
 }
 
-function randomToken(len = 7) {
+function randomToken(len = 7): string {
   const abc = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let t = '';
   for (let i = 0; i < len; i++) t += abc[Math.floor(Math.random() * abc.length)];
@@ -189,7 +228,7 @@ function randomToken(len = 7) {
 const SLUG_RE = /^[a-z0-9_]{1,80}$/;
 const RESERVED_SLUGS = new Set(['spaces']); // 系统关键字别名，不可被页面占用;
 
-function slugify(title) {
+function slugify(title: unknown): string {
   // 语雀风：小写字母/数字/下划线；非英文标题回退随机 token
   const s = String(title || '').trim().toLowerCase()
     .replace(/[\s\-.]+/g, '_')
@@ -200,7 +239,7 @@ function slugify(title) {
 
 /* ------------------------------------------------------------ HTTP 工具 */
 
-function json(res, code, obj) {
+function json(res: ServerResponse, code: number, obj: unknown): void {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -208,9 +247,9 @@ function json(res, code, obj) {
   });
   res.end(body);
 }
-function readBody(req) {
+function readBody(req: IncomingMessage): Promise<RequestBody> {
   return new Promise((resolve, reject) => {
-    let size = 0; const chunks = [];
+    let size = 0; const chunks: Buffer[] = [];
     req.on('data', (c) => {
       size += c.length;
       if (size > BODY_LIMIT) { reject(Object.assign(new Error('body too large'), { code: 413 })); req.destroy(); return; }
@@ -224,7 +263,7 @@ function readBody(req) {
   });
 }
 
-const MIME = {
+const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -235,7 +274,7 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-function serveStatic(res, urlPath) {
+function serveStatic(res: ServerResponse, urlPath: string): void {
   let rel = decodeURIComponent(urlPath.split('?')[0]);
   if (rel === '/' || rel === '') rel = '/index.html';
   let file = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -257,15 +296,15 @@ function serveStatic(res, urlPath) {
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const KDF_ITERS = 100000;              // PBKDF2-SHA256 迭代次数
 const SESSION_TTL = 7 * 86400e3;       // 会话滑动续期 7 天
-const sessions = new Map();            // token -> { user, exp }
-const nonces = new Map();              // 登录挑战（一次性，60s）
-const failLog = new Map();             // 登录失败限速（按 IP）
+const sessions = new Map<string, Session>(); // token -> { user, exp }
+const nonces = new Map<string, number>();    // 登录挑战（一次性，60s）
+const failLog = new Map<string, { n: number; ts: number }>(); // 登录失败限速（按 IP）
 
-function readAuth() {
+function readAuth(): AuthRecord | null {
   try { return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8')); } catch { return null; }
 }
-function writeAuth(a) { fs.writeFileSync(AUTH_FILE, JSON.stringify(a, null, 2), { mode: 0o600 }); }
-function ensureAuthRecord() {
+function writeAuth(auth: AuthRecord): void { fs.writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), { mode: 0o600 }); }
+function ensureAuthRecord(): AuthRecord {
   let a = readAuth();
   if (!a) {
     a = { user: null, salt: crypto.randomBytes(16).toString('hex'), iters: KDF_ITERS, stored: null };
@@ -274,25 +313,25 @@ function ensureAuthRecord() {
   }
   return a;
 }
-function hmacStored(storedHex, nonce) {
+function hmacStored(storedHex: string, nonce: string): string {
   return crypto.createHmac('sha256', Buffer.from(storedHex, 'hex')).update(nonce).digest('hex');
 }
-function ipOf(req) { return req.socket.remoteAddress || 'unknown'; }
-function rateLimited(req) {
+function ipOf(req: IncomingMessage): string { return req.socket.remoteAddress || 'unknown'; }
+function rateLimited(req: IncomingMessage): boolean {
   const f = failLog.get(ipOf(req));
   return !!(f && f.n >= 8 && Date.now() - f.ts < 120e3);
 }
-function noteFail(req) {
+function noteFail(req: IncomingMessage): void {
   const ip = ipOf(req);
   const f = failLog.get(ip) || { n: 0, ts: Date.now() };
   if (Date.now() - f.ts >= 120e3) { f.n = 0; f.ts = Date.now(); }
   f.n++; failLog.set(ip, f);
 }
-function parseSessionToken(req) {
+function parseSessionToken(req: IncomingMessage): string | null {
   const m = /(?:^|;\s*)dl_sess=([a-f0-9]{64})/.exec(req.headers.cookie || '');
   return m ? m[1] : null;
 }
-function getSession(req) {
+function getSession(req: IncomingMessage): { user: string; token: string } | null {
   const token = parseSessionToken(req);
   if (!token) return null;
   const s = sessions.get(token);
@@ -301,19 +340,19 @@ function getSession(req) {
   s.exp = Date.now() + SESSION_TTL; // 滑动续期
   return { user: s.user, token };
 }
-function issueSession(res, user) {
+function issueSession(res: ServerResponse, user: string): void {
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, { user, exp: Date.now() + SESSION_TTL });
   res.setHeader('Set-Cookie', `dl_sess=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${7 * 86400}`);
   return json(res, 200, { ok: true, user });
 }
-function purgeExpired() {
+function purgeExpired(): void {
   const now = Date.now();
   for (const [k, v] of nonces) if (v < now) nonces.delete(k);
   for (const [k, v] of sessions) if (v.exp < now) sessions.delete(k);
 }
 
-async function handleAuth(req, res, parts) {
+async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: string[]): Promise<void> {
   const action = parts[2] || '';
   const a = ensureAuthRecord();
 
@@ -356,6 +395,7 @@ async function handleAuth(req, res, parts) {
     const exp = nonces.get(nonce);
     if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
     nonces.delete(nonce); // 一次性，防重放
+    if (!a.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
     const expected = hmacStored(a.stored, nonce);
     const proof = String(body.proof || '');
     const ok = /^[a-f0-9]{64}$/.test(proof) &&
@@ -377,7 +417,7 @@ async function handleAuth(req, res, parts) {
 
 /* --------------------------------------------------------------- 路由 */
 
-async function handleApi(req, res, pathname) {
+async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
   const parts = pathname.split('/').filter(Boolean); // ['api','pages',':slug?']
   const key = parts[1] || '';
 
@@ -407,11 +447,11 @@ async function handleApi(req, res, pathname) {
       const title = String(body.title || '').trim().slice(0, 120);
       if (!title) return json(res, 400, { error: '请提供空间名称' });
       const desc = String(body.desc || '').trim().slice(0, 200);
-      const taken = s => db.pages.some(p => p.slug === s) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
+      const taken = (s: string) => db.pages.some(p => p.slug === s) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
       let slug = slugify(title);
       while (taken(slug)) slug = slugify(title) + '_' + randomToken(4);
       const now = Date.now();
-      const space = { slug, title, desc, home: null, createdAt: now, updatedAt: now };
+      const space: Space = { slug, title, desc, home: null, createdAt: now, updatedAt: now };
       db.spaces.push(space);
       writeDb(db);
       return json(res, 201, space);
@@ -528,11 +568,11 @@ async function handleApi(req, res, pathname) {
       if (!pp) return json(res, 404, { error: '目标父级不存在' });
       if (pp.space !== space) return json(res, 400, { error: '父级必须位于同一空间' });
     }
-    const taken = s => db.pages.some(p => p.slug === s) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
+    const taken = (s: string) => db.pages.some(p => p.slug === s) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
     let slug = slugify(title);
     const base = slug;
     while (taken(slug)) slug = base + '_' + randomToken(4);
-    const page = { slug, space, parent, title, content: '', createdAt: Date.now(), updatedAt: Date.now() };
+    const page: Page = { slug, space, parent, title, content: '', createdAt: Date.now(), updatedAt: Date.now() };
     db.pages.push(page);
     writeDb(db);
     return json(res, 201, page);
@@ -541,32 +581,36 @@ async function handleApi(req, res, pathname) {
   return json(res, 404, { error: 'Not Found' });
 }
 
-function handler(req, res) {
-  const pathname = new URL(req.url, 'http://x').pathname;
+function handler(req: IncomingMessage, res: ServerResponse): void {
+  const pathname = new URL(req.url || '/', 'http://x').pathname;
   const started = Date.now();
   res.on('finish', () => {
     console.log(`${req.method} ${pathname} → ${res.statusCode} (${Date.now() - started}ms)`);
   });
 
   Promise.resolve(pathname.startsWith('/api/') ? handleApi(req, res, pathname) : null)
-    .catch((err) => json(res, err.code || 500, { error: err.message || '服务器内部错误' }));
+    .catch((err: unknown) => {
+      const error = err as { code?: number; message?: string };
+      json(res, error.code || 500, { error: error.message || '服务器内部错误' });
+    });
 
   if (!pathname.startsWith('/api/')) serveStatic(res, pathname);
 }
 
 /* ----------------------------------------------------- 空闲端口探测启动 */
 
-function listen(server, port, retriesLeft) {
+function listen(server: Server, port: number, retriesLeft: number): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', (err) => {
-      if (err.code === 'EADDRINUSE' && retriesLeft > 0) resolve(listen(server, port + 1, retriesLeft - 1));
+      const error = err as NodeJS.ErrnoException;
+      if (error.code === 'EADDRINUSE' && retriesLeft > 0) resolve(listen(server, port + 1, retriesLeft - 1));
       else reject(err);
     });
     server.listen(port, () => resolve(port));
   });
 }
 
-async function main() {
+async function main(): Promise<void> {
   ensureData();
   const startPort = Number(process.env.PORT) || 4173;
   const server = http.createServer(handler);
@@ -577,7 +621,7 @@ async function main() {
     console.log(`    本机访问  http://localhost:${port}`);
     console.log(`    数据文件  ${DATA_FILE}\n`);
   } catch (err) {
-    console.error('启动失败:', err.message);
+    console.error('启动失败:', err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
