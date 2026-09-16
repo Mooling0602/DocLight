@@ -5,6 +5,12 @@
  *   npm start                 # auto-detect a free port and start
  *   PORT=8080 npm start       # start from the given port
  *
+ * Environment:
+ *   PORT                 starting TCP port (default 4173)
+ *   DOCLIGHT_HOST        bind address (default: all interfaces)
+ *   DOCLIGHT_DATA_DIR    writable data directory (default: <root>/data)
+ *   DOCLIGHT_STRICT_PORT fail instead of scanning for the next free port
+ *
  * API:
  *   GET    /api/pages        page list (without content)
  *   GET    /api/pages/:slug  single page detail
@@ -60,7 +66,12 @@ type RequestBody = Record<string, unknown>;
 // The compiled entry point lives in dist/, while public/ and data/ stay at the project root.
 const ROOT = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+// The Nix package ships in a read-only store path, so everything writable must be
+// relocatable. DOCLIGHT_DATA_DIR keeps the project layout as the default while
+// letting a service redirect state (and its auth store) to a persistent volume.
+const DATA_DIR = process.env.DOCLIGHT_DATA_DIR
+  ? path.resolve(process.env.DOCLIGHT_DATA_DIR)
+  : path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'pages.json');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
@@ -599,23 +610,30 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
 
 /* ----------------------------------------------------- 空闲端口探测启动 */
 
-function listen(server: Server, port: number, retriesLeft: number): Promise<number> {
+function listen(server: Server, port: number, retriesLeft: number, host?: string): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', (err) => {
       const error = err as NodeJS.ErrnoException;
-      if (error.code === 'EADDRINUSE' && retriesLeft > 0) resolve(listen(server, port + 1, retriesLeft - 1));
+      if (error.code === 'EADDRINUSE' && retriesLeft > 0) resolve(listen(server, port + 1, retriesLeft - 1, host));
       else reject(err);
     });
-    server.listen(port, () => resolve(port));
+    server.listen(port, host, () => resolve(port));
   });
 }
 
 async function main(): Promise<void> {
   ensureData();
   const startPort = Number(process.env.PORT) || 4173;
+  const host = process.env.DOCLIGHT_HOST || undefined; // undefined = all interfaces
+  // Port scanning suits interactive local use, but a service manager must fail
+  // loudly instead of silently drifting to another port (the reverse proxy points
+  // at one specific port). DOCLIGHT_STRICT_PORT=1 disables the scan.
+  const retries = process.env.DOCLIGHT_STRICT_PORT ? 0 : 50;
   const server = http.createServer(handler);
   try {
-    const port = await listen(server, startPort, 50);
+    const port = await listen(server, startPort, retries, host);
+    // The package may live in a read-only store, so a failure here is expected
+    // and harmless: the PID file is only a local-development convenience.
     try { fs.writeFileSync(path.join(ROOT, '.server.pid'), String(process.pid)); } catch { /* ignore */ }
     console.log(`\n  ✦ DocLight 文档站已就绪 (PID ${process.pid})`);
     console.log(`    本机访问  http://localhost:${port}`);

@@ -14,6 +14,18 @@ PORT=8080 npm start       # 指定起始端口
 
 启动后按提示访问，例如 `http://localhost:4173`。
 
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `4173` | 起始端口；被占用时自动向后探测 |
+| `DOCLIGHT_HOST` | 全部网卡 | 监听地址，如 `127.0.0.1` |
+| `DOCLIGHT_DATA_DIR` | `<项目根>/data` | 数据目录（`pages.json`、`auth.json`） |
+| `DOCLIGHT_STRICT_PORT` | 未设置 | 设为任意值时端口占用直接报错，不再向后探测 |
+
+> 作为 systemd 服务运行时建议同时设置 `DOCLIGHT_HOST`、`DOCLIGHT_DATA_DIR` 与
+> `DOCLIGHT_STRICT_PORT=1`：反向代理只指向一个固定端口，静默漂移会导致代理落空。
+
 ## 功能
 
 | 类别 | 能力 |
@@ -33,6 +45,7 @@ DocLight/
 │   ├── client/app.ts  # 前端单页应用
 │   └── tests/         # TypeScript 回归测试
 ├── data/pages.json    # 文档数据（首启自动生成示例）
+├── flake.nix          # Nix 打包 + NixOS 模块
 └── public/
     ├── index.html     # 应用骨架
     ├── style.css      # 主题变量 + 组件样式
@@ -45,6 +58,63 @@ DocLight/
 npm run build  # 编译服务端、客户端与测试
 npm test       # 编译并运行所有回归测试
 ```
+
+## Nix / NixOS
+
+仓库自带 `flake.nix`（已启用 flakes），无需本机安装 Node 或 npm：
+
+```bash
+# 直接运行，数据写入 ${XDG_DATA_HOME:-~/.local/share}/doclight
+nix run .
+
+# 换个起始端口 / 指定数据目录
+PORT=8080 nix run .
+DOCLIGHT_DATA_DIR=/tmp/docs nix run .
+
+# 构建到 ./result（命令名 doclight）
+nix build .#default
+./result/bin/doclight
+
+# 开发环境（nodejs_22 / typescript-language-server / nixfmt）
+nix develop
+
+# 跑回归测试（复用包定义，在构建目录里执行 npm test）
+nix flake check
+```
+
+`nix run .` 会在源码变化时重新编译；注意 flake 取的是 **Git 树**，新增文件需要先 `git add`（不必 commit）。
+
+NixOS 上也可以声明式部署：
+
+```nix
+{
+  inputs.doclight.url = "github:Mooling0602/DocLight";
+
+  # 在 NixOS 配置里
+  imports = [ inputs.doclight.nixosModules.default ];
+
+  services.doclight = {
+    enable = true;
+    port = 4173;
+    address = "127.0.0.1"; # 默认只监听回环，公网经反向代理
+    openFirewall = false;
+  };
+}
+```
+
+服务以 `DynamicUser` 运行，数据落在 `/var/lib/doclight`（systemd `StateDirectory`）。
+配置了 `address = "0.0.0.0"` 时才需要 `openFirewall = true`。
+
+> **为什么数据目录必须外置**：包安装到只读的 Nix store，而 DocLight 会写 `pages.json`
+> 和 `auth.json`。模块通过 `DOCLIGHT_DATA_DIR` 把状态重定向到 `/var/lib/doclight`，
+> 并设置 `DOCLIGHT_STRICT_PORT=1` 让端口占用直接失败——否则自动探测会静默漂到下一个
+> 端口，反向代理就落空了。
+
+### 支持的架构
+
+flake 声明 `x86_64-linux`、`aarch64-linux`、`aarch64-darwin`。构建只需 Node 与
+TypeScript，无平台相关代码；`package-lock.json` 里的 `optionalDependencies` 覆盖各平台
+的编译器版本，aarch64 上直接 `nix build` 即可。
 
 ## REST API
 

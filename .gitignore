@@ -15,3 +15,7 @@ node_modules/
 dist/
 public/app.js
 .DS_Store
+
+# ---- Nix 构建产物（nix build 生成的符号链接）----
+result
+result-*
