@@ -377,8 +377,14 @@ function applyTheme(pref) {
   root.classList.toggle('theme-dark', dark);
   root.classList.toggle('theme-light', !dark);
   Object.entries(themeIcons).forEach(([k, svg]) => {
-    svg.hidden = k !== pref;
-    svg.style.display = k === pref ? '' : 'none';
+    if (!svg) return;
+    const active = k === pref;
+    // `hidden` is an IDL attribute of HTMLElement only; SVGElement has none.
+    // Assigning `svg.hidden = x` just plants a JS expando and never touches the
+    // content attribute, so the [hidden] CSS rule below kept every icon hidden
+    // forever once an explicit light/dark preference was chosen.
+    svg.toggleAttribute('hidden', !active);
+    svg.style.display = active ? '' : 'none';
   });
   $$('#menu-theme .menu-item').forEach(b =>
     b.setAttribute('aria-checked', b.dataset.pref === pref ? 'true' : 'false'));

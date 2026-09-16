@@ -44,7 +44,7 @@
   --border-strong: #30333f;
   --text: #e6e8f0;
   --text-2: #a2a7ba;
-  --text-3: #666c80;
+  --text-3: #7b8299;
   --accent: #8386ff;
   --accent-hover: #999cff;
   --accent-soft: rgba(131, 134, 255, .14);
@@ -596,9 +596,14 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .tree-row .page-item { padding-right: 6px; }
 .row-menu { position: fixed; right: auto; z-index: 70; } /* 必须抵消 .menu 的 right:0，否则内联 left+right 同时生效会把菜单拉成通栏 */
 @media (hover: none) {
-  .row-actions { display: inline-flex; opacity: .55; }
-  .tree-row:hover .row-actions,
-  .tree-row.is-active .row-actions { opacity: 1; }
+  /* Touch devices have no hover to reveal these actions, so they must stay
+     permanently visible. Dimming them with opacity:.55 multiplied an already
+     dark --text-3 (about #3f4350 effectively in dark mode, roughly 1.9:1) —
+     below the 3:1 minimum for non-text UI, which made them nearly invisible on
+     phones. Use the solid --text-2 instead, without stacking transparency. */
+  .row-actions { display: inline-flex; }
+  .ra-btn { color: var(--text-2); }
+  .tree-row.is-active .ra-btn { color: var(--text); }
 }
 
 /* ---------- 空间模型：侧栏分区 / 空间索引页 ---------- */

@@ -2,15 +2,15 @@
 /**
  * DocLight - lightweight TypeScript documentation site
  *
- *   npm start                 # 自动探测空闲端口并启动
- *   PORT=8080 npm start       # 指定起始端口
+ *   npm start                 # auto-detect a free port and start
+ *   PORT=8080 npm start       # start from the given port
  *
  * API:
- *   GET    /api/pages        页面列表（不含正文）
- *   GET    /api/pages/:slug  单页详情
- *   POST   /api/pages        新建 { title }
- *   PUT    /api/pages/:slug  更新 { title?, content? }
- *   DELETE /api/pages/:slug  删除
+ *   GET    /api/pages        page list (without content)
+ *   GET    /api/pages/:slug  single page detail
+ *   POST   /api/pages        create { title }
+ *   PUT    /api/pages/:slug  update { title?, content? }
+ *   DELETE /api/pages/:slug  delete
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
