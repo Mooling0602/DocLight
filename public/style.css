@@ -299,14 +299,60 @@ html[data-theme-pref="dark"] #btn-theme {
 /* flex column：内容不足一屏时让备案页脚贴住底部（见 .site-footer 的 margin-top:auto） */
 .scroll-area { flex: 1; overflow-y: auto; scroll-behavior: smooth; display: flex; flex-direction: column; }
 
-/* 注意：这里必须显式写 width:100%，且不要再封 max-width。
+/* 注意：这里必须显式写 width:100%，且不要再给 .container 整体封 max-width。
    父级 .scroll-area 是 flex 列容器，祖先的 auto 外边距会取消 flex 在交叉轴上的
    stretch —— 只写 `max-width: 800px; margin: 0 auto` 时宽度会塌成 fit-content
    （实测仅 300px），「空间」标题于是缩到内容中间、卡片网格也跟着变窄。
-   显式 width:100% 把宽度定死，才能让标题贴左、网格铺满。 */
+   显式 width:100% 把宽度定死，才能让标题贴左、网格铺满。
+   阅读视图的限宽是例外，只加在 .article.is-reading 上（见下），并有明确的宽度。 */
 .container {
   width: 100%;
   padding: clamp(22px, 4vw, 46px) clamp(18px, 4.5vw, 40px) 90px;
+}
+
+/* ---------- 阅读视图宽度：默认限宽，桌面端可拖拽调整 ---------- */
+/* 「空间总览 / 空间索引 / 编辑器」铺满是新版布局的意图，但正文每行 150+ 字符反而难读，
+   所以单独给 .article.is-reading 限宽居中。宽度的唯一事实源是根元素上的 --reading-w，
+   由 app.ts 在拖拽/复位时写入并记进 localStorage；CSS 里的 min() 是窗口变窄后
+   防止溢出可视区域的最后一道保险。 */
+.article.is-reading {
+  position: relative;
+  width: 100%;
+  max-width: min(var(--reading-w, 760px), calc(100% - 24px));
+  margin-inline: auto;
+  transition: max-width .16s ease;
+}
+/* 拖拽把手贴在正文列右缘，宽度变化时跟随；拖拽中禁用过渡，否则会跟不上光标 */
+body.reading-resizing .article.is-reading { transition: none; }
+.reading-handle {
+  position: absolute; top: 0; bottom: 0; right: 0;
+  width: 18px;
+  transform: translateX(50%);
+  display: flex; align-items: center; justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none; -webkit-user-select: none;
+  color: var(--text-3);
+}
+.reading-handle::before {
+  content: '';
+  width: 4px; height: 96px; max-height: 60%;
+  border-radius: 99px;
+  background: currentColor;
+  opacity: .28;
+  transition: opacity .15s ease, background-color .15s ease, height .15s ease;
+}
+.reading-handle:hover::before,
+.reading-handle:focus-visible::before { opacity: 1; background: var(--accent); height: 150px; }
+body.reading-resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+/* 窄屏单列本来就够窄，限宽没有意义，还会白白吃掉 24px 呼吸位 */
+@media (max-width: 900px) {
+  .article.is-reading { max-width: 100%; }
+  .reading-handle { display: none; }
+}
+/* 触屏没有鼠标，看不到也用不上这个把手 */
+@media (hover: none) {
+  .reading-handle { display: none; }
 }
 
 /* ---------- 文章排版（阅读视图） ---------- */
@@ -571,7 +617,10 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row, .site-footer { display: none !important; }
   #layout, .scroll-area { height: auto; overflow: visible; }
   body { background: #fff; }
-  .article { max-width: none; }
+  /* 纸张宽度固定，限宽和拖拽把手都毫无意义：正文必须铺满可打印区域。
+     选择器要与 .article.is-reading 同特异度，只写 .article 会被它压过去。 */
+  .article.is-reading { max-width: none; }
+  .reading-handle { display: none !important; }
 }
 
 /* ---------- 树形侧栏 / 面包屑 / 空间卡片 ---------- */

@@ -676,6 +676,105 @@ function renderSidebar(filter = '') {
 el.search.addEventListener('input', () => renderSidebar(el.search.value));
 
 /* ============================================================
+   阅读视图宽度：默认限宽，桌面端可拖拽调整
+   ============================================================ */
+const READING_KEY = 'doclight-reading-width';
+const READING_DEFAULT = 760;
+const READING_MIN = 480;
+const READING_STEP = 20;
+
+// 宽度上限取 .scroll-area 的可用宽度（再留 24px 呼吸位），保证拖到底也不会
+// 超出页面边界；CSS 里的 min() 是窗口缩放后的第二道保险。
+function readingMax(): number {
+  const area = el.article.parentElement;
+  const avail = (area?.clientWidth || innerWidth) - 24;
+  return Math.max(READING_MIN, avail);
+}
+
+function clampReadingWidth(px: number): number {
+  return Math.max(READING_MIN, Math.min(Math.round(px), readingMax()));
+}
+
+function applyReadingWidth(px: number): number {
+  const w = clampReadingWidth(px);
+  readingApplied = w;
+  document.documentElement.style.setProperty('--reading-w', w + 'px');
+  $('.reading-handle')?.setAttribute('aria-valuenow', String(w));
+  return w;
+}
+
+// readingWidth 是用户的偏好值（持久化），readingApplied 是当前实际生效值。
+// 两者分开：窗口变窄时只压缩生效宽度，不破坏偏好，放大后能恢复；拖拽则从生效
+// 宽度起步，否则已存偏好大于当前上限时，小幅拖动会毫无反应。
+let readingWidth = READING_DEFAULT;
+let readingApplied = READING_DEFAULT;
+try {
+  const saved = Number(localStorage.getItem(READING_KEY));
+  if (Number.isFinite(saved) && saved > 0) readingWidth = saved;
+} catch { /* ignore */ }
+applyReadingWidth(readingWidth);
+
+function persistReadingWidth(): void {
+  try { localStorage.setItem(READING_KEY, String(readingWidth)); } catch { /* ignore */ }
+}
+
+function resetReadingWidth(): void {
+  readingWidth = applyReadingWidth(READING_DEFAULT);
+  persistReadingWidth();
+}
+
+function setupReadingHandle(handle: HTMLElement): void {
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startWidth = readingApplied;
+    document.body.classList.add('reading-resizing');
+    handle.setPointerCapture?.(e.pointerId);
+  });
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    // 正文列居中：右缘移动 dx 时两侧同时外扩，总宽度变化 2*dx
+    readingWidth = applyReadingWidth(startWidth + (e.clientX - startX) * 2);
+  });
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('reading-resizing');
+    persistReadingWidth();
+  };
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
+  handle.addEventListener('dblclick', resetReadingWidth);
+  handle.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowRight' ? READING_STEP : -READING_STEP;
+    readingWidth = applyReadingWidth(readingApplied + step);
+    persistReadingWidth();
+  });
+}
+
+function mountReadingHandle(): void {
+  const handle = document.createElement('div');
+  handle.className = 'reading-handle';
+  handle.tabIndex = 0;
+  handle.setAttribute('role', 'separator');
+  handle.setAttribute('aria-orientation', 'vertical');
+  handle.setAttribute('aria-label', '拖动调整正文宽度，双击恢复默认');
+  handle.title = '拖动调整正文宽度，双击恢复默认';
+  handle.setAttribute('aria-valuemin', String(READING_MIN));
+  handle.setAttribute('aria-valuemax', String(readingMax()));
+  handle.setAttribute('aria-valuenow', String(readingApplied));
+  el.article.appendChild(handle);
+  setupReadingHandle(handle);
+}
+
+/* ============================================================
    阅读视图渲染
    ============================================================ */
 function decorate(container) {
@@ -733,6 +832,11 @@ function renderArticle(page) {
   });
   $('#slug-edit').addEventListener('click', () => slugFlow(S.page));
 
+  // 限宽只属于阅读视图：总览页 / 空间索引 / 编辑器都铺满
+  el.article.classList.add('is-reading');
+  applyReadingWidth(readingWidth);
+  mountReadingHandle();
+
   const crumbText = chain.map(n => n.title).join(' / ');
   el.crumb.textContent = crumbText.length > 26 ? crumbText.slice(0, 26) + '…' : crumbText;
   document.title = page.title + ' · DocLight';
@@ -770,6 +874,8 @@ function placeCaretEnd(node) {
 function enterEdit(focus = true) {
   if (!S.page) return;
   S.dirty = false;
+  // 编辑区始终铺满，不受阅读视图限宽影响
+  el.article.classList.remove('is-reading');
   el.article.hidden = true;
   el.empty.hidden = true;
   el.clusterView.hidden = true;
@@ -1279,6 +1385,7 @@ function renderHome() {
   S.page = null; S.space = null;
   document.title = 'DocLight · 空间总览';
   el.crumb.textContent = '';
+  el.article.classList.remove('is-reading');
   el.article.hidden = true;
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
@@ -1320,6 +1427,7 @@ function renderSpace(space) {
   collapsedSet.delete('s:' + space.slug);   // 进入空间索引时展开
   document.title = space.title + ' · DocLight';
   el.crumb.textContent = space.title;
+  el.article.classList.remove('is-reading');
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
   el.empty.hidden = true;
@@ -1539,6 +1647,9 @@ $('#btn-menu').addEventListener('click', () => toggleDrawer(!document.body.class
 el.scrim.addEventListener('click', () => toggleDrawer(false));
 window.addEventListener('resize', () => {
   if (innerWidth > 900) toggleDrawer(false);
+  // 窗口变窄时只重新夹取生效宽度（偏好值保留，放大后恢复）
+  applyReadingWidth(readingWidth);
+  $('.reading-handle')?.setAttribute('aria-valuemax', String(readingMax()));
 });
 
 el.list.addEventListener('click', e => {
