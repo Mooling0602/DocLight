@@ -169,6 +169,12 @@
         <p>从左侧挑选一篇文档，或立即开始创作。</p>
         <button class="btn btn-primary" id="btn-empty-create">＋ 创建第一页</button>
       </div>
+
+      <!-- 备案号悬挂位（工信部要求位于页面底部）：
+           服务端按 DOCLIGHT_ICP / DOCLIGHT_POLICE / DOCLIGHT_COPYRIGHT 注入。
+           放在 .scroll-area 内是为了跟随内容滚动——#layout 已是固定视口高度，
+           放到它外面会多出一条整页滚动条。 -->
+      <!--DOCLIGHT_FOOTER-->
     </div>
 
   </main>

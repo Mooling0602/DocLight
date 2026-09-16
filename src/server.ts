@@ -17,12 +17,20 @@
  *   POST   /api/pages        create { title }
  *   PUT    /api/pages/:slug  update { title?, content? }
  *   DELETE /api/pages/:slug  delete
+ *
+ * Filing footer (see src/beian.ts), all optional:
+ *   DOCLIGHT_ICP           ICP filing number, e.g. 浙ICP备12345678号-1
+ *   DOCLIGHT_ICP_URL       override the filing portal link
+ *   DOCLIGHT_POLICE        public security filing number, e.g. 京公网安备11010502030123号
+ *   DOCLIGHT_POLICE_URL    override the public security portal link
+ *   DOCLIGHT_COPYRIGHT     copyright line, e.g. © 2026 Mooling
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { injectFooter, readFooterOptions } from './beian.js';
 
 interface Space {
   slug: string;
@@ -285,6 +293,28 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+/**
+ * The page shell with the filing footer injected, read once at startup. The footer
+ * must be present in the raw response, since compliance checks inspect the HTML
+ * without executing scripts; doing the substitution per request would also re-read
+ * the file for every SPA deep link.
+ */
+let indexHtmlCache: string | null = null;
+
+function indexHtml(): string {
+  if (indexHtmlCache !== null) return indexHtmlCache;
+  let html = '';
+  try {
+    html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  } catch {
+    return ''; // let the caller fall back to streaming the file
+  }
+  // injectFooter also consumes the marker when no filing is configured, so the
+  // served HTML never ships an HTML comment describing an internal hook.
+  indexHtmlCache = injectFooter(html, readFooterOptions());
+  return indexHtmlCache;
+}
+
 function serveStatic(res: ServerResponse, urlPath: string): void {
   let rel = decodeURIComponent(urlPath.split('?')[0]);
   if (rel === '/' || rel === '') rel = '/index.html';
@@ -294,11 +324,23 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
     file = path.join(PUBLIC_DIR, 'index.html'); // SPA 回退，支持 #/xxx 深链
   }
   const ext = path.extname(file).toLowerCase();
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': 'no-cache',
     'X-Content-Type-Options': 'nosniff',
-  });
+  };
+
+  // Every route resolves to the same shell, so serve the injected copy for it.
+  if (file === path.join(PUBLIC_DIR, 'index.html')) {
+    const html = indexHtml();
+    if (html) {
+      res.writeHead(200, { ...headers, 'Content-Length': Buffer.byteLength(html) });
+      res.end(html);
+      return;
+    }
+  }
+
+  res.writeHead(200, headers);
   fs.createReadStream(file).pipe(res);
 }
 

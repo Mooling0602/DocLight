@@ -16,6 +16,9 @@ dist/
 public/app.js
 .DS_Store
 
+# ---- 本地截图验证（无头浏览器产物，含 profile 缓存）----
+.verify/
+
 # ---- Nix 构建产物（nix build 生成的符号链接）----
 result
 result-*

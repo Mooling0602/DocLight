@@ -157,6 +157,46 @@
               default = false;
               description = "是否放行防火墙端口。";
             };
+
+            icp = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "浙ICP备12345678号-1";
+              description = ''
+                网站备案号，悬挂在页面底部并链接至工信部备案管理系统。
+                中国大陆服务器对外提供服务时必须填写，否则会被责令整改。
+              '';
+            };
+
+            icpUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "https://beian.miit.gov.cn/";
+              description = "备案号指向的链接；留空时使用工信部备案管理系统。";
+            };
+
+            police = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "京公网安备11010502030123号";
+              description = ''
+                公安联网备案号（可选），同样悬挂在页面底部。
+                链接默认按号码中的数字段自动指向公安部查询页。
+              '';
+            };
+
+            policeUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "公安备案号指向的链接；留空时按备案号自动生成查询链接。";
+            };
+
+            copyright = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "© 2026 Mooling";
+              description = "版权行（可选），显示在备案号左侧。";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -167,15 +207,19 @@
 
               serviceConfig = {
                 ExecStart = lib.getExe cfg.package;
+                # 端口固定，禁止自动探测（反向代理只指向一个端口，静默漂移会导致
+                # 代理落空）。
                 Environment = [
                   "PORT=${toString cfg.port}"
                   "DOCLIGHT_HOST=${cfg.address}"
                   "DOCLIGHT_DATA_DIR=/var/lib/doclight"
-                  # A service must bind exactly the configured port: the free-port
-                  # scan would silently drift to the next one and leave whatever
-                  # reverse proxy points here talking to nothing.
                   "DOCLIGHT_STRICT_PORT=1"
                 ];
+                # 备案信息必须走 environment（attrset），不能并进上面的 Environment
+                # 列表：列表元素是裸字符串，nixpkgs 不做引号转义，含空格的版权行会被
+                # systemd 解析成第二个赋值而静默截断（实测 `© 2026 Mooling` 只剩
+                # `©`）。attrset 会经 toJSON 加引号，中文与空格都能原样传递。
+                # 注意 environment 是服务级选项，必须与 serviceConfig 同级。
                 # The store copy is read-only; pages.json and auth.json live in the
                 # state directory, which systemd also makes writable for the
                 # dynamic user.
@@ -188,6 +232,16 @@
                 ProtectSystem = "strict";
                 ProtectHome = true;
                 PrivateTmp = true;
+              };
+
+              # 备案号 / 版权行（页面底部悬挂）。未配置的项直接不出现，避免把空值
+              # 传进环境变量。environment 是服务级选项，必须与 serviceConfig 同级。
+              environment = lib.filterAttrs (_: v: v != null) {
+                DOCLIGHT_ICP = cfg.icp;
+                DOCLIGHT_ICP_URL = cfg.icpUrl;
+                DOCLIGHT_POLICE = cfg.police;
+                DOCLIGHT_POLICE_URL = cfg.policeUrl;
+                DOCLIGHT_COPYRIGHT = cfg.copyright;
               };
             };
 

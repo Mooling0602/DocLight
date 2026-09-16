@@ -296,8 +296,18 @@ html[data-theme-pref="dark"] #btn-theme {
 
 /* ---------- 主区域 ---------- */
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.scroll-area { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
-.container { max-width: 800px; margin: 0 auto; padding: clamp(22px, 4vw, 46px) clamp(18px, 4.5vw, 40px) 90px; }
+/* flex column：内容不足一屏时让备案页脚贴住底部（见 .site-footer 的 margin-top:auto） */
+.scroll-area { flex: 1; overflow-y: auto; scroll-behavior: smooth; display: flex; flex-direction: column; }
+
+/* 注意：这里必须显式写 width:100%，且不要再封 max-width。
+   父级 .scroll-area 是 flex 列容器，祖先的 auto 外边距会取消 flex 在交叉轴上的
+   stretch —— 只写 `max-width: 800px; margin: 0 auto` 时宽度会塌成 fit-content
+   （实测仅 300px），「空间」标题于是缩到内容中间、卡片网格也跟着变窄。
+   显式 width:100% 把宽度定死，才能让标题贴左、网格铺满。 */
+.container {
+  width: 100%;
+  padding: clamp(22px, 4vw, 46px) clamp(18px, 4.5vw, 40px) 90px;
+}
 
 /* ---------- 文章排版（阅读视图） ---------- */
 .article { animation: rise .3s cubic-bezier(.2,.8,.25,1); }
@@ -407,11 +417,12 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 /* ---------- 工具栏 ---------- */
 #toolbar-wrap {
   position: sticky; top: 0; z-index: 30;
-  padding: 10px clamp(12px, 3vw, 28px) 4px;
+  /* 左右内边距必须与 .container 一致，工具栏才会和下方编辑区左边缘对齐。
+     这里不要再给 #toolbar 封 max-width —— 编辑区已是全宽，工具栏居中会错位。 */
+  padding: 10px clamp(18px, 4.5vw, 40px) 4px;
   background: linear-gradient(var(--bg) 62%, transparent);
 }
 #toolbar {
-  max-width: 800px; margin: 0 auto;
   display: flex; align-items: center; gap: 2px;
   padding: 6px;
   background: var(--bg-elev);
@@ -511,6 +522,31 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 @keyframes toastin { from { opacity: 0; transform: translateY(14px) scale(.94);} to { opacity: 1; transform: none;} }
 @keyframes toastout { to { opacity: 0; transform: translateY(10px) scale(.96);} }
 
+/* ---------- 备案号悬挂（页面底部） ---------- */
+/* 服务端按 DOCLIGHT_* 环境变量注入；未配置时整块不存在（renderFooter 返回空串）。
+   配合 .scroll-area 的 flex column：内容不足一屏时页脚贴底，内容超长时自然跟在
+   正文之后。用负边距去抵消 .container 的底部留白也能"看起来对"，但在空态
+   （没有 .container 时）会把页脚顶到按钮边上。 */
+.site-footer {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 6px 14px;
+  margin-top: auto;
+  padding: 10px clamp(18px, 4.5vw, 40px) 26px;
+  font-size: 12.5px; line-height: 1.7;
+  color: var(--text-3);
+  text-align: center;
+}
+.sf-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* 备案号是法定公示信息，链接用 --text-2 而非更浅的 --text-3，保证可读性 */
+.sf-link {
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color .15s ease;
+}
+.sf-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.sf-badge { flex: none; color: var(--text-3); }
+.sf-link:hover .sf-badge { color: currentColor; }
+
 /* ---------- 响应式 ---------- */
 #btn-menu { display: none; }
 @media (max-width: 900px) {
@@ -532,7 +568,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 
 /* ---------- 打印 ---------- */
 @media print {
-  #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row { display: none !important; }
+  #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row, .site-footer { display: none !important; }
   #layout, .scroll-area { height: auto; overflow: visible; }
   body { background: #fff; }
   .article { max-width: none; }
