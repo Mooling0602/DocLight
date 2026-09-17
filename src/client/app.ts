@@ -1,6 +1,6 @@
 /* ============================================================
-   DocLight · app.ts — 前端单页应用（无框架）
-   v3 空间模型：spaces[] / pages[]（页面归属空间，空间内嵌套）
+   DocLight · app.ts — framework-free single-page frontend
+   v3 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
    ============================================================ */
 'use strict';
 
@@ -72,7 +72,7 @@ interface AppState {
   iters: number;
 }
 
-/* ---------------- 工具函数 ---------------- */
+/* ---------------- Utilities ---------------- */
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
@@ -125,10 +125,12 @@ function isSafeSrc(u: unknown): boolean {
   return /^(https?:\/\/|\/|data:image\/)/i.test(String(u));
 }
 
-/* ---------------- 鉴权密码学（http 环境安全设计） ----------------
-   密码永不明文上网/落盘：客户端 PBKDF2 派生密钥 ks，服务端只存 ks；
-   登录用一次性 nonce 挑战 + HMAC 应答，防重放。
-   WebCrypto 不可用时（http 非 localhost）回退到纯 JS 实现。 */
+/* ---------------- Auth crypto (built for plain-http safety) ----------------
+   Passwords never travel or rest in plaintext: the client derives key ks via
+   PBKDF2 and the server stores only ks; login uses a one-shot nonce challenge
+   plus an HMAC response to prevent replay.
+   Falls back to a pure-JS implementation when WebCrypto is unavailable
+   (http on a non-localhost origin). */
 const _te = new TextEncoder();
 function hex2b(h) { const r = new Uint8Array(h.length >> 1); for (let i = 0; i < r.length; i++) r[i] = parseInt(h.substr(i * 2, 2), 16); return r; }
 function b2hex(b) { return [...b].map(x => x.toString(16).padStart(2, '0')).join(''); }
@@ -204,12 +206,12 @@ async function hmacHex(keyHex, msg) {
   return b2hex(_hmac(hex2b(keyHex), _te.encode(msg)));
 }
 
-/* ---------------- 全局状态 ---------------- */
+/* ---------------- Global state ---------------- */
 const S: AppState = {
   spaces: [],         // [{slug,title,desc,home,...}]
   pages: [],          // [{slug,space,parent,title,...}]
-  page: null,         // 当前页面详情
-  space: null,        // 当前空间（空间索引视图使用）
+  page: null,         // current page detail
+  space: null,        // current space (used by the space index view)
   dirty: false,
   pendingEdit: null,
   authed: false,
@@ -220,7 +222,7 @@ const S: AppState = {
   iters: 0,
 };
 
-/* ---------------- 元素引用 ---------------- */
+/* ---------------- Element references ---------------- */
 const el = {
   crumb: $('#crumb'),
   clusterView: $('#cluster-view'),
@@ -243,7 +245,7 @@ const el = {
 };
 
 /* ============================================================
-   Toast 提示
+   Toasts
    ============================================================ */
 let toastTimer;
 function toast(msg, ms = 2200) {
@@ -260,7 +262,7 @@ function toast(msg, ms = 2200) {
 }
 
 /* ============================================================
-   弹窗（确认 / 输入）
+   Modal (confirm / prompt)
    ============================================================ */
 let activeModalDone = null;
 
@@ -320,7 +322,7 @@ function promptModal({ title, label, value = '', placeholder = '', ok = '确定'
 }
 
 /* ============================================================
-   下拉菜单（主题 / 页面操作 / 行内菜单）
+   Dropdown menus (theme / page actions / inline menus)
    ============================================================ */
 const rowMenu = $('#menu-row');
 const menus = [
@@ -352,7 +354,7 @@ function openRowMenu(btn, kind, obj) {
   rowMenu.style.top = Math.min(r.bottom + 4, innerHeight - mh - 8) + 'px';
 }
 
-// 顶栏下拉按钮的开关切换（主题 / 页面操作）
+// Toggle top-bar dropdown buttons (theme / page actions)
 menus.forEach(({ btn, panel }) => {
   btn.addEventListener('click', e => {
     e.stopPropagation();
@@ -363,7 +365,7 @@ menus.forEach(({ btn, panel }) => {
 });
 
 /* ============================================================
-   主题：auto / light / dark（跟随系统 + 本地记忆）
+   Theme: auto / light / dark (follows the system with local memory)
    ============================================================ */
 const THEME_KEY = 'doclight-theme';
 const mqDark = matchMedia('(prefers-color-scheme: dark)');
@@ -400,7 +402,7 @@ try { savedPref = localStorage.getItem(THEME_KEY) || 'auto'; } catch { /* ignore
 applyTheme(savedPref);
 
 /* ============================================================
-   鉴权状态（服务端 = 唯一事实源）
+   Auth state (the server is the single source of truth)
    ============================================================ */
 async function refreshAuthState() {
   try {
@@ -485,7 +487,7 @@ function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () =
 }
 
 /* ============================================================
-   层级计算（空间 → 页面树）
+   Hierarchy (space → page tree)
    ============================================================ */
 function spaceBySlug(slug) { return S.spaces.find(s => s.slug === slug) || null; }
 function pageBySlug(slug) { return S.pages.find(p => p.slug === slug) || null; }
@@ -522,7 +524,8 @@ const COLLAPSE_KEY = 'doclight-collapsed';
 let collapsedSet = new Set();
 try { collapsedSet = new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')); } catch { /* ignore */ }
 
-// 导航到某页面时自动展开其空间与祖先链（仅导航时机调用，手动折叠不会被覆盖）
+// Auto-expand the space and ancestor chain when navigating to a page
+// (called on navigation only, so manual collapse is never overridden)
 function revealPath(pageSlug) {
   const page = pageBySlug(pageSlug);
   if (!page) return;
@@ -532,7 +535,7 @@ function revealPath(pageSlug) {
 }
 
 /* ============================================================
-   侧栏：空间分区 + 页面树
+   Sidebar: space sections + page tree
    ============================================================ */
 function renderSidebar(filter = '') {
   const q = filter.trim().toLowerCase();
@@ -676,7 +679,109 @@ function renderSidebar(filter = '') {
 el.search.addEventListener('input', () => renderSidebar(el.search.value));
 
 /* ============================================================
-   阅读视图渲染
+   Reading-view width: capped by default, draggable on desktop
+   ============================================================ */
+const READING_KEY = 'doclight-reading-width';
+const READING_DEFAULT = 760;
+const READING_MIN = 480;
+const READING_STEP = 20;
+
+// The upper bound comes from the usable width of .scroll-area (minus 24px of
+// breathing room) so dragging to the edge never escapes the page bounds; the
+// CSS min() is a second safety net once the window is resized.
+function readingMax(): number {
+  const area = el.article.parentElement;
+  const avail = (area?.clientWidth || innerWidth) - 24;
+  return Math.max(READING_MIN, avail);
+}
+
+function clampReadingWidth(px: number): number {
+  return Math.max(READING_MIN, Math.min(Math.round(px), readingMax()));
+}
+
+function applyReadingWidth(px: number): number {
+  const w = clampReadingWidth(px);
+  readingApplied = w;
+  document.documentElement.style.setProperty('--reading-w', w + 'px');
+  $('.reading-handle')?.setAttribute('aria-valuenow', String(w));
+  return w;
+}
+
+// readingWidth is the user preference (persisted); readingApplied is the value
+// actually in effect. Keeping them apart means a narrower window only squeezes
+// the effective width without damaging the preference, so it recovers when
+// widened again; dragging starts from the effective width, otherwise a small
+// drag would do nothing when the stored preference exceeds the current cap.
+let readingWidth = READING_DEFAULT;
+let readingApplied = READING_DEFAULT;
+try {
+  const saved = Number(localStorage.getItem(READING_KEY));
+  if (Number.isFinite(saved) && saved > 0) readingWidth = saved;
+} catch { /* ignore */ }
+applyReadingWidth(readingWidth);
+
+function persistReadingWidth(): void {
+  try { localStorage.setItem(READING_KEY, String(readingWidth)); } catch { /* ignore */ }
+}
+
+function resetReadingWidth(): void {
+  readingWidth = applyReadingWidth(READING_DEFAULT);
+  persistReadingWidth();
+}
+
+function setupReadingHandle(handle: HTMLElement): void {
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startWidth = readingApplied;
+    document.body.classList.add('reading-resizing');
+    handle.setPointerCapture?.(e.pointerId);
+  });
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    // Centered text column: moving the right edge by dx widens both sides, so the total width changes by 2*dx
+    readingWidth = applyReadingWidth(startWidth + (e.clientX - startX) * 2);
+  });
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('reading-resizing');
+    persistReadingWidth();
+  };
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
+  handle.addEventListener('dblclick', resetReadingWidth);
+  handle.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowRight' ? READING_STEP : -READING_STEP;
+    readingWidth = applyReadingWidth(readingApplied + step);
+    persistReadingWidth();
+  });
+}
+
+function mountReadingHandle(): void {
+  const handle = document.createElement('div');
+  handle.className = 'reading-handle';
+  handle.tabIndex = 0;
+  handle.setAttribute('role', 'separator');
+  handle.setAttribute('aria-orientation', 'vertical');
+  handle.setAttribute('aria-label', '拖动调整正文宽度，双击恢复默认');
+  handle.title = '拖动调整正文宽度，双击恢复默认';
+  handle.setAttribute('aria-valuemin', String(READING_MIN));
+  handle.setAttribute('aria-valuemax', String(readingMax()));
+  handle.setAttribute('aria-valuenow', String(readingApplied));
+  el.article.appendChild(handle);
+  setupReadingHandle(handle);
+}
+
+/* ============================================================
+   Reading view rendering
    ============================================================ */
 function decorate(container) {
   container.querySelectorAll('a').forEach(a => {
@@ -684,7 +789,7 @@ function decorate(container) {
     if (/^https?:\/\//i.test(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
   });
   container.querySelectorAll('img').forEach(img => img.loading = 'lazy');
-  // h2/h3 悬停出现标签式锚点，点击复制干净的小节链接（/路径#h-x）
+  // h2/h3 reveal a label-style anchor on hover; clicking copies a clean section link (/path#h-x)
   container.querySelectorAll('h2, h3').forEach((h, i) => {
     h.id = 'h-' + i;
     const a = document.createElement('a');
@@ -733,6 +838,11 @@ function renderArticle(page) {
   });
   $('#slug-edit').addEventListener('click', () => slugFlow(S.page));
 
+  // The width cap applies to the reading view only: overview, space index and editor all go full width
+  el.article.classList.add('is-reading');
+  applyReadingWidth(readingWidth);
+  mountReadingHandle();
+
   const crumbText = chain.map(n => n.title).join(' / ');
   el.crumb.textContent = crumbText.length > 26 ? crumbText.slice(0, 26) + '…' : crumbText;
   document.title = page.title + ' · DocLight';
@@ -751,7 +861,7 @@ function renderArticle(page) {
 }
 
 /* ============================================================
-   编辑器核心
+   Editor core
    ============================================================ */
 function markDirty() {
   if (!S.dirty) { S.dirty = true; el.dirtyPill.hidden = false; }
@@ -770,6 +880,8 @@ function placeCaretEnd(node) {
 function enterEdit(focus = true) {
   if (!S.page) return;
   S.dirty = false;
+  // The editor always goes full width, unaffected by the reading-view cap
+  el.article.classList.remove('is-reading');
   el.article.hidden = true;
   el.empty.hidden = true;
   el.clusterView.hidden = true;
@@ -830,7 +942,7 @@ async function tryCancelEdit() {
 }
 
 /* ============================================================
-   富文本命令
+   Rich-text commands
    ============================================================ */
 function exec(cmd, val = null) {
   document.execCommand(cmd, false, val);
@@ -932,7 +1044,7 @@ async function cmdImage() {
   markDirty();
 }
 
-/* 清除格式：选区内段落转正文 + 剥除全部行内样式与对齐（代码块保留） */
+/* Clear formatting: turn selected blocks into body text and strip all inline styles and alignment (code blocks preserved) */
 function clearFormatting() {
   const sel = getSelection();
   if (!sel.rangeCount) return;
@@ -973,7 +1085,7 @@ function clearFormatting() {
   refreshToolbarState();
 }
 
-/* 粘贴清理：保留语义标签，剥离脚本与内联垃圾 */
+/* Paste cleanup: keep semantic tags, strip scripts and inline junk */
 function cleanPastedHtml(html) {
   const ALLOW = new Set(['P','BR','B','STRONG','I','EM','U','S','STRIKE','DEL',
                          'UL','OL','LI','A','IMG','BLOCKQUOTE','PRE','CODE','HR',
@@ -1024,7 +1136,7 @@ el.editor.addEventListener('keydown', e => {
   markDirty();
 });
 
-/* 工具栏事件分发 */
+/* Toolbar event dispatch */
 let touchTriggered = false;
 $('#toolbar').addEventListener('pointerdown', e => { touchTriggered = e.pointerType !== 'mouse'; });
 $('#toolbar').addEventListener('touchstart', () => { touchTriggered = true; }, { passive: true });
@@ -1056,7 +1168,7 @@ $('#toolbar').addEventListener('click', async e => {
 });
 
 /* ============================================================
-   空间操作
+   Space operations
    ============================================================ */
 async function createSpaceFlow() {
   const title = await promptModal({
@@ -1114,7 +1226,7 @@ async function deleteSpaceFlow(space) {
 }
 
 /* ============================================================
-   页面操作
+   Page operations
    ============================================================ */
 async function createPageFlow(spaceSlug, parent = null) {
   const title = await promptModal({
@@ -1273,12 +1385,13 @@ function dispatchPageAction(action: string, page: PageMeta | null = S.page): voi
 }
 
 /* ============================================================
-   视图：空间总览 / 空间索引 / 文章
+   Views: space overview / space index / article
    ============================================================ */
 function renderHome() {
   S.page = null; S.space = null;
   document.title = 'DocLight · 空间总览';
   el.crumb.textContent = '';
+  el.article.classList.remove('is-reading');
   el.article.hidden = true;
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
@@ -1320,6 +1433,7 @@ function renderSpace(space) {
   collapsedSet.delete('s:' + space.slug);   // 进入空间索引时展开
   document.title = space.title + ' · DocLight';
   el.crumb.textContent = space.title;
+  el.article.classList.remove('is-reading');
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
   el.empty.hidden = true;
@@ -1388,7 +1502,7 @@ async function openPage(slug: string): Promise<void> {
 }
 
 /* ============================================================
-   路由（真实路径：/空间/页面/...）
+   Routing (real paths: /space/page/...)
    ============================================================ */
 function notFoundThenHome() {
   toast('路径不存在，已返回空间总览');
@@ -1406,7 +1520,7 @@ async function route() {
 
   const space = spaceBySlug(segs[0]);
   if (!space) {
-    // 旧页面路径（该 slug 现在是某空间内的页面）→ 规范化跳转
+    // Legacy page path (this slug is now a page inside some space) → redirect to the canonical URL
     const p = pageBySlug(segs[0]);
     if (p) {
       history.replaceState(null, '', canonicalPath(p.slug));
@@ -1422,7 +1536,7 @@ async function route() {
     return;
   }
 
-  // 深链：空间内页面链
+  // Deep link: page chain inside a space
   let node = null;
   for (const s of segs.slice(1)) {
     const cand = S.pages.find(x => x.slug === s && x.space === space.slug);
@@ -1444,7 +1558,7 @@ function navigate(path) {
 }
 window.addEventListener('popstate', route);
 
-// 站内链接接管
+// Intercept in-site links
 document.addEventListener('click', e => {
   const a = e.target instanceof Element ? e.target.closest('a[data-nav]') : null;
   if (!a || e.metaKey || e.ctrlKey) return;
@@ -1459,7 +1573,7 @@ document.addEventListener('click', e => {
 });
 
 /* ============================================================
-   全局事件绑定
+   Global event bindings
    ============================================================ */
 $('.modal-backdrop', el.modalRoot).addEventListener('click', () => activeModalDone?.());
 
@@ -1479,7 +1593,7 @@ $('#menu-page').addEventListener('click', e => {
   dispatchPageAction(act);
 });
 
-// 侧栏行内菜单（页面 / 空间）
+// Sidebar inline menu (page / space)
 rowMenu.addEventListener('click', e => {
   const act = e.target.closest('.menu-item')?.dataset.act;
   if (!act) return;
@@ -1498,7 +1612,7 @@ rowMenu.addEventListener('click', e => {
   }
 });
 
-// 主题菜单
+// Theme menu
 $$('#menu-theme .menu-item').forEach(b =>
   b.addEventListener('click', () => { applyTheme(b.dataset.pref); closeMenus(null); }));
 
@@ -1510,7 +1624,7 @@ document.addEventListener('click', e => {
 $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
 
-// 全局快捷键
+// Global shortcuts
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === 's') {
@@ -1530,7 +1644,7 @@ window.addEventListener('beforeunload', e => {
   if (S.dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// 移动端抽屉
+// Mobile drawer
 function toggleDrawer(open) {
   document.body.classList.toggle('side-open', open);
   el.scrim.hidden = !open;
@@ -1539,6 +1653,9 @@ $('#btn-menu').addEventListener('click', () => toggleDrawer(!document.body.class
 el.scrim.addEventListener('click', () => toggleDrawer(false));
 window.addEventListener('resize', () => {
   if (innerWidth > 900) toggleDrawer(false);
+  // On a narrower window, only re-clamp the effective width (the preference is kept and recovers when widened)
+  applyReadingWidth(readingWidth);
+  $('.reading-handle')?.setAttribute('aria-valuemax', String(readingMax()));
 });
 
 el.list.addEventListener('click', e => {
@@ -1546,7 +1663,7 @@ el.list.addEventListener('click', e => {
 });
 
 /* ============================================================
-   启动
+   Boot
    ============================================================ */
 (async function boot() {
   el.editor.dataset.placeholder = '这里空空如也……开始书写你的第一段文字吧 ✍️';

@@ -17,12 +17,20 @@
  *   POST   /api/pages        create { title }
  *   PUT    /api/pages/:slug  update { title?, content? }
  *   DELETE /api/pages/:slug  delete
+ *
+ * Filing footer (see src/beian.ts), all optional:
+ *   DOCLIGHT_ICP           ICP filing number, e.g. 浙ICP备12345678号-1
+ *   DOCLIGHT_ICP_URL       override the filing portal link
+ *   DOCLIGHT_POLICE        public security filing number, e.g. 京公网安备11010502030123号
+ *   DOCLIGHT_POLICE_URL    override the public security portal link
+ *   DOCLIGHT_COPYRIGHT     copyright line, e.g. © 2026 Mooling
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { injectFooter, readFooterOptions } from './beian.js';
 
 interface Space {
   slug: string;
@@ -75,7 +83,7 @@ const DATA_DIR = process.env.DOCLIGHT_DATA_DIR
 const DATA_FILE = path.join(DATA_DIR, 'pages.json');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
-/* ---------------------------------------------------------------- 数据层 */
+/* ---------------------------------------------------------------- Data layer */
 
 function seedDb(): Database {
   const now = Date.now();
@@ -218,7 +226,7 @@ function writeDb(db: Database): void {
   fs.renameSync(tmp, DATA_FILE);
 }
 
-/* ---------------------------------------------------------- 内容清洗(XSS) */
+/* ---------------------------------------------------- Content sanitizing (XSS) */
 
 function sanitizeHtml(html: unknown): string {
   return String(html || '')
@@ -237,10 +245,10 @@ function randomToken(len = 7): string {
   return t;
 }
 const SLUG_RE = /^[a-z0-9_]{1,80}$/;
-const RESERVED_SLUGS = new Set(['spaces']); // 系统关键字别名，不可被页面占用;
+const RESERVED_SLUGS = new Set(['spaces']); // Reserved keyword aliases that pages must not take over.
 
 function slugify(title: unknown): string {
-  // 语雀风：小写字母/数字/下划线；非英文标题回退随机 token
+  // Yuque-style slugs: lowercase letters, digits and underscores; non-English titles fall back to a random token
   const s = String(title || '').trim().toLowerCase()
     .replace(/[\s\-.]+/g, '_')
     .replace(/[^a-z0-9_]/g, '')
@@ -248,7 +256,7 @@ function slugify(title: unknown): string {
   return s || randomToken();
 }
 
-/* ------------------------------------------------------------ HTTP 工具 */
+/* ------------------------------------------------------------ HTTP helpers */
 
 function json(res: ServerResponse, code: number, obj: unknown): void {
   const body = JSON.stringify(obj);
@@ -285,31 +293,65 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+/**
+ * The page shell with the filing footer injected, read once at startup. The footer
+ * must be present in the raw response, since compliance checks inspect the HTML
+ * without executing scripts; doing the substitution per request would also re-read
+ * the file for every SPA deep link.
+ */
+let indexHtmlCache: string | null = null;
+
+function indexHtml(): string {
+  if (indexHtmlCache !== null) return indexHtmlCache;
+  let html = '';
+  try {
+    html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  } catch {
+    return ''; // let the caller fall back to streaming the file
+  }
+  // injectFooter also consumes the marker when no filing is configured, so the
+  // served HTML never ships an HTML comment describing an internal hook.
+  indexHtmlCache = injectFooter(html, readFooterOptions());
+  return indexHtmlCache;
+}
+
 function serveStatic(res: ServerResponse, urlPath: string): void {
   let rel = decodeURIComponent(urlPath.split('?')[0]);
   if (rel === '/' || rel === '') rel = '/index.html';
   let file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    file = path.join(PUBLIC_DIR, 'index.html'); // SPA 回退，支持 #/xxx 深链
+    file = path.join(PUBLIC_DIR, 'index.html'); // SPA fallback so deep links resolve to the shell
   }
   const ext = path.extname(file).toLowerCase();
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': 'no-cache',
     'X-Content-Type-Options': 'nosniff',
-  });
+  };
+
+  // Every route resolves to the same shell, so serve the injected copy for it.
+  if (file === path.join(PUBLIC_DIR, 'index.html')) {
+    const html = indexHtml();
+    if (html) {
+      res.writeHead(200, { ...headers, 'Content-Length': Buffer.byteLength(html) });
+      res.end(html);
+      return;
+    }
+  }
+
+  res.writeHead(200, headers);
   fs.createReadStream(file).pipe(res);
 }
 
-/* --------------------------------------------------------------- 鉴权 */
+/* --------------------------------------------------------------- Auth */
 
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
-const KDF_ITERS = 100000;              // PBKDF2-SHA256 迭代次数
-const SESSION_TTL = 7 * 86400e3;       // 会话滑动续期 7 天
+const KDF_ITERS = 100000;              // PBKDF2-SHA256 iteration count
+const SESSION_TTL = 7 * 86400e3;       // sessions slide-renew for 7 days
 const sessions = new Map<string, Session>(); // token -> { user, exp }
-const nonces = new Map<string, number>();    // 登录挑战（一次性，60s）
-const failLog = new Map<string, { n: number; ts: number }>(); // 登录失败限速（按 IP）
+const nonces = new Map<string, number>();    // login challenges (one-shot, 60s)
+const failLog = new Map<string, { n: number; ts: number }>(); // failed-login rate limit (per IP)
 
 function readAuth(): AuthRecord | null {
   try { return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8')); } catch { return null; }
@@ -348,7 +390,7 @@ function getSession(req: IncomingMessage): { user: string; token: string } | nul
   const s = sessions.get(token);
   if (!s) return null;
   if (Date.now() > s.exp) { sessions.delete(token); return null; }
-  s.exp = Date.now() + SESSION_TTL; // 滑动续期
+  s.exp = Date.now() + SESSION_TTL; // slide the expiry forward
   return { user: s.user, token };
 }
 function issueSession(res: ServerResponse, user: string): void {
@@ -372,7 +414,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     return json(res, 200, {
       mode: a.user ? 'ready' : 'setup',
       authed: !!sess,
-      user: sess ? sess.user : (a.user || null), // 预填登录框用（挑战接口本就公开此名）
+      user: sess ? sess.user : (a.user || null), // prefill the login form (the challenge endpoint exposes this name anyway)
       salt: a.salt, iters: a.iters,
     });
   }
@@ -405,7 +447,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     const nonce = String(body.nonce || '');
     const exp = nonces.get(nonce);
     if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
-    nonces.delete(nonce); // 一次性，防重放
+    nonces.delete(nonce); // one-shot to block replay
     if (!a.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
     const expected = hmacStored(a.stored, nonce);
     const proof = String(body.proof || '');
@@ -426,16 +468,16 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
   return json(res, 404, { error: 'Not Found' });
 }
 
-/* --------------------------------------------------------------- 路由 */
+/* --------------------------------------------------------------- Routing */
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
   const parts = pathname.split('/').filter(Boolean); // ['api','pages',':slug?']
   const key = parts[1] || '';
 
-  /* 鉴权端点 */
+  /* Auth endpoints */
   if (key === 'auth') return handleAuth(req, res, parts);
 
-  /* 文档写操作需要登录（读取保持公开） */
+  /* Document writes require a session (reads stay public) */
   if ((key === 'pages' || key === 'spaces') && req.method !== 'GET') {
     const sess = getSession(req);
     if (!sess) return json(res, 401, { error: '请先登录后再修改', needAuth: true });
@@ -443,7 +485,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
 
   const db = readDb();
 
-  /* 全量树：空间 + 页面元信息 */
+  /* Full tree: spaces + page metadata */
   if (req.method === 'GET' && key === 'tree' && parts.length === 2) {
     return json(res, 200, {
       spaces: db.spaces,
@@ -451,7 +493,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     });
   }
 
-  /* ---- 空间 ---- */
+  /* ---- Spaces ---- */
   if (key === 'spaces') {
     if (req.method === 'POST' && parts.length === 2) {
       const body = await readBody(req);
@@ -495,7 +537,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     }
   }
 
-  /* ---- 页面 ---- */
+  /* ---- Pages ---- */
   if (key === 'pages' && req.method === 'GET' && parts.length === 2) {
     return json(res, 200, db.pages.map(({ content, ...meta }) => meta));
   }
@@ -608,7 +650,7 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   if (!pathname.startsWith('/api/')) serveStatic(res, pathname);
 }
 
-/* ----------------------------------------------------- 空闲端口探测启动 */
+/* ------------------------------------------------- Free-port startup scan */
 
 function listen(server: Server, port: number, retriesLeft: number, host?: string): Promise<number> {
   return new Promise((resolve, reject) => {

@@ -1,21 +1,24 @@
-# ---- 运行时产物（每次启动自动生成，无版本价值）----
+# ---- Runtime artifacts (generated on every start, not worth versioning) ----
 .server.log
 .server.pid
 nohup.out
 *.log
 
-# ---- 凭据与账号数据（敏感，绝不入库）----
+# ---- Credentials and account data (sensitive, never committed) ----
 data/auth.json
 
-# ---- 用户数据（页面内容，默认入库；不想让文档进版本库就取消下一行注释）----
+# ---- User data (page content, committed by default; uncomment the next line to keep docs out of version control) ----
 # data/pages.json
 
-# ---- 依赖与编辑器 ----
+# ---- Dependencies and editors ----
 node_modules/
 dist/
 public/app.js
 .DS_Store
 
-# ---- Nix 构建产物（nix build 生成的符号链接）----
+# ---- Local screenshot verification (headless browser artifacts, includes profile cache) ----
+.verify/
+
+# ---- Nix build artifacts (symlinks created by nix build) ----
 result
 result-*

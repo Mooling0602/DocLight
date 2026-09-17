@@ -6,7 +6,7 @@
 <title>DocLight · 轻量文档站</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%235b5bd6"/><g fill="%23fff"><rect x="19" y="17" width="26" height="5" rx="2.5"/><rect x="19" y="29.5" width="26" height="5" rx="2.5"/><rect x="19" y="42" width="15" height="5" rx="2.5"/></g></svg>'>
 
-<!-- 主题预置脚本：在样式绘制前执行，避免深浅色闪烁 -->
+<!-- Theme preset script: runs before styles paint to avoid a light/dark flash -->
 <script>
 (function () {
   var pref;
@@ -17,7 +17,7 @@
   el.dataset.themePref = pref;
 })();
 </script>
-<link rel="stylesheet" href="/style.css?v=12">
+<link rel="stylesheet" href="/style.css?v=13">
 </head>
 <body>
 
@@ -169,6 +169,12 @@
         <p>从左侧挑选一篇文档，或立即开始创作。</p>
         <button class="btn btn-primary" id="btn-empty-create">＋ 创建第一页</button>
       </div>
+
+      <!-- Filing-number slot (required by MIIT at the bottom of the page):
+           the server injects it based on DOCLIGHT_ICP / DOCLIGHT_POLICE / DOCLIGHT_COPYRIGHT.
+           It lives inside .scroll-area so it scrolls with the content — #layout already has
+           a fixed viewport height, so keeping it outside would add a full-page scrollbar. -->
+      <!--DOCLIGHT_FOOTER-->
     </div>
 
   </main>

@@ -11,7 +11,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "aarch64-darwin" # nixpkgs 26.11 起已移除 x86_64-darwin
+        "aarch64-darwin" # nixpkgs removed x86_64-darwin as of 26.11
       ];
 
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
@@ -51,7 +51,7 @@
             runHook preInstall
 
             mkdir -p $out/lib/doclight/dist
-            cp dist/server.js $out/lib/doclight/dist/
+            cp dist/server.js dist/beian.js $out/lib/doclight/dist/
             cp -r public $out/lib/doclight/
 
             mkdir -p $out/bin
@@ -157,6 +157,46 @@
               default = false;
               description = "是否放行防火墙端口。";
             };
+
+            icp = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "浙ICP备12345678号-1";
+              description = ''
+                网站备案号，悬挂在页面底部并链接至工信部备案管理系统。
+                中国大陆服务器对外提供服务时必须填写，否则会被责令整改。
+              '';
+            };
+
+            icpUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "https://beian.miit.gov.cn/";
+              description = "备案号指向的链接；留空时使用工信部备案管理系统。";
+            };
+
+            police = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "京公网安备11010502030123号";
+              description = ''
+                公安联网备案号（可选），同样悬挂在页面底部。
+                链接默认按号码中的数字段自动指向公安部查询页。
+              '';
+            };
+
+            policeUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "公安备案号指向的链接；留空时按备案号自动生成查询链接。";
+            };
+
+            copyright = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "© 2026 Mooling";
+              description = "版权行（可选），显示在备案号左侧。";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -167,15 +207,23 @@
 
               serviceConfig = {
                 ExecStart = lib.getExe cfg.package;
+                # Port is fixed; automatic probing is disabled (the reverse proxy
+                # points at a single port, and silent drift would make it miss).
                 Environment = [
                   "PORT=${toString cfg.port}"
                   "DOCLIGHT_HOST=${cfg.address}"
                   "DOCLIGHT_DATA_DIR=/var/lib/doclight"
-                  # A service must bind exactly the configured port: the free-port
-                  # scan would silently drift to the next one and leave whatever
-                  # reverse proxy points here talking to nothing.
                   "DOCLIGHT_STRICT_PORT=1"
                 ];
+                # Filing info must go through `environment` (an attrset) and cannot
+                # be merged into the Environment list above: list elements are bare
+                # strings, nixpkgs does not add quotes, and a copyright line with a
+                # space would be parsed by systemd as a second assignment and
+                # silently truncated (observed: `© 2026 Mooling` became `©`). An
+                # attrset is quoted via toJSON, so CJK text and spaces pass through
+                # intact.
+                # Note that `environment` is a service-level option and must sit
+                # alongside serviceConfig.
                 # The store copy is read-only; pages.json and auth.json live in the
                 # state directory, which systemd also makes writable for the
                 # dynamic user.
@@ -188,6 +236,18 @@
                 ProtectSystem = "strict";
                 ProtectHome = true;
                 PrivateTmp = true;
+              };
+
+              # Filing number / copyright line (shown at the page bottom). Unset
+              # values are omitted entirely so no empty variables reach the
+              # environment. `environment` is a service-level option and must sit
+              # alongside serviceConfig.
+              environment = lib.filterAttrs (_: v: v != null) {
+                DOCLIGHT_ICP = cfg.icp;
+                DOCLIGHT_ICP_URL = cfg.icpUrl;
+                DOCLIGHT_POLICE = cfg.police;
+                DOCLIGHT_POLICE_URL = cfg.policeUrl;
+                DOCLIGHT_COPYRIGHT = cfg.copyright;
               };
             };
 

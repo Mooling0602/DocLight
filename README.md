@@ -22,9 +22,37 @@ PORT=8080 npm start       # 指定起始端口
 | `DOCLIGHT_HOST` | 全部网卡 | 监听地址，如 `127.0.0.1` |
 | `DOCLIGHT_DATA_DIR` | `<项目根>/data` | 数据目录（`pages.json`、`auth.json`） |
 | `DOCLIGHT_STRICT_PORT` | 未设置 | 设为任意值时端口占用直接报错，不再向后探测 |
+| `DOCLIGHT_ICP` | 未设置 | 网站备案号，如 `浙ICP备12345678号-1` |
+| `DOCLIGHT_ICP_URL` | 工信部备案系统 | 覆盖备案号链接 |
+| `DOCLIGHT_POLICE` | 未设置 | 公安联网备案号，如 `京公网安备11010502030123号` |
+| `DOCLIGHT_POLICE_URL` | 按备案号推导的查询页 | 覆盖公安备案号链接 |
+| `DOCLIGHT_COPYRIGHT` | 未设置 | 版权行，如 `© 2026 Mooling` |
 
 > 作为 systemd 服务运行时建议同时设置 `DOCLIGHT_HOST`、`DOCLIGHT_DATA_DIR` 与
 > `DOCLIGHT_STRICT_PORT=1`：反向代理只指向一个固定端口，静默漂移会导致代理落空。
+
+### 备案号悬挂
+
+面向中国大陆服务器的合规要求：备案号需悬挂在页面底部并链接至主管机关查询系统。
+配置后效果如下（未配置则整块不存在）：
+
+```bash
+DOCLIGHT_ICP="浙ICP备12345678号-1" \
+DOCLIGHT_POLICE="京公网安备11010502030123号" \
+DOCLIGHT_COPYRIGHT="© 2026 Mooling" \
+npm start
+```
+
+实现上有两点是刻意为之：
+
+- **服务端注入，而非前端渲染**。合规检查抓取的是原始 HTML，不执行 JavaScript；
+  若把备案号交给 SPA 生成，人工访问看着正常，机器核查却是空页。因此页脚由
+  `src/beian.ts` 在服务端渲染并写入 `public/index.html` 的注入标记位，
+  `curl` 直接就能看到。
+- **含空格的值不能写进 systemd 的 `Environment` 列表**。列表元素是裸字符串，
+  nixpkgs 不加引号，`© 2026 Mooling` 会被 systemd 解析成第二个赋值而截断成 `©`。
+  flake 模块改用同级的 `environment`（attrset），由 `toJSON` 正确加引号——
+  这条有实测记录，改动前请先看 `flake.nix` 里的注释。
 
 ## 功能
 
@@ -33,6 +61,7 @@ PORT=8080 npm start       # 指定起始端口
 | 可视化编辑 | H1–H3、粗斜下删、行内代码 / 代码块、列表、引用、链接、图片、分隔线；撤销重做、快捷键（⌘S/B/I/U/Z）、Tab 缩进 |
 | 内容安全 | 服务端 XSS 清洗（剥离脚本/事件属性/危险协议）、粘贴自动清理排版垃圾 |
 | 页面管理 | 新建（slug 自动生成并永久绑定）、重命名、删除、侧栏搜索 |
+| 阅读体验 | 正文默认限宽，桌面端可拖拽把手调整宽度（双击复位、本地记忆，自动限制在可视区域内） |
 | 主题 | 跟随系统 `prefers-color-scheme` / 手动浅色·深色三态切换，本地记忆，绘制前预置防闪烁 |
 | 工程细节 | TypeScript 编译、SPA 回退路由、原子化 JSON 写入、请求日志、移动端抽屉导航、打印样式 |
 
@@ -42,10 +71,11 @@ PORT=8080 npm start       # 指定起始端口
 DocLight/
 ├── src/
 │   ├── server.ts      # 后端：静态资源 + REST API + 端口探测
+│   ├── beian.ts       # 备案号页脚渲染（服务端注入）
 │   ├── client/app.ts  # 前端单页应用
 │   └── tests/         # TypeScript 回归测试
 ├── data/pages.json    # 文档数据（首启自动生成示例）
-├── flake.nix          # Nix 打包 + NixOS 模块
+├── flake.nix          # Nix 打包 + NixOS 模块（含备案配置）
 └── public/
     ├── index.html     # 应用骨架
     ├── style.css      # 主题变量 + 组件样式
@@ -98,6 +128,11 @@ NixOS 上也可以声明式部署：
     port = 4173;
     address = "127.0.0.1"; # 默认只监听回环，公网经反向代理
     openFirewall = false;
+
+    # 备案信息（面向大陆服务器）；不填则页面底部不出现该区块
+    icp = "浙ICP备12345678号-1";
+    police = "京公网安备11010502030123号";
+    copyright = "© 2026 Mooling";
   };
 }
 ```

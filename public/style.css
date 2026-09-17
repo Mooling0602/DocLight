@@ -1,9 +1,9 @@
 /* ============================================================
    DocLight · style.css
-   设计语言：极简卡片 + 柔和阴影 + 高对比排版，深浅色双主题
+   Design language: minimal cards + soft shadows + high-contrast typography, light/dark themes
    ============================================================ */
 
-/* ---------- 主题变量 ---------- */
+/* ---------- Theme variables ---------- */
 .theme-light {
   color-scheme: light;
   --bg: #f6f7f9;
@@ -64,7 +64,7 @@
   --topbar-bg: rgba(17, 19, 26, .78);
 }
 
-/* ---------- 基础 ---------- */
+/* ---------- Base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
 
 html { height: 100%; }
@@ -99,22 +99,22 @@ kbd {
   color: var(--text-2);
 }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 文本输入类自带焦点样式（边框变色 / 光标），豁免全局 outline，避免叠成双环 */
+/* Text inputs already style their own focus (border color / caret), so they are exempt from the global outline to avoid a double ring */
 input[type="text"], input[type="search"], input[type="password"],
 .modal input, #title-input, #editor, .modal select { outline: none !important; }
 button { font: inherit; cursor: pointer; }
 
-/* 关键修复：hidden 属性必须压倒任何作者 display 规则 */
+/* Critical fix: the hidden attribute must beat any author display rule */
 [hidden] { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 
-/* ---------- 布局骨架 ---------- */
+/* ---------- Layout skeleton ---------- */
 #layout { display: flex; height: calc(100vh - 57px); height: calc(100dvh - 57px); }
 
-/* ---------- 顶栏 ---------- */
+/* ---------- Top bar ---------- */
 #topbar {
   position: sticky; top: 0; z-index: 40;
   display: flex; align-items: center; justify-content: space-between;
@@ -157,7 +157,7 @@ button { font: inherit; cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30vw;
 }
 
-/* ---------- 控件 ---------- */
+/* ---------- Controls ---------- */
 .btn {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 8px 15px;
@@ -209,7 +209,7 @@ html[data-theme-pref="dark"] #btn-theme {
 }
 @keyframes fadein { from { opacity: 0; transform: translateY(-3px);} to { opacity: 1; transform: none;} }
 
-/* ---------- 下拉菜单 ---------- */
+/* ---------- Dropdown menus ---------- */
 .dropdown-wrap { position: relative; }
 .menu {
   position: absolute; right: 0; top: calc(100% + 6px);
@@ -237,7 +237,7 @@ html[data-theme-pref="dark"] #btn-theme {
 .menu-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
 .menu-item[aria-checked="true"] .ck { visibility: visible; }
 
-/* ---------- 侧栏 ---------- */
+/* ---------- Sidebar ---------- */
 #sidebar {
   width: 272px; flex: none;
   display: flex; flex-direction: column;
@@ -294,12 +294,73 @@ html[data-theme-pref="dark"] #btn-theme {
 
 .list-empty { padding: 18px 14px; font-size: 13px; color: var(--text-3); text-align: center; }
 
-/* ---------- 主区域 ---------- */
+/* ---------- Main area ---------- */
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.scroll-area { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
-.container { max-width: 800px; margin: 0 auto; padding: clamp(22px, 4vw, 46px) clamp(18px, 4.5vw, 40px) 90px; }
+/* flex column: keeps the filing footer pinned to the bottom when content is shorter than one screen (see .site-footer margin-top:auto) */
+.scroll-area { flex: 1; overflow-y: auto; scroll-behavior: smooth; display: flex; flex-direction: column; }
 
-/* ---------- 文章排版（阅读视图） ---------- */
+/* Note: width:100% must be explicit here, and .container must not be globally
+   capped with max-width. The parent .scroll-area is a flex column, and an
+   ancestor's auto margin cancels the flex cross-axis stretch — with only
+   `max-width: 800px; margin: 0 auto` the width collapses to fit-content
+   (300px in practice), shrinking the "Spaces" heading into the middle and
+   narrowing the card grid. Setting width:100% pins the width so the heading
+   stays left and the grid fills the row.
+   The reading view is the exception: its cap is applied only to
+   .article.is-reading (see below) with an explicit width. */
+.container {
+  width: 100%;
+  padding: clamp(22px, 4vw, 46px) clamp(18px, 4.5vw, 40px) 90px;
+}
+
+/* ---------- Reading-view width: capped by default, draggable on desktop ---------- */
+/* Full width for "space overview / space index / editor" is the intent of the new
+   layout, but body text at 150+ characters per line is hard to read, so
+   .article.is-reading alone is capped and centered. Width has a single source of
+   truth in --reading-w on the root element, written by app.ts on drag/reset and
+   persisted to localStorage; the CSS min() is the last safety net against
+   overflowing the visible area once the window narrows. */
+.article.is-reading {
+  position: relative;
+  width: 100%;
+  max-width: min(var(--reading-w, 760px), calc(100% - 24px));
+  margin-inline: auto;
+  transition: max-width .16s ease;
+}
+/* The drag handle hugs the right edge of the text column and follows width changes; transitions are disabled while dragging or it would lag behind the cursor */
+body.reading-resizing .article.is-reading { transition: none; }
+.reading-handle {
+  position: absolute; top: 0; bottom: 0; right: 0;
+  width: 18px;
+  transform: translateX(50%);
+  display: flex; align-items: center; justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none; -webkit-user-select: none;
+  color: var(--text-3);
+}
+.reading-handle::before {
+  content: '';
+  width: 4px; height: 96px; max-height: 60%;
+  border-radius: 99px;
+  background: currentColor;
+  opacity: .28;
+  transition: opacity .15s ease, background-color .15s ease, height .15s ease;
+}
+.reading-handle:hover::before,
+.reading-handle:focus-visible::before { opacity: 1; background: var(--accent); height: 150px; }
+body.reading-resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+/* A narrow single-column layout is already tight enough; capping adds nothing but eats the 24px of breathing room */
+@media (max-width: 900px) {
+  .article.is-reading { max-width: 100%; }
+  .reading-handle { display: none; }
+}
+/* Touch screens have no mouse, so this handle is neither visible nor useful */
+@media (hover: none) {
+  .reading-handle { display: none; }
+}
+
+/* ---------- Article typography (reading view) ---------- */
 .article { animation: rise .3s cubic-bezier(.2,.8,.25,1); }
 @keyframes rise { from { opacity: 0; transform: translateY(8px);} to { opacity: 1; transform: none;} }
 
@@ -374,7 +435,7 @@ u { text-decoration-color: var(--accent-soft-u); text-underline-offset: 3px; }
 h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .heading-anchor:hover { color: var(--accent); opacity: 1; }
 
-/* ---------- 编辑视图 ---------- */
+/* ---------- Edit view ---------- */
 .edit-wrap { animation: fadein .2s ease; }
 #title-input {
   width: 100%;
@@ -404,14 +465,15 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 }
 .edit-hint { font-size: 12.5px; color: var(--text-3); margin-top: 26px; }
 
-/* ---------- 工具栏 ---------- */
+/* ---------- Toolbar ---------- */
 #toolbar-wrap {
   position: sticky; top: 0; z-index: 30;
-  padding: 10px clamp(12px, 3vw, 28px) 4px;
+  /* Horizontal padding must match .container so the toolbar lines up with the left edge of the editor below.
+     Do not cap #toolbar with max-width here — the editor is full width and a centered toolbar would misalign. */
+  padding: 10px clamp(18px, 4.5vw, 40px) 4px;
   background: linear-gradient(var(--bg) 62%, transparent);
 }
 #toolbar {
-  max-width: 800px; margin: 0 auto;
   display: flex; align-items: center; gap: 2px;
   padding: 6px;
   background: var(--bg-elev);
@@ -438,7 +500,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .tbtn.active { background: var(--accent-soft); color: var(--accent); }
 .tsep { width: 1px; height: 19px; margin: 0 6px; flex: none; background: var(--border); }
 
-/* ---------- 空状态 ---------- */
+/* ---------- Empty state ---------- */
 .empty {
   text-align: center; padding-top: 12vh;
   animation: rise .35s cubic-bezier(.2,.8,.25,1);
@@ -448,7 +510,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .e-card { fill: var(--bg-elev); stroke: var(--border-strong); stroke-width: 2; }
 .e-line { stroke: var(--accent); stroke-width: 4; stroke-linecap: round; fill: none; opacity: .55; }
 
-/* ---------- 遮罩 / 抽屉 / 弹窗 / 提示 ---------- */
+/* ---------- Scrim / drawer / modal / toasts ---------- */
 #scrim { position: fixed; inset: 57px 0 0 0; background: var(--scrim); z-index: 29; animation: fadein .2s ease; border: 0; }
 
 .modal-root { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 20px; }
@@ -511,7 +573,35 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 @keyframes toastin { from { opacity: 0; transform: translateY(14px) scale(.94);} to { opacity: 1; transform: none;} }
 @keyframes toastout { to { opacity: 0; transform: translateY(10px) scale(.96);} }
 
-/* ---------- 响应式 ---------- */
+/* ---------- Filing number (page bottom) ---------- */
+/* Injected by the server from DOCLIGHT_* environment variables; the whole block
+   is absent when unconfigured (renderFooter returns an empty string). It works
+   with the .scroll-area flex column: the footer sticks to the bottom when content
+   is shorter than one screen and follows the body naturally when it is longer.
+   Offsetting .container's bottom padding with a negative margin would also "look
+   right", but in the empty state (no .container) it pushes the footer against the
+   buttons. */
+.site-footer {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 6px 14px;
+  margin-top: auto;
+  padding: 10px clamp(18px, 4.5vw, 40px) 26px;
+  font-size: 12.5px; line-height: 1.7;
+  color: var(--text-3);
+  text-align: center;
+}
+.sf-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* The filing number is legally mandated public information; links use --text-2 rather than the fainter --text-3 to stay readable */
+.sf-link {
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color .15s ease;
+}
+.sf-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.sf-badge { flex: none; color: var(--text-3); }
+.sf-link:hover .sf-badge { color: currentColor; }
+
+/* ---------- Responsive ---------- */
 #btn-menu { display: none; }
 @media (max-width: 900px) {
   #btn-menu { display: inline-grid; }
@@ -530,15 +620,18 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   .container { padding-bottom: 60px; }
 }
 
-/* ---------- 打印 ---------- */
+/* ---------- Print ---------- */
 @media print {
-  #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row { display: none !important; }
+  #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row, .site-footer { display: none !important; }
   #layout, .scroll-area { height: auto; overflow: visible; }
   body { background: #fff; }
-  .article { max-width: none; }
+  /* Paper width is fixed, so both the cap and the drag handle are meaningless: body text must fill the printable area.
+     The selector must match .article.is-reading in specificity; a bare .article would lose to it. */
+  .article.is-reading { max-width: none; }
+  .reading-handle { display: none !important; }
 }
 
-/* ---------- 树形侧栏 / 面包屑 / 空间卡片 ---------- */
+/* ---------- Tree sidebar / breadcrumb / space cards ---------- */
 .tree-row { display: flex; align-items: stretch; }
 .caret {
   width: 20px; flex: none; margin-left: 6px;
@@ -583,7 +676,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .modal select option { background: var(--bg-elev); color: var(--text); }
 .modal select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
-/* ---------- 侧栏行内快捷操作（悬浮显现，贴语雀体验） ---------- */
+/* ---------- Sidebar inline quick actions (revealed on hover, Yuque-style) ---------- */
 .row-actions { display: none; align-items: center; gap: 1px; margin-right: 6px; }
 .tree-row:hover .row-actions,
 .tree-row.is-active .row-actions { display: inline-flex; }
@@ -594,7 +687,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 }
 .ra-btn:hover { background: var(--bg-hover); color: var(--text); }
 .tree-row .page-item { padding-right: 6px; }
-.row-menu { position: fixed; right: auto; z-index: 70; } /* 必须抵消 .menu 的 right:0，否则内联 left+right 同时生效会把菜单拉成通栏 */
+.row-menu { position: fixed; right: auto; z-index: 70; } /* Must cancel .menu's right:0; otherwise inline left+right both apply and stretch the menu full width */
 @media (hover: none) {
   /* Touch devices have no hover to reveal these actions, so they must stay
      permanently visible. Dimming them with opacity:.55 multiplied an already
@@ -606,7 +699,7 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   .tree-row.is-active .ra-btn { color: var(--text); }
 }
 
-/* ---------- 空间模型：侧栏分区 / 空间索引页 ---------- */
+/* ---------- Space model: sidebar sections / space index page ---------- */
 .space-row {
   display: flex; align-items: stretch;
   padding: 10px 6px 4px;
