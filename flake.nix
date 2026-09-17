@@ -51,7 +51,7 @@
             runHook preInstall
 
             mkdir -p $out/lib/doclight/dist
-            cp dist/server.js $out/lib/doclight/dist/
+            cp dist/server.js dist/beian.js $out/lib/doclight/dist/
             cp -r public $out/lib/doclight/
 
             mkdir -p $out/bin
