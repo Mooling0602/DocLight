@@ -11,7 +11,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "aarch64-darwin" # nixpkgs 26.11 起已移除 x86_64-darwin
+        "aarch64-darwin" # nixpkgs removed x86_64-darwin as of 26.11
       ];
 
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
@@ -207,19 +207,23 @@
 
               serviceConfig = {
                 ExecStart = lib.getExe cfg.package;
-                # 端口固定，禁止自动探测（反向代理只指向一个端口，静默漂移会导致
-                # 代理落空）。
+                # Port is fixed; automatic probing is disabled (the reverse proxy
+                # points at a single port, and silent drift would make it miss).
                 Environment = [
                   "PORT=${toString cfg.port}"
                   "DOCLIGHT_HOST=${cfg.address}"
                   "DOCLIGHT_DATA_DIR=/var/lib/doclight"
                   "DOCLIGHT_STRICT_PORT=1"
                 ];
-                # 备案信息必须走 environment（attrset），不能并进上面的 Environment
-                # 列表：列表元素是裸字符串，nixpkgs 不做引号转义，含空格的版权行会被
-                # systemd 解析成第二个赋值而静默截断（实测 `© 2026 Mooling` 只剩
-                # `©`）。attrset 会经 toJSON 加引号，中文与空格都能原样传递。
-                # 注意 environment 是服务级选项，必须与 serviceConfig 同级。
+                # Filing info must go through `environment` (an attrset) and cannot
+                # be merged into the Environment list above: list elements are bare
+                # strings, nixpkgs does not add quotes, and a copyright line with a
+                # space would be parsed by systemd as a second assignment and
+                # silently truncated (observed: `© 2026 Mooling` became `©`). An
+                # attrset is quoted via toJSON, so CJK text and spaces pass through
+                # intact.
+                # Note that `environment` is a service-level option and must sit
+                # alongside serviceConfig.
                 # The store copy is read-only; pages.json and auth.json live in the
                 # state directory, which systemd also makes writable for the
                 # dynamic user.
@@ -234,8 +238,10 @@
                 PrivateTmp = true;
               };
 
-              # 备案号 / 版权行（页面底部悬挂）。未配置的项直接不出现，避免把空值
-              # 传进环境变量。environment 是服务级选项，必须与 serviceConfig 同级。
+              # Filing number / copyright line (shown at the page bottom). Unset
+              # values are omitted entirely so no empty variables reach the
+              # environment. `environment` is a service-level option and must sit
+              # alongside serviceConfig.
               environment = lib.filterAttrs (_: v: v != null) {
                 DOCLIGHT_ICP = cfg.icp;
                 DOCLIGHT_ICP_URL = cfg.icpUrl;

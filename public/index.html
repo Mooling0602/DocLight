@@ -6,7 +6,7 @@
 <title>DocLight · 轻量文档站</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%235b5bd6"/><g fill="%23fff"><rect x="19" y="17" width="26" height="5" rx="2.5"/><rect x="19" y="29.5" width="26" height="5" rx="2.5"/><rect x="19" y="42" width="15" height="5" rx="2.5"/></g></svg>'>
 
-<!-- 主题预置脚本：在样式绘制前执行，避免深浅色闪烁 -->
+<!-- Theme preset script: runs before styles paint to avoid a light/dark flash -->
 <script>
 (function () {
   var pref;
@@ -170,10 +170,10 @@
         <button class="btn btn-primary" id="btn-empty-create">＋ 创建第一页</button>
       </div>
 
-      <!-- 备案号悬挂位（工信部要求位于页面底部）：
-           服务端按 DOCLIGHT_ICP / DOCLIGHT_POLICE / DOCLIGHT_COPYRIGHT 注入。
-           放在 .scroll-area 内是为了跟随内容滚动——#layout 已是固定视口高度，
-           放到它外面会多出一条整页滚动条。 -->
+      <!-- Filing-number slot (required by MIIT at the bottom of the page):
+           the server injects it based on DOCLIGHT_ICP / DOCLIGHT_POLICE / DOCLIGHT_COPYRIGHT.
+           It lives inside .scroll-area so it scrolls with the content — #layout already has
+           a fixed viewport height, so keeping it outside would add a full-page scrollbar. -->
       <!--DOCLIGHT_FOOTER-->
     </div>
 

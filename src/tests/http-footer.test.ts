@@ -58,20 +58,20 @@ function startServer(env: NodeJS.ProcessEnv): Promise<StartedServer> {
 }
 
 async function main(): Promise<void> {
-  /* ---- 未配置备案：原始 HTML 不应出现页脚，也不应残留注入标记 ---- */
+  /* ---- No filing configured: the raw HTML must contain neither a footer nor a leftover marker ---- */
   const plain = await startServer({});
   try {
     const html = await (await fetch(`http://127.0.0.1:${plain.port}/`)).text();
     assert.ok(!html.includes('site-footer'), 'unconfigured site must not render a footer');
     assert.ok(!html.includes('DOCLIGHT_FOOTER'), 'marker comment must not leak into the response');
-    // 深链（SPA 回退）同样走注入后的外壳
+    // Deep links (SPA fallback) also get the injected shell
     const deep = await (await fetch(`http://127.0.0.1:${plain.port}/default/welcome`)).text();
     assert.ok(!deep.includes('site-footer'), 'fallback route must not render a footer either');
   } finally {
     plain.stop();
   }
 
-  /* ---- 配置备案：页脚必须出现在原始 HTML 里 ---- */
+  /* ---- Filing configured: the footer must appear in the raw HTML ---- */
   const filed = await startServer({
     DOCLIGHT_ICP: '浙ICP备12345678号-1',
     DOCLIGHT_POLICE: '京公网安备11010502030123号',
@@ -90,11 +90,11 @@ async function main(): Promise<void> {
     );
     assert.ok(html.includes('© 2026 Mooling'), 'copyright line must be preserved');
     assert.ok(!html.includes('DOCLIGHT_FOOTER'), 'marker comment must be consumed');
-    // 页脚落在 <main> 内、文档末尾之前，即合规要求的页面底部
+    // The footer sits inside <main>, before the end of the document — the page bottom required for compliance
     assert.ok(footerIndex < html.indexOf('</main>'), 'footer must sit at the bottom of the shell');
     assert.ok(footerIndex < html.indexOf('</body>'), 'footer must be inside the body');
 
-    // 深链同样注入（同一份缓存外壳）
+    // Deep links are injected too (the same cached shell)
     const deep = await (await fetch(`http://127.0.0.1:${filed.port}/default/welcome`)).text();
     assert.ok(deep.includes('浙ICP备12345678号-1'), 'SPA fallback must carry the footer');
   } finally {

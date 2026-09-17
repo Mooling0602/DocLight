@@ -1,5 +1,5 @@
 /*
- * Regression tests for the filing footer (备案号悬挂).
+ * Regression tests for the filing footer.
  *
  * The regulatory requirement is that the filing number is present at the bottom of
  * the page and links to the authority portal. Official compliance checks fetch the
@@ -34,7 +34,7 @@ const FULL = {
   copyright: '© 2026 Mooling',
 };
 
-/* ---------- 渲染 ---------- */
+/* ---------- Rendering ---------- */
 
 const full = renderFooter(FULL);
 assert.ok(full.startsWith('<footer'), '应渲染出 footer 元素');
@@ -42,27 +42,27 @@ assert.ok(full.includes('浙ICP备12345678号-1'), '应包含 ICP 备案号');
 assert.ok(full.includes('京公网安备11010502030123号'), '应包含公安备案号');
 assert.ok(full.includes('© 2026 Mooling'), '应包含版权行');
 
-// 链接指向官方查询入口——这是备案核查的实际检查点
+// Links point at the official lookup portals — the actual checkpoint in a filing audit
 assert.ok(full.includes(`href="${ICP_PORTAL}"`), 'ICP 备案号必须链接到工信部');
 assert.ok(full.includes('https://beian.mps.gov.cn/'), '公安备案号必须链接到公安部');
 
-// 新窗口打开需带 rel，避免反向标签劫持
+// Opening in a new tab requires rel to prevent reverse tabnabbing
 assert.ok(full.includes('rel="noopener noreferrer"'), '外链应带 rel=noopener');
 
-/* ---------- 可选性：未配置时不应留下任何痕迹 ---------- */
+/* ---------- Optionality: nothing should be left behind when unconfigured ---------- */
 
 const none = { icp: '', icpUrl: ICP_PORTAL, police: '', policeUrl: POLICE_PORTAL, copyright: '' };
 assert.equal(renderFooter(none), '', '未配置备案信息时应渲染为空');
 assert.equal(hasFiling(none), false, 'hasFiling 应为 false');
 
-// 单个字段也应生效
+// A single field should render as well
 assert.ok(renderFooter({ ...none, icp: '京ICP备1号' }).includes('京ICP备1号'), '仅配 ICP 也应渲染');
 assert.ok(renderFooter({ ...none, copyright: '© X' }).includes('© X'), '仅配版权也应渲染');
 assert.equal(hasFiling({ ...none, copyright: '© X' }), true, '仅配版权时 hasFiling 应为 true');
 
-/* ---------- 注入 ---------- */
+/* ---------- Injection ---------- */
 
-// 从真实 index.html 出发，确保标记位确实存在且注入可用
+// Start from the real index.html to ensure the marker exists and injection works
 assert.ok(indexHtmlSource.includes(FOOTER_MARKER), 'index.html 必须保留备案注入标记位');
 
 const injected = injectFooter(indexHtmlSource, FULL);
@@ -70,17 +70,17 @@ assert.ok(injected.includes('浙ICP备12345678号-1'), '注入后应含备案号
 assert.ok(!injected.includes(FOOTER_MARKER), '注入后不应残留标记位');
 assert.ok(injected.includes('</body>'), '注入不应破坏文档结构');
 
-// 未配置时标记位必须被消费掉，不能把内部钩子暴露给访客
+// The marker must be consumed when unconfigured; internal hooks must not leak to visitors
 const stripped = injectFooter(indexHtmlSource, none);
 assert.ok(!stripped.includes(FOOTER_MARKER), '未配置时也不应残留标记位');
 
-// 标记位丢失时的兜底：备案是法定义务，不能因为模板改动就静默消失
+// Fallback for a missing marker: filing is a legal duty, it must not vanish silently on template changes
 const noMarker = indexHtmlSource.replace(FOOTER_MARKER, '');
 const fallback = injectFooter(noMarker, FULL);
 assert.ok(fallback.includes('浙ICP备12345678号-1'), '缺少标记位时应回退注入到 </main> 前');
 assert.ok(fallback.includes('<footer'), '兜底路径也应生成 footer');
 
-/* ---------- 转义与 URL 白名单 ---------- */
+/* ---------- Escaping and URL allowlist ---------- */
 
 assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;', 'HTML 应被转义');
 assert.equal(escapeHtml('a & b "c" \'d\''), 'a &amp; b &quot;c&quot; &#39;d&#39;', '引号与 & 应被转义');
@@ -89,7 +89,7 @@ const xss = renderFooter({ ...FULL, copyright: '<img src=x onerror=alert(1)>' })
 assert.ok(!xss.includes('<img'), '版权文本中的标签必须被转义，不能注入');
 assert.ok(xss.includes('&lt;img'), '应保留转义后的可见文本');
 
-// 备案号是管理员配置项，但会出现在每个页面，因此链接必须限制协议
+// The filing number is admin-provided but appears on every page, so links must restrict the protocol
 assert.equal(safeUrl('javascript:alert(1)', ICP_PORTAL), ICP_PORTAL, 'javascript: 应被拒绝');
 assert.equal(safeUrl('  https://example.com/x  ', ICP_PORTAL), 'https://example.com/x', '合法 https 应通过');
 assert.equal(safeUrl('', ICP_PORTAL), ICP_PORTAL, '空值应回退默认');
@@ -98,7 +98,7 @@ assert.equal(safeUrl('ftp://x/y', ICP_PORTAL), ICP_PORTAL, '非 http(s) 协议�
 const evil = renderFooter({ ...FULL, icpUrl: 'javascript:alert(1)' });
 assert.ok(!evil.includes('javascript:'), '注入的 javascript: 链接必须被替换为官方地址');
 
-/* ---------- 公安备案号 → 查询链接 ---------- */
+/* ---------- Police filing number → lookup link ---------- */
 
 assert.equal(
   policeLookupUrl('京公网安备11010502030123号'),
@@ -108,7 +108,7 @@ assert.equal(
 assert.equal(policeLookupUrl(''), POLICE_PORTAL, '无号码时回退到门户首页');
 assert.equal(policeLookupUrl('京公网安备号'), POLICE_PORTAL, '无数字时回退到门户首页');
 
-/* ---------- 环境变量读取 ---------- */
+/* ---------- Environment variable parsing ---------- */
 
 const fromEnv = readFooterOptions({
   DOCLIGHT_ICP: '  浙ICP备12345678号-1  ',
@@ -123,7 +123,7 @@ assert.equal(
   '未指定时公安链接应由备案号推导',
 );
 
-// 显式覆盖链接
+// Explicit link override
 const overridden = readFooterOptions({
   DOCLIGHT_ICP: '浙ICP备1号',
   DOCLIGHT_ICP_URL: 'https://example.com/icp',

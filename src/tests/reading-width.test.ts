@@ -60,30 +60,30 @@ async function main(): Promise<void> {
   assert.equal(handle.getAttribute('role'), 'separator', 'handle should expose the separator role');
   assert.equal(rootStyle(), '760px', 'default reading width should be 760px');
 
-  // 拖拽：正文列居中，右缘移动 dx 会让总宽度变化 2*dx
+  // Dragging: the text column is centered, so moving the right edge by dx changes the total width by 2*dx
   handle.dispatchEvent(pointer('pointerdown', 500));
   handle.dispatchEvent(pointer('pointermove', 560));
   assert.equal(rootStyle(), '880px', 'dragging the handle right should widen the column');
   handle.dispatchEvent(pointer('pointerup', 560));
   assert.equal(storage['doclight-reading-width'], '880', 'width should persist after dragging');
 
-  // 安全边界：拖到天边也不能超出可视区域
+  // Safety bound: dragging past the edge must not exceed the visible area
   handle.dispatchEvent(pointer('pointerdown', 560));
   handle.dispatchEvent(pointer('pointermove', 5000));
   const max = window.innerWidth - 24;
   assert.equal(rootStyle(), max + 'px', 'width should clamp to the viewport bound');
   handle.dispatchEvent(pointer('pointerup', 5000));
 
-  // 键盘操作
+  // Keyboard operation
   handle.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
   assert.equal(rootStyle(), (max - 20) + 'px', 'ArrowLeft should narrow the column by one step');
 
-  // 双击复位默认宽度
+  // Double click restores the default width
   handle.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
   assert.equal(rootStyle(), '760px', 'double click should restore the default width');
   assert.equal(storage['doclight-reading-width'], '760', 'reset should persist too');
 
-  // 编辑器铺满，不受阅读限宽影响
+  // The editor goes full width, unaffected by the reading cap
   $('#btn-edit').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await wait(20);
   assert.equal(article.classList.contains('is-reading'), false, 'editor should use the full width');

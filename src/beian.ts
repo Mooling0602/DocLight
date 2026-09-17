@@ -1,5 +1,5 @@
 /**
- * DocLight - ICP / public-security filing footer (备案号悬挂)
+ * DocLight - ICP / public-security filing footer
  *
  * Chinese hosting regulations require a filed site to publish its filing number at
  * the bottom of the page and link it to the authority's lookup portal. The footer is
