@@ -20,12 +20,27 @@ interface StartedServer {
   stop: () => void;
 }
 
+/**
+ * Filing variables that must not leak from the parent process into the child. A
+ * DOCLIGHT_ICP exported in the developer's shell or CI would otherwise turn the
+ * "nothing configured" case into a configured one and fail the assertion.
+ */
+const FILING_ENV_VARS = [
+  'DOCLIGHT_ICP',
+  'DOCLIGHT_ICP_URL',
+  'DOCLIGHT_POLICE',
+  'DOCLIGHT_POLICE_URL',
+  'DOCLIGHT_COPYRIGHT',
+] as const;
+
 /** Boot dist/server.js on a scraped port and resolve once it is listening. */
 function startServer(env: NodeJS.ProcessEnv): Promise<StartedServer> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-http-test-'));
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of FILING_ENV_VARS) delete baseEnv[key];
   const child = spawn(process.execPath, [serverEntry], {
     cwd: root,
-    env: { ...process.env, PORT: '4700', DOCLIGHT_DATA_DIR: dataDir, ...env },
+    env: { ...baseEnv, PORT: '4700', DOCLIGHT_DATA_DIR: dataDir, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
