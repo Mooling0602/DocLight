@@ -518,6 +518,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
         const body = await readBody(req);
+        // Validate all fields before applying anything: an early return must not leave a
+        // partially updated tree behind (a slug rename also re-points every page, so it
+        // has to be committed together with the rest).
+        let nextSlug: string | null = null;
         if (body.slug !== undefined) {
           const ns = String(body.slug || '').trim();
           if (!SLUG_RE.test(ns)) return json(res, 400, { error: 'slug 只能含小写字母、数字、下划线（1–80 位）' });
@@ -525,16 +529,21 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           if (ns !== slug && (db.pages.some(p => p.slug === ns) || db.spaces.some(s => s.slug === ns))) {
             return json(res, 400, { error: '该 slug 已被占用' });
           }
-          if (ns !== slug) {
-            db.pages.forEach(p => { if (p.space === slug) p.space = ns; });
-            db.spaces[idx].slug = ns;
-          }
+          if (ns !== slug) nextSlug = ns;
         }
+        let nextTitle: string | null = null;
         if (body.title !== undefined) {
           const t = String(body.title).trim().slice(0, 120);
           if (!t) return json(res, 400, { error: '空间名称不能为空' });
-          db.spaces[idx].title = t;
+          nextTitle = t;
         }
+
+        if (nextSlug !== null) {
+          const ns = nextSlug;
+          db.pages.forEach(p => { if (p.space === slug) p.space = ns; });
+          db.spaces[idx].slug = ns;
+        }
+        if (nextTitle !== null) db.spaces[idx].title = nextTitle;
         if (body.desc !== undefined) db.spaces[idx].desc = String(body.desc).trim().slice(0, 200);
         db.spaces[idx].updatedAt = Date.now();
         writeDb(db);
