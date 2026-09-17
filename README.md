@@ -60,7 +60,8 @@ npm start
 | --- | --- |
 | 可视化编辑 | H1–H3、粗斜下删、行内代码 / 代码块、列表、引用、链接、图片、分隔线；撤销重做、快捷键（⌘S/B/I/U/Z）、Tab 缩进 |
 | 内容安全 | 服务端 XSS 清洗（剥离脚本/事件属性/危险协议）、粘贴自动清理排版垃圾 |
-| 页面管理 | 新建（slug 自动生成并永久绑定）、重命名、删除、侧栏搜索 |
+| 页面管理 | 新建（slug 自动生成并永久绑定）、重命名、编辑 slug、删除、侧栏搜索 |
+| 空间管理 | 新建 / 重命名 / 编辑 slug / 删除（含空间内全部页面） |
 | 阅读体验 | 正文默认限宽，桌面端可拖拽把手调整宽度（双击复位、本地记忆，自动限制在可视区域内） |
 | 主题 | 跟随系统 `prefers-color-scheme` / 手动浅色·深色三态切换，本地记忆，绘制前预置防闪烁 |
 | 工程细节 | TypeScript 编译、SPA 回退路由、原子化 JSON 写入、请求日志、移动端抽屉导航、打印样式 |
@@ -161,7 +162,7 @@ POST   /api/pages         新建 {title, space, parent?}
 PUT    /api/pages/:slug   更新 {title?, content?, slug?, space?, parent?}
 DELETE /api/pages/:slug   删除页面及其子页面
 POST   /api/spaces        新建 {title, desc?}
-PUT    /api/spaces/:slug  更新 {title?, desc?}
+PUT    /api/spaces/:slug  更新 {title?, desc?, slug?}
 DELETE /api/spaces/:slug  删除空间及其页面
 ```
 

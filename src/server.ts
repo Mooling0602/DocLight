@@ -15,8 +15,11 @@
  *   GET    /api/pages        page list (without content)
  *   GET    /api/pages/:slug  single page detail
  *   POST   /api/pages        create { title }
- *   PUT    /api/pages/:slug  update { title?, content? }
+ *   PUT    /api/pages/:slug  update { title?, content?, slug?, space?, parent? }
  *   DELETE /api/pages/:slug  delete
+ *   POST   /api/spaces       create { title, desc? }
+ *   PUT    /api/spaces/:slug update { title?, desc?, slug? }
+ *   DELETE /api/spaces/:slug delete
  *
  * Filing footer (see src/beian.ts), all optional:
  *   DOCLIGHT_ICP           ICP filing number, e.g. 浙ICP备12345678号-1
@@ -515,6 +518,18 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
         const body = await readBody(req);
+        if (body.slug !== undefined) {
+          const ns = String(body.slug || '').trim();
+          if (!SLUG_RE.test(ns)) return json(res, 400, { error: 'slug 只能含小写字母、数字、下划线（1–80 位）' });
+          if (RESERVED_SLUGS.has(ns)) return json(res, 400, { error: '该 slug 为系统保留字' });
+          if (ns !== slug && (db.pages.some(p => p.slug === ns) || db.spaces.some(s => s.slug === ns))) {
+            return json(res, 400, { error: '该 slug 已被占用' });
+          }
+          if (ns !== slug) {
+            db.pages.forEach(p => { if (p.space === slug) p.space = ns; });
+            db.spaces[idx].slug = ns;
+          }
+        }
         if (body.title !== undefined) {
           const t = String(body.title).trim().slice(0, 120);
           if (!t) return json(res, 400, { error: '空间名称不能为空' });
