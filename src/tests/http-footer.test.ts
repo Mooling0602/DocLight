@@ -38,9 +38,14 @@ function startServer(env: NodeJS.ProcessEnv): Promise<StartedServer> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-http-test-'));
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const key of FILING_ENV_VARS) delete baseEnv[key];
+  // Point the config loader at a path that does not exist. Without this a doclight.toml
+  // sitting in the repository root would be picked up (the default is <root>/doclight.toml)
+  // and could configure filing info, turning the "nothing configured" case into a false
+  // failure — the same class of leak the FILING_ENV_VARS scrub above guards against.
+  const configPath = path.join(dataDir, 'absent.toml');
   const child = spawn(process.execPath, [serverEntry], {
     cwd: root,
-    env: { ...baseEnv, PORT: '4700', DOCLIGHT_DATA_DIR: dataDir, ...env },
+    env: { ...baseEnv, PORT: '4700', DOCLIGHT_DATA_DIR: dataDir, DOCLIGHT_CONFIG: configPath, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

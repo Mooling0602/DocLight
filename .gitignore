@@ -7,6 +7,12 @@ nohup.out
 # ---- Credentials and account data (sensitive, never committed) ----
 data/
 
+# ---- Local configuration (machine-specific; the default file is <root>/doclight.toml) ----
+# Generated on first run as a fully commented template, then owned by the operator.
+# Keep this ignored so a locally placed config cannot silently change test results
+# (see src/tests/config.test.ts and the isolation in http-footer / space-api tests).
+doclight.toml
+
 # ---- Dependencies and editors ----
 node_modules/
 dist/
