@@ -53,6 +53,7 @@
             mkdir -p $out/lib/doclight/dist
             cp dist/server.js dist/beian.js $out/lib/doclight/dist/
             cp -r public $out/lib/doclight/
+            cp -r template $out/lib/doclight/
 
             mkdir -p $out/bin
             makeWrapper ${pkgs.nodejs}/bin/node $out/bin/doclight \

@@ -84,121 +84,46 @@ const DATA_DIR = process.env.DOCLIGHT_DATA_DIR
   ? path.resolve(process.env.DOCLIGHT_DATA_DIR)
   : path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'pages.json');
+// The sample site ships as plain JSON in template/pages.json (tracked) instead of being
+// generated in code. The data directory itself is git-ignored, so runtime content never
+// mixes with the shipped example.
+const TEMPLATE_FILE = path.join(ROOT, 'template', 'pages.json');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- Data layer */
 
+/** Load the shipped sample site (template/pages.json) as the initial database. */
 function seedDb(): Database {
-  const now = Date.now();
-  return {
-    version: 3,
-    spaces: [
-      { slug: 'default', title: '欢迎使用 DocLight', desc: 'DocLight 默认空间', home: 'welcome', createdAt: now, updatedAt: now },
-    ],
-    pages: [
-    {
-      slug: 'welcome',
-      space: 'default',
-      parent: null,
-      title: '欢迎使用 DocLight',
-      content: [
-        '<h1>欢迎使用 DocLight ✦</h1>',
-        '<p>这是一个<b>轻量的可视化文档站</b>：浏览器里直接排版，保存即刻生效。TypeScript 源码、浏览器单页应用与数据文件都在同一项目中。</p>',
-        '<blockquote><p>设计理念 —— 简洁优雅、开箱即用；写作本身不该比写下的内容更费劲。</p></blockquote>',
-        '<h2>它有什么</h2>',
-        '<ul>',
-        '  <li><b>可视化编辑</b>：所见即所得工具栏，标题、粗斜体、列表、引用、代码块一应俱全</li>',
-        '  <li><b>深浅色适配</b>：自动跟随系统外观，也可手动切换并记住选择</li>',
-        '  <li><b>TypeScript 构建</b>：首次执行 <code>npm install</code>，再用 <code>npm start</code> 编译并启动</li>',
-        '  <li><b>自动找端口</b>：端口被占用时自动探测下一个空闲端口</li>',
-        '</ul>',
-        '<h2>三步上手</h2>',
-        '<ol>',
-        '  <li>点击右上角 <b>编辑</b> 进入编辑模式；</li>',
-        '  <li>像使用字处理软件一样直接排版；</li>',
-        '  <li>按 <code>Ctrl / ⌘ + S</code> 或点击 <b>保存</b> 即可发布。</li>',
-        '</ol>',
-        '<hr>',
-        '<h2>样式一览</h2>',
-        '<p>行内代码长这样：<code>npm run build</code>；代码块支持多行：</p>',
-        '<pre><code>// 首次运行先安装依赖\nnpm install\nnpm start\n// → http://localhost:4173</code></pre>',
-        '<p>准备好了？去看看<a href="#/guide">《可视化编辑指南》</a>吧。</p>',
-      ].join('\n'),
-      createdAt: now,
-      updatedAt: now,
-    },
-    {
-      slug: 'guide',
-      space: 'default',
-      parent: null,
-      title: '可视化编辑指南',
-      content: [
-        '<h1>可视化编辑指南</h1>',
-        '<p>DocLight 的编辑器是「所见即所得」的——你排版的样子，就是读者看到的样子。</p>',
-        '<h2>进入与退出</h2>',
-        '<ul>',
-        '  <li><b>编辑</b>：任意页面右上角点击「编辑」；</li>',
-        '  <li><b>保存</b>：工具栏右侧按钮，或快捷键 <code>Ctrl / ⌘ + S</code>；</li>',
-        '  <li><b>取消</b>：放弃本次修改；若有未保存改动会先向你确认。</li>',
-        '</ul>',
-        '<h2>工具栏说明</h2>',
-        '<h3>段落样式</h3>',
-        '<p>H1 / H2 / H3 将选中的段落转换为各级标题，「¶」恢复为普通段落。</p>',
-        '<h3>文字样式</h3>',
-        '<p><b>粗体</b>、<i>斜体</i>、<u>下划线</u>、<s>删除线</s>，以及行内代码 <code>like_this()</code>。</p>',
-        '<h3>列表与引用</h3>',
-        '<ul><li>无序 / 有序列表，<code>Tab</code> 增加缩进，<code>Shift+Tab</code> 减少。</li></ul>',
-        '<blockquote><p>这就是引用块的效果，适合放提示或强调。</p></blockquote>',
-        '<h3>对齐方式</h3>',
-        '<p>居左 / 居中 / 居右，作用于光标所在段落；清除格式会一并重置对齐。</p>',
-        '<h3>插入元素</h3>',
-        '<ul>',
-        '  <li><b>链接</b>：选中文字后点击，输入地址即可；外部链接自动在新标签页打开；</li>',
-        '  <li><b>图片</b>：粘贴图片 URL，宽度自适应容器；</li>',
-        '  <li><b>代码块 / 分隔线</b>：让版面更有层次。</li>',
-        '</ul>',
-        '<h2>常用快捷键</h2>',
-        '<ul>',
-        '  <li><code>Ctrl / ⌘ + S</code> —— 保存</li>',
-        '  <li><code>Ctrl / ⌘ + B</code> / <code>I</code> / <code>U</code> —— 粗体 / 斜体 / 下划线</li>',
-        '  <li><code>Ctrl / ⌘ + Z</code> —— 撤销</li>',
-        '</ul>',
-        '<h2>关于 slug</h2>',
-        '<p>每个页面在创建时生成唯一的 slug 并<u>永久绑定</u>到链接，之后重命名标题也不会失效。</p>',
-        '<hr>',
-        '<p style="text-align:center;color:#8a8f9f">— 现在，去写下你的第一篇文档吧 —</p>',
-      ].join('\n'),
-      createdAt: now - 1,
-      updatedAt: now - 1,
-    },
-    {
-      slug: 'changelog',
-      space: 'default',
-      parent: null,
-      title: '更新日志',
-      content: [
-        '<h1>更新日志</h1>',
-        '<h2>v1.0.0 · 首发</h2>',
-        '<ul>',
-        '  <li>🎉 可视化编辑器：标题、文本样式、列表、引用、代码块、链接与图片</li>',
-        '  <li>🌗 深浅色主题：跟随系统 + 手动三态切换，偏好本地记忆</li>',
-        '  <li>📄 页面管理：新建、重命名、删除、侧栏搜索</li>',
-        '  <li>🛡 服务端内容清洗，拦截脚本注入</li>',
-        '  <li>🔌 TypeScript 构建，空闲端口自动探测</li>',
-        '</ul>',
-      ].join('\n'),
-      createdAt: now - 2,
-      updatedAt: now - 2,
-    },
-    ],
-  };
+  let raw: any;
+  try {
+    raw = JSON.parse(fs.readFileSync(TEMPLATE_FILE, 'utf8'));
+  } catch {
+    console.warn(`· 未找到示例数据 ${TEMPLATE_FILE}，将以空站点启动`);
+    return { version: 3, spaces: [], pages: [] };
+  }
+  if (!raw || raw.version !== 3) {
+    console.warn(`· 示例数据 ${TEMPLATE_FILE} 格式不正确，将以空站点启动`);
+    return { version: 3, spaces: [], pages: [] };
+  }
+  const spaces: Space[] = raw.spaces || [];
+  const pages: Page[] = raw.pages || [];
+  // Refresh the sample timestamps on first run: shift every record by one common delta so
+  // the designed ordering is preserved and the sample does not read as "created months ago".
+  const stamps = [...spaces, ...pages]
+    .map((r) => r.updatedAt)
+    .filter((t): t is number => Number.isFinite(t));
+  if (stamps.length) {
+    const delta = Date.now() - Math.max(...stamps);
+    for (const r of [...spaces, ...pages]) { r.createdAt += delta; r.updatedAt += delta; }
+  }
+  return { version: 3, spaces, pages };
 }
 
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) {
     writeDb(seedDb());
-    console.log('· 已写入初始示例数据（v3 空间模型）→ data/pages.json');
+    console.log(`· 已从示例数据初始化 → ${DATA_FILE}`);
   }
 }
 
