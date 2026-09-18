@@ -75,13 +75,20 @@ DocLight/
 │   ├── beian.ts       # 备案号页脚渲染（服务端注入）
 │   ├── client/app.ts  # 前端单页应用
 │   └── tests/         # TypeScript 回归测试
-├── data/pages.json    # 文档数据（首启自动生成示例）
+├── template/pages.json # 示例站点（首次启动复制到数据目录）
+├── data/              # 运行时数据目录（已 gitignore，首启自动创建）
+│   ├── pages.json     # 文档数据（由 template/ 初始化）
+│   └── auth.json      # 站长账号（敏感，绝不提交）
 ├── flake.nix          # Nix 打包 + NixOS 模块（含备案配置）
 └── public/
     ├── index.html     # 应用骨架
     ├── style.css      # 主题变量 + 组件样式
     └── app.js         # TypeScript 编译产物（自动生成）
 ```
+
+> 首次启动时若数据目录里没有 `pages.json`，会从 `template/pages.json` 复制一份示例站点过去；
+> `data/` 整个目录都在 `.gitignore` 中，因此运行时内容不会与仓库里的示例数据混在一起。
+> 想更换默认示例，直接编辑 `template/pages.json` 即可。
 
 ## 开发与测试
 

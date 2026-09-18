@@ -5,10 +5,7 @@ nohup.out
 *.log
 
 # ---- Credentials and account data (sensitive, never committed) ----
-data/auth.json
-
-# ---- User data (page content, committed by default; uncomment the next line to keep docs out of version control) ----
-# data/pages.json
+data/
 
 # ---- Dependencies and editors ----
 node_modules/
