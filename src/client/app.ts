@@ -342,6 +342,7 @@ function openRowMenu(btn, kind, obj) {
   rowMenu.innerHTML = kind === 'space'
     ? `
       <button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
+      <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
@@ -349,7 +350,7 @@ function openRowMenu(btn, kind, obj) {
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
-  const mw = 176, mh = kind === 'space' ? 120 : 190;
+  const mw = 176, mh = kind === 'space' ? 160 : 190;
   rowMenu.style.left = Math.max(8, Math.min(r.left - mw + 12, innerWidth - mw - 8)) + 'px';
   rowMenu.style.top = Math.min(r.bottom + 4, innerHeight - mh - 8) + 'px';
 }
@@ -1204,6 +1205,45 @@ async function renameSpaceFlow(space) {
   } catch (err) { toast(err.message, 3000); }
 }
 
+async function slugSpaceFlow(space) {
+  if (!space) return;
+  const value = await promptModal({
+    title: '编辑空间 slug',
+    label: '仅限小写字母、数字、下划线。slug 是空间的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+    value: space.slug,
+    placeholder: 'my_space',
+    ok: '保存',
+  });
+  if (value === null || value === space.slug) return;
+  const ns = normalizeSlugInput(value);
+  if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
+  try {
+    const old = space.slug;
+    const updated = await api<Space>('spaces/' + encodeURIComponent(old), {
+      method: 'PUT', body: JSON.stringify({ slug: ns }),
+    });
+    // Pages reference their space by slug, so the whole tree has to follow the rename.
+    S.pages.forEach(p => { if (p.space === old) p.space = ns; });
+    if (S.page?.space === old) S.page.space = ns;
+    const i = S.spaces.findIndex(s => s.slug === old);
+    if (i >= 0) S.spaces[i] = updated;
+    const wasCurrent = S.space?.slug === old;
+    if (wasCurrent) S.space = updated;
+    toast('slug 已更新 ✓');
+    // Update the address bar without re-routing: pages keep their own slug, so only
+    // the leading space segment changes.
+    if (S.page?.space === ns) {
+      history.replaceState(null, '', canonicalPath(S.page.slug));
+      renderArticle(S.page);
+    } else if (wasCurrent) {
+      history.replaceState(null, '', canonicalPath(ns));
+      renderSpace(updated);
+    } else {
+      renderSidebar(el.search.value);
+    }
+  } catch (err) { toast(err.message, 3000); }
+}
+
 async function deleteSpaceFlow(space) {
   if (!space) return;
   const count = S.pages.filter(p => p.space === space.slug).length;
@@ -1266,6 +1306,14 @@ async function renameFlow(pg: PageMeta | null = S.page) {
   } catch (err) { toast(err.message, 3000); }
 }
 
+/** Normalize user-typed slug input: lowercase, underscores; empty when unusable. */
+function normalizeSlugInput(value: string): string {
+  return value.trim().toLowerCase()
+    .replace(/[\s\-.]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '')
+    .replace(/_{2,}/g, '_').replace(/^_+|_+$/g, '');
+}
+
 async function slugFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const value = await promptModal({
@@ -1276,10 +1324,7 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     ok: '保存',
   });
   if (value === null || value === pg.slug) return;
-  const ns = value.trim().toLowerCase()
-    .replace(/[\s\-.]+/g, '_')
-    .replace(/[^a-z0-9_]/g, '')
-    .replace(/_{2,}/g, '_').replace(/^_+|_+$/g, '');
+  const ns = normalizeSlugInput(value);
   if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
   try {
     const old = pg.slug;
@@ -1452,7 +1497,9 @@ function renderSpace(space) {
   }).join('');
 
   el.article.innerHTML =
-    `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav></div>
+    `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
+       <a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>
+     </div>
      <div class="space-head">
        <div>
          <h1>${esc(space.title)}</h1>
@@ -1471,6 +1518,7 @@ function renderSpace(space) {
   decorate(el.article);
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
+  $('#sp-slug-edit').addEventListener('click', () => slugSpaceFlow(space));
   $('#sp-delete').addEventListener('click', () => deleteSpaceFlow(space));
   renderAuthUI();
   renderSidebar(el.search.value);
@@ -1604,6 +1652,7 @@ rowMenu.addEventListener('click', e => {
     const sp = spaceBySlug(slug);
     if (!sp) return;
     if (act === 'rename') renameSpaceFlow(sp);
+    if (act === 'slug') slugSpaceFlow(sp);
     if (act === 'delete') deleteSpaceFlow(sp);
   } else {
     const pg = pageBySlug(slug);

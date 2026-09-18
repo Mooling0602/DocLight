@@ -679,7 +679,11 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 /* ---------- Sidebar inline quick actions (revealed on hover, Yuque-style) ---------- */
 .row-actions { display: none; align-items: center; gap: 1px; margin-right: 6px; }
 .tree-row:hover .row-actions,
-.tree-row.is-active .row-actions { display: inline-flex; }
+.tree-row.is-active .row-actions,
+.space-row:hover .row-actions,
+.space-row.is-active .row-actions { display: inline-flex; }
+/* Space rows stretch their children, so the actions need their own centering */
+.space-row .row-actions { align-self: center; }
 .ra-btn {
   width: 24px; height: 24px; flex: none;
   border: none; border-radius: 6px; background: none; color: var(--text-3);
