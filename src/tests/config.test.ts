@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig } from '../config.js';
+import { loadConfig, ensureConfigFile, CONFIG_TEMPLATE, CONFIG_KEYS } from '../config.js';
 
 const root = path.resolve(__dirname, '../..');
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-config-test-'));
@@ -133,6 +133,54 @@ assert.equal(
   '默认配置路径不得位于 dataDir 之下（避免自引用）',
 );
 fs.rmSync(cleanRoot, { recursive: true, force: true });
+
+/* ---------- 9. The starter file is seeded once, and cannot change behaviour ---------- */
+
+const seedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-config-seed-'));
+const seedFile = path.join(seedRoot, 'doclight.toml');
+
+// The template documents every key the loader accepts; a new option added without
+// updating the template fails here.
+for (const key of CONFIG_KEYS) {
+  assert.match(CONFIG_TEMPLATE, new RegExp(`^#${key} =`, 'm'), `模板应包含配置项 ${key}`);
+}
+
+// Seeding fills the default path and reports it.
+assert.equal(ensureConfigFile({ env: {} as NodeJS.ProcessEnv, root: seedRoot }), seedFile, '首次运行应在默认路径生成模板');
+assert.ok(fs.existsSync(seedFile), '生成后文件应存在');
+
+// The generated file must resolve to the built-in defaults: every key is commented out.
+const seeded = loadConfig({ env: {} as NodeJS.ProcessEnv, root: seedRoot });
+assert.equal(seeded.port, 4173, '模板不得激活任何端口值');
+assert.equal(seeded.strictPort, false, '模板不得启用严格端口模式');
+assert.equal(seeded.dataDir, path.join(seedRoot, 'data'), '模板不得覆盖默认数据目录');
+assert.equal(seeded.icp, '', '模板不得写入备案号');
+assert.equal(seeded.copyright, '', '模板不得写入版权行');
+
+// An existing file is never overwritten, so local edits survive a restart.
+fs.writeFileSync(seedFile, 'port = 4900\n');
+assert.equal(ensureConfigFile({ env: {} as NodeJS.ProcessEnv, root: seedRoot }), null, '已存在配置文件时不应再次生成');
+assert.equal(fs.readFileSync(seedFile, 'utf8'), 'port = 4900\n', '已有的本地配置不得被覆盖');
+
+// An explicit DOCLIGHT_CONFIG is honoured, and no stray file appears at the default path.
+fs.rmSync(seedFile, { force: true });
+const elsewhere = path.join(seedRoot, 'nested', 'custom.toml');
+assert.equal(
+  ensureConfigFile({ env: { DOCLIGHT_CONFIG: elsewhere } as NodeJS.ProcessEnv, root: seedRoot }),
+  null,
+  'DOCLIGHT_CONFIG 生效时不应生成默认路径文件',
+);
+assert.equal(fs.existsSync(seedFile), false, 'DOCLIGHT_CONFIG 生效时不得在默认路径留下文件');
+
+// An unwritable root (the read-only Nix store) must not break startup.
+const roRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-config-ro-'));
+fs.chmodSync(roRoot, 0o500);
+const roResult = ensureConfigFile({ env: {} as NodeJS.ProcessEnv, root: roRoot });
+fs.chmodSync(roRoot, 0o700);
+assert.equal(roResult, null, '根目录不可写时应静默跳过而非抛错');
+
+fs.rmSync(seedRoot, { recursive: true, force: true });
+fs.rmSync(roRoot, { recursive: true, force: true });
 
 fs.rmSync(tmpRoot, { recursive: true, force: true });
 console.log('config assertions passed');

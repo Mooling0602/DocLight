@@ -6,8 +6,10 @@
  *   PORT=8080 npm start       # start from the given port
  *
  * Configuration (see src/config.ts): built-in defaults < doclight.toml < environment.
- * The file is <root>/doclight.toml unless DOCLIGHT_CONFIG points elsewhere; a missing
- * file silently falls back to defaults, a malformed one aborts startup.
+ * The file is <root>/doclight.toml unless DOCLIGHT_CONFIG points elsewhere. On first run
+ * a fully commented template is written there so the options are discoverable in place —
+ * it holds no active values, so the resolved configuration is unchanged; a malformed file
+ * still aborts startup.
  *
  * Environment (temporary overrides; an existing variable always wins, empty clears):
  *   PORT                 starting TCP port (default 4173)
@@ -39,7 +41,7 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
-import { loadConfig } from './config.js';
+import { loadConfig, ensureConfigFile } from './config.js';
 import type { AppConfig } from './config.js';
 
 interface Space {
@@ -87,7 +89,14 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 // Configuration is resolved once, before anything depends on it: the TOML file (if any)
 // plus environment overrides. A malformed file must abort startup rather than fall back
 // silently, because that would hide the operator's mistake behind working defaults.
+//
+// The starter file is seeded first so a first run leaves an editable doclight.toml in
+// place, making the options discoverable without a trip to the README. It is written
+// only when the operator has no file at the default path, and never holds active values
+// (every key is commented out), so it cannot change the resolved configuration.
 const CONFIG: AppConfig = (() => {
+  const seeded = ensureConfigFile({ root: ROOT });
+  if (seeded) console.log(`· 已生成配置文件模板 → ${seeded}（默认全注释，按需取消注释）`);
   try {
     return loadConfig({ root: ROOT });
   } catch (err) {

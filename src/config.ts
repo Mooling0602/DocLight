@@ -43,6 +43,9 @@ const ENV_KEYS: Record<string, string> = {
 
 const KNOWN_KEYS = Object.keys(ENV_KEYS);
 
+/** Exported so tests can assert the starter template documents every known key. */
+export const CONFIG_KEYS = KNOWN_KEYS;
+
 export interface AppConfig {
   port: number;
   /** Bind address; undefined means every interface. */
@@ -93,6 +96,88 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv, root: string, override
   if (explicit !== undefined && explicit.trim() !== '') return path.resolve(explicit);
   return path.join(root, 'doclight.toml');
 }
+
+/**
+ * Write the starter configuration file if the operator has none yet, so the available
+ * options are discoverable in place instead of only in the README.
+ *
+ * Only <root>/doclight.toml is ever seeded. An explicit DOCLIGHT_CONFIG means the
+ * operator already manages a file — or deliberately points at one that does not exist
+ * yet — and a chosen path must never be created behind their back (a typo would
+ * otherwise leave a stray file next to the intended one). An existing file is never
+ * touched, so local edits survive restarts.
+ *
+ * Seeding is best-effort and must not break startup: under `nix run` the project root is
+ * a read-only store path, where the write simply fails. Returns the path actually
+ * written, or null when nothing was created.
+ */
+export function ensureConfigFile(options: { env?: NodeJS.ProcessEnv; root?: string } = {}): string | null {
+  const env = options.env || process.env;
+  const root = options.root || DEFAULT_ROOT;
+
+  const explicit = env.DOCLIGHT_CONFIG;
+  if (explicit !== undefined && explicit.trim() !== '') return null;
+
+  const file = path.join(root, 'doclight.toml');
+  if (fs.existsSync(file)) return null;
+  try {
+    // `wx` makes creation atomic: a file that appeared between the check and the write
+    // is never overwritten.
+    fs.writeFileSync(file, CONFIG_TEMPLATE, { flag: 'wx' });
+    return file;
+  } catch {
+    // Unwritable root (read-only store, missing directory, no permission) or a racing
+    // creator that won the exclusivity check: startup continues with built-in defaults.
+    return null;
+  }
+}
+
+/**
+ * The starter file written on first run. Every key is commented out on purpose: the
+ * file then parses to an empty table, so its mere existence cannot change behaviour
+ * (a template that uncommented its defaults would pin today's defaults into every new
+ * install, and later default changes would stop reaching them).
+ *
+ * `config.test.ts` asserts that each known key appears here, so adding a config option
+ * without documenting it in the template fails the suite.
+ */
+export const CONFIG_TEMPLATE = `# DocLight 配置文件
+#
+# 默认读取本文件（项目根/doclight.toml）；也可用 DOCLIGHT_CONFIG 指向别处。
+# 优先级：内置默认值 < 本文件 < 环境变量。
+# 本文件是正式载体，环境变量只作临时覆盖（变量存在即生效，空串表示清空）。
+#
+# 下面的键全部以注释给出，即当前全部使用内置默认值。取消注释并改写即可生效；
+# 未取消注释的键不会覆盖默认值。改完需重启服务。
+
+# 起始端口；默认 4173，被占用时自动向后探测。必须是 1–65535 的整数。
+#port = 4173
+
+# 监听地址；默认监听全部网卡，设 "127.0.0.1" 可只允许本机访问。
+#host = "127.0.0.1"
+
+# true 时端口被占用直接报错退出，不再向后探测（默认 false）。
+#strictPort = false
+
+# 数据目录（存放 pages.json、auth.json）；默认 <项目根>/data。
+# 需持久化或受保护时改为绝对路径，例如 "/var/lib/doclight"。
+#dataDir = "/var/lib/doclight"
+
+# 网站备案号，悬挂在页面底部；留空（默认）则不显示。
+#icp = "浙ICP备12345678号-1"
+
+# 备案号链接；不设置时按内置规则指向工信部备案管理系统。
+#icpUrl = "https://beian.miit.gov.cn/"
+
+# 公安联网备案号（可选）。
+#police = "京公网安备11010502030123号"
+
+# 公安备案号链接；不设置时按备案号中的数字段自动生成查询链接。
+#policeUrl = ""
+
+# 版权行（可选），显示在备案号左侧。
+#copyright = "© 2026 Mooling"
+`;
 
 /** Read and validate the TOML file. A missing file is not an error (first run must work
  *  out of the box); a malformed one is fatal and reports its line number. */
