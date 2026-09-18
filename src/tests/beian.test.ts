@@ -108,29 +108,34 @@ assert.equal(
 assert.equal(policeLookupUrl(''), POLICE_PORTAL, '无号码时回退到门户首页');
 assert.equal(policeLookupUrl('京公网安备号'), POLICE_PORTAL, '无数字时回退到门户首页');
 
-/* ---------- Environment variable parsing ---------- */
+/* ---------- Merged-config parsing ---------- */
 
-const fromEnv = readFooterOptions({
-  DOCLIGHT_ICP: '  浙ICP备12345678号-1  ',
-  DOCLIGHT_POLICE: '京公网安备11010502030123号',
-  DOCLIGHT_COPYRIGHT: '© 2026 Mooling',
-} as NodeJS.ProcessEnv);
-assert.equal(fromEnv.icp, '浙ICP备12345678号-1', '环境变量两侧空白应被裁剪');
-assert.equal(fromEnv.icpUrl, ICP_PORTAL, '未指定时 ICP 链接应默认指向工信部');
+const fromConfig = readFooterOptions({
+  icp: '  浙ICP备12345678号-1  ',
+  icpUrl: '',
+  police: '京公网安备11010502030123号',
+  policeUrl: '',
+  copyright: '© 2026 Mooling',
+});
+assert.equal(fromConfig.icp, '浙ICP备12345678号-1', '配置值两侧空白应被裁剪');
+assert.equal(fromConfig.icpUrl, ICP_PORTAL, '未指定时 ICP 链接应默认指向工信部');
 assert.equal(
-  fromEnv.policeUrl,
+  fromConfig.policeUrl,
   'https://beian.mps.gov.cn/#/query/webSearch?code=11010502030123',
   '未指定时公安链接应由备案号推导',
 );
 
 // Explicit link override
 const overridden = readFooterOptions({
-  DOCLIGHT_ICP: '浙ICP备1号',
-  DOCLIGHT_ICP_URL: 'https://example.com/icp',
-} as NodeJS.ProcessEnv);
+  icp: '浙ICP备1号',
+  icpUrl: 'https://example.com/icp',
+  police: '',
+  policeUrl: '',
+  copyright: '',
+});
 assert.equal(overridden.icpUrl, 'https://example.com/icp', '显式 ICP 链接应生效');
 
-const emptyEnv = readFooterOptions({} as NodeJS.ProcessEnv);
-assert.equal(hasFiling(emptyEnv), false, '空环境应视为未配置备案');
+const emptyConfig = readFooterOptions({ icp: '', icpUrl: '', police: '', policeUrl: '', copyright: '' });
+assert.equal(hasFiling(emptyConfig), false, '全空配置应视为未配置备案');
 
 console.log('beian footer assertions passed');

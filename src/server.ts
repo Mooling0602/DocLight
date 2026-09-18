@@ -5,11 +5,16 @@
  *   npm start                 # auto-detect a free port and start
  *   PORT=8080 npm start       # start from the given port
  *
- * Environment:
+ * Configuration (see src/config.ts): built-in defaults < doclight.toml < environment.
+ * The file is <root>/doclight.toml unless DOCLIGHT_CONFIG points elsewhere; a missing
+ * file silently falls back to defaults, a malformed one aborts startup.
+ *
+ * Environment (temporary overrides; an existing variable always wins, empty clears):
  *   PORT                 starting TCP port (default 4173)
  *   DOCLIGHT_HOST        bind address (default: all interfaces)
  *   DOCLIGHT_DATA_DIR    writable data directory (default: <root>/data)
  *   DOCLIGHT_STRICT_PORT fail instead of scanning for the next free port
+ *   DOCLIGHT_CONFIG      path to the TOML configuration file
  *
  * API:
  *   GET    /api/pages        page list (without content)
@@ -34,6 +39,8 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
+import { loadConfig } from './config.js';
+import type { AppConfig } from './config.js';
 
 interface Space {
   slug: string;
@@ -77,12 +84,21 @@ type RequestBody = Record<string, unknown>;
 // The compiled entry point lives in dist/, while public/ and data/ stay at the project root.
 const ROOT = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
+// Configuration is resolved once, before anything depends on it: the TOML file (if any)
+// plus environment overrides. A malformed file must abort startup rather than fall back
+// silently, because that would hide the operator's mistake behind working defaults.
+const CONFIG: AppConfig = (() => {
+  try {
+    return loadConfig({ root: ROOT });
+  } catch (err) {
+    console.error('配置错误:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+})();
 // The Nix package ships in a read-only store path, so everything writable must be
-// relocatable. DOCLIGHT_DATA_DIR keeps the project layout as the default while
-// letting a service redirect state (and its auth store) to a persistent volume.
-const DATA_DIR = process.env.DOCLIGHT_DATA_DIR
-  ? path.resolve(process.env.DOCLIGHT_DATA_DIR)
-  : path.join(ROOT, 'data');
+// relocatable. `dataDir` defaults to the project layout and can be redirected to a
+// persistent volume through the config file or DOCLIGHT_DATA_DIR.
+const DATA_DIR = CONFIG.dataDir;
 const DATA_FILE = path.join(DATA_DIR, 'pages.json');
 // The sample site ships as plain JSON in template/pages.json (tracked) instead of being
 // generated in code. The data directory itself is git-ignored, so runtime content never
@@ -239,7 +255,7 @@ function indexHtml(): string {
   }
   // injectFooter also consumes the marker when no filing is configured, so the
   // served HTML never ships an HTML comment describing an internal hook.
-  indexHtmlCache = injectFooter(html, readFooterOptions());
+  indexHtmlCache = injectFooter(html, readFooterOptions(CONFIG));
   return indexHtmlCache;
 }
 
@@ -614,12 +630,12 @@ function listen(server: Server, port: number, retriesLeft: number, host?: string
 
 async function main(): Promise<void> {
   ensureData();
-  const startPort = Number(process.env.PORT) || 4173;
-  const host = process.env.DOCLIGHT_HOST || undefined; // undefined = all interfaces
+  const startPort = CONFIG.port;
+  const host = CONFIG.host; // undefined = all interfaces
   // Port scanning suits interactive local use, but a service manager must fail
   // loudly instead of silently drifting to another port (the reverse proxy points
-  // at one specific port). DOCLIGHT_STRICT_PORT=1 disables the scan.
-  const retries = process.env.DOCLIGHT_STRICT_PORT ? 0 : 50;
+  // at one specific port). strictPort disables the scan.
+  const retries = CONFIG.strictPort ? 0 : 50;
   const server = http.createServer(handler);
   try {
     const port = await listen(server, startPort, retries, host);

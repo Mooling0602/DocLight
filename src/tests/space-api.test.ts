@@ -26,9 +26,19 @@ interface StartedServer {
 /** Boot dist/server.js on a scraped port and resolve once it is listening. */
 function startServer(): Promise<StartedServer> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-space-test-'));
+  // Keep the child isolated from any configuration in the developer's environment or a
+  // doclight.toml in the repository root: an inherited port or strict mode would change
+  // which port the server picks and break the scraped-port assumptions below.
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of ['PORT', 'DOCLIGHT_HOST', 'DOCLIGHT_STRICT_PORT', 'DOCLIGHT_DATA_DIR']) delete baseEnv[key];
   const child = spawn(process.execPath, [serverEntry], {
     cwd: root,
-    env: { ...process.env, PORT: '4730', DOCLIGHT_DATA_DIR: dataDir },
+    env: {
+      ...baseEnv,
+      PORT: '4730',
+      DOCLIGHT_DATA_DIR: dataDir,
+      DOCLIGHT_CONFIG: path.join(dataDir, 'absent.toml'),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

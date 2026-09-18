@@ -9,15 +9,25 @@
     "build:client": "tsc --project tsconfig.client.json",
     "build:tests": "tsc --project tsconfig.tests.json",
     "start": "npm run build && node dist/server.js",
-    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/beian.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js"
+    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js"
   },
   "engines": {
     "node": ">=20"
   },
+  "files": [
+    "dist/server.js",
+    "dist/beian.js",
+    "dist/config.js",
+    "public/",
+    "template/pages.json"
+  ],
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.4.0",
     "jsdom": "^30.0.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "smol-toml": "^1.8.0"
   }
 }

@@ -7,8 +7,8 @@
  * client bundle: compliance checks read the raw response, which would be empty if the
  * number only existed after the SPA booted.
  *
- * Everything here is a pure function of the environment so it can be unit tested
- * without starting the server.
+ * Everything here is a pure function of already-resolved configuration, so it can be
+ * unit tested without starting the server.
  */
 
 export interface FooterOptions {
@@ -60,15 +60,17 @@ export function policeLookupUrl(number: string): string {
   return code ? `${POLICE_PORTAL}#/query/webSearch?code=${code}` : POLICE_PORTAL;
 }
 
-/** Read the footer configuration from the environment. */
-export function readFooterOptions(env: NodeJS.ProcessEnv = process.env): FooterOptions {
-  const police = (env.DOCLIGHT_POLICE || '').trim();
+/** Read the footer configuration from the merged application config. */
+export function readFooterOptions(config: Pick<FooterOptions, 'icp' | 'icpUrl' | 'police' | 'policeUrl' | 'copyright'>): FooterOptions {
+  // The merged config already resolved defaults < file < env; the URL fallbacks below
+  // only concern the *link* derived from a filing number, not the value precedence.
+  const police = (config.police || '').trim();
   return {
-    icp: (env.DOCLIGHT_ICP || '').trim(),
-    icpUrl: safeUrl(env.DOCLIGHT_ICP_URL || '', ICP_PORTAL),
+    icp: (config.icp || '').trim(),
+    icpUrl: safeUrl(config.icpUrl || '', ICP_PORTAL),
     police,
-    policeUrl: safeUrl(env.DOCLIGHT_POLICE_URL || '', policeLookupUrl(police)),
-    copyright: (env.DOCLIGHT_COPYRIGHT || '').trim(),
+    policeUrl: safeUrl(config.policeUrl || '', policeLookupUrl(police)),
+    copyright: (config.copyright || '').trim(),
   };
 }
 
