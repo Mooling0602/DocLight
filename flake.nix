@@ -28,7 +28,10 @@
           # so adding or updating a dependency no longer requires recomputing a
           # fixed-output hash (the old npmDepsHash drifted on every manifest change).
           # Both attributes must be set together, otherwise npmDeps is not wired in.
-          npmDeps = pkgs.importNpmLock { npmRoot = src; };
+          # `npmRoot` takes `self` directly, not the sibling `src` binding: attribute
+          # values are not in each other's scope without `rec`, so referencing `src`
+          # here is an undefined variable at evaluation time.
+          npmDeps = pkgs.importNpmLock { npmRoot = self; };
           npmConfigHook = pkgs.importNpmLock.npmConfigHook;
 
           # `npm run build` compiles the server, the browser bundle and the tests.
@@ -50,11 +53,18 @@
           # the root.
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
+          # The wrapper only supplies a writable data directory for the no-config case:
+          # the store is read-only, so `dataDir` would otherwise default to a path under
+          # it. It must not inject DOCLIGHT_DATA_DIR when the user pointed at a config
+          # file — the environment outranks the file, so doing so would silently override
+          # the file's `dataDir`, contradicting "environment variables are a temporary
+          # override". With DOCLIGHT_CONFIG set, the file owns `dataDir`; a config used
+          # under `nix run` must therefore set it (or DOCLIGHT_DATA_DIR explicitly).
           postInstall = ''
             mkdir -p $out/bin
             makeWrapper ${pkgs.nodejs}/bin/node $out/bin/doclight \
               --add-flags $out/lib/node_modules/doclight/dist/server.js \
-              --run 'if [ -z "''${DOCLIGHT_DATA_DIR:-}" ]; then export DOCLIGHT_DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/doclight"; fi'
+              --run 'if [ -z "''${DOCLIGHT_CONFIG:-}" ] && [ -z "''${DOCLIGHT_DATA_DIR:-}" ]; then export DOCLIGHT_DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/doclight"; fi'
           '';
 
           meta = {

@@ -146,7 +146,7 @@ nix run .
 PORT=8080 nix run .
 DOCLIGHT_DATA_DIR=/tmp/docs nix run .
 
-# 用配置文件
+# 用配置文件（此时由文件里的 dataDir 决定数据位置，包装器不再注入）
 DOCLIGHT_CONFIG=/path/to/doclight.toml nix run .
 
 # 构建到 ./result（命令名 doclight）
@@ -161,6 +161,10 @@ nix flake check
 ```
 
 `nix run .` 会在源码变化时重新编译；注意 flake 取的是 **Git 树**，新增文件需要先 `git add`（不必 commit）。
+
+> 用 `DOCLIGHT_CONFIG` 指定配置文件时，包装器**不再**注入 `DOCLIGHT_DATA_DIR`，因为环境变量优先级高于文件，
+> 那会静默压掉文件里的 `dataDir`。因此这种情况下请在配置文件里写 `dataDir`（或另外显式设 `DOCLIGHT_DATA_DIR`）：
+> 否则默认数据目录会落在只读的 Nix store 下而无法写入。
 
 NixOS 上也可以声明式部署：
 
