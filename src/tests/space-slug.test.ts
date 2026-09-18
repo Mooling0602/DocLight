@@ -60,7 +60,25 @@ async function main(): Promise<void> {
   // The sidebar page link is built from the page → space chain
   assert.equal($('.tree-row .page-item').getAttribute('href'), '/default/welcome', 'page link uses the space chain');
 
-  click('#sp-slug-edit');
+  // The inline quick actions must also be reachable from the sidebar space row. They are
+  // hidden until hover by CSS, and a rule that only targeted .tree-row left the space
+  // menu permanently invisible on desktop, so both the DOM entry and the reveal rule
+  // are asserted here.
+  const actions = $('.space-row .row-actions');
+  assert.ok(actions, 'space row should carry inline quick actions');
+  const more = actions.querySelectorAll('.ra-btn')[1];
+  more.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  const rowMenu = $('#menu-row');
+  assert.equal(rowMenu.hidden, false, 'space row menu should open');
+  assert.equal(rowMenu.dataset.kind, 'space', 'space row menu should be in space mode');
+  const slugItem = rowMenu.querySelector<HTMLElement>('[data-act="slug"]');
+  assert.ok(slugItem, 'space row menu should offer slug editing');
+
+  const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');
+  assert.match(css, /\.space-row:hover \.row-actions/, 'CSS must reveal space row actions on hover');
+
+  slugItem!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await wait(20);
   const modal = $('#modal-root');
   assert.equal(modal.hidden, false, 'slug prompt should open');
