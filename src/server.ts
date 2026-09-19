@@ -94,6 +94,10 @@ const DATA_DIR = CONFIG.dataDir;
 // spaces as `data/spaces.json`; see src/store.ts. A single legacy `data/pages.json` (v3 or v4)
 // is split into that layout on first start.
 const LEGACY_DATA_FILE = path.join(DATA_DIR, 'pages.json');
+// Proof that this data directory has already been migrated to the file layout. Deliberately not a
+// dotfile: sync tools commonly exclude those by default, and losing this marker is exactly what
+// would let a stale snapshot be re-migrated. See `legacyFileIsResidue`.
+const MIGRATION_MARKER = path.join(DATA_DIR, 'pages.json.migrated');
 const TEMPLATE_DIR = path.join(ROOT, 'template');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
@@ -135,9 +139,9 @@ function ensureData(): void {
     // purpose, but if a legacy file is also present *it* is this site's real data — the index was
     // written empty and the pages never made it out of the single file. Retiring it here (which the
     // `storeExists` branch below would do, an empty-but-parseable index counting as a store) would
-    // move the user's only copy aside unread and leave them looking at an empty site. A legacy file
-    // beside its own backup is the stale-reappearance case, not this one, so it is left to below.
-    if (fs.existsSync(LEGACY_DATA_FILE) && !fs.existsSync(LEGACY_DATA_FILE + '.bak')) {
+    // move the user's only copy aside unread and leave them looking at an empty site. A file already
+    // superseded by an earlier migration is residue, not data, so it is left to below.
+    if (fs.existsSync(LEGACY_DATA_FILE) && !legacyFileIsResidue()) {
       migrateLegacyFile();
       return;
     }
@@ -151,12 +155,13 @@ function ensureData(): void {
     return;
   }
 
-  // A legacy file sitting next to its own backup proves a migration already ran for this data
-  // directory, so this copy is a stale re-appearance — the retire step failed, or the file was
-  // copied back in. Migrating it would re-import pre-edit content over the live page files, so it
-  // is retired instead (its bytes preserved) and the store is rebuilt from those files below.
-  if (fs.existsSync(LEGACY_DATA_FILE) && fs.existsSync(LEGACY_DATA_FILE + '.bak')) {
-    console.warn(`· ${path.basename(LEGACY_DATA_FILE)} 与已有备份并存，判定为迁移残留，将按页面文件恢复`);
+  // A legacy file already superseded by an earlier migration is a stale re-appearance — the retire
+  // step failed, or the file was copied back in. Migrating it would re-import pre-edit content over
+  // the live page files, and with `onlyCreate` it would still resurrect every page the user has
+  // since *deleted* (a missing file looks like one the snapshot should supply). It is therefore
+  // retired instead (its bytes preserved) and the store is rebuilt from those files below.
+  if (fs.existsSync(LEGACY_DATA_FILE) && legacyFileIsResidue()) {
+    console.warn(`· ${path.basename(LEGACY_DATA_FILE)} 已被此前的迁移取代，判定为残留，将按页面文件恢复`);
     retireLegacyFile();
   } else if (fs.existsSync(LEGACY_DATA_FILE)) {
     // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
@@ -192,6 +197,9 @@ function ensureData(): void {
  */
 function retireLegacyFile(): void {
   if (!fs.existsSync(LEGACY_DATA_FILE)) return;
+  // Written before the move, so a crash between the two still leaves proof the migration happened.
+  // A missing marker would make the surviving legacy file look like a first migration.
+  try { fs.writeFileSync(MIGRATION_MARKER, new Date().toISOString() + '\n', 'utf8'); } catch { /* best effort */ }
   const backup = LEGACY_DATA_FILE + '.bak';
   try {
     if (!fs.existsSync(backup)) {
@@ -211,6 +219,25 @@ function retireLegacyFile(): void {
     // page files, so a failed move is left for the next boot to retry rather than risking further
     // filesystem work. `ensureData` above also refuses to migrate a file that has a backup.
   }
+}
+
+/**
+ * Whether the legacy file has already been superseded by a migration of this data directory.
+ *
+ * The `.bak` alone was not enough: `onlyCreate` protects page files that exist, so a re-import kept
+ * the user's edits but resurrected every page they had *deleted*, since a missing file looks exactly
+ * like one the snapshot should supply. The marker is written by `retireLegacyFile` just before it
+ * moves the file, so it survives a failed move and the file being copied back in — the cases that
+ * were actually reachable. The `.bak` check remains for data directories migrated by an older
+ * version, which has a backup but no marker.
+ *
+ * The one window still not covered is a crash in the instant between the store write and the retire
+ * call, where nothing distinguishes a replay from a first migration. It is idempotent in effect:
+ * pages already written are left alone, and the user cannot have deleted anything in a window they
+ * never got to use.
+ */
+function legacyFileIsResidue(): boolean {
+  return fs.existsSync(MIGRATION_MARKER) || fs.existsSync(LEGACY_DATA_FILE + '.bak');
 }
 
 /** Byte comparison of two files, false on any read error. */
@@ -275,7 +302,12 @@ function migrateLegacyFile(): void {
 }
 
 function readDb(): Database {
-  if (!storeExists(DATA_DIR)) ensureData();
+  // Same condition as startup: an index that exists but names no spaces cannot classify the pages,
+  // and `storeExists` alone accepts it. Without this, an index emptied while the server is running
+  // (sync tool, hand edit) is read as "no spaces": every page collapses onto the fallback space and
+  // the next ordinary save persists that, silently reassigning pages. It is also why such a request
+  // would 404 on a space move — the target space no longer exists in memory.
+  if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
   return readStore(DATA_DIR);
 }
 /** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store

@@ -10,6 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { pbkdf2Sync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -371,11 +372,12 @@ async function main(): Promise<void> {
     fs.rmSync(reappearDir, { recursive: true, force: true });
   }
 
-  /* ---- A re-migration must not overwrite live page files (no .bak needed) ---- */
+  /* ---- A re-migration must not resurrect a page the user deleted ---- */
   // The crash window `reappearDir` above cannot reach: migration wrote the store but the retire
-  // move never ran, so `pages.json` is back with NO `.bak` beside it. An `existsSync`-based guard
-  // cannot tell this from a first migration, so it re-imports the stale snapshot. Migration must
-  // therefore never overwrite a page file that already exists.
+  // move never ran, so `pages.json` is back with NO `.bak` beside it. `onlyCreate` alone was not
+  // enough here — it protects files that exist, so the user's *edits* survived, but a page they had
+  // deleted came straight back, because a missing file is indistinguishable from one the snapshot
+  // should supply. The migration marker is what tells this apart from a first migration.
   const crashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-crash-'));
   fs.writeFileSync(path.join(crashDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
   const crashFirst = await startServer(crashDir);
@@ -384,7 +386,7 @@ async function main(): Promise<void> {
 
   const crashFile = path.join(crashDir, 'pages', 'legacy.md');
   fs.writeFileSync(crashFile, fs.readFileSync(crashFile, 'utf8').replace('# 旧标题', '# 崩溃窗口后改的标题'), 'utf8');
-  // Remove a page so the re-migration has something genuinely missing to add back.
+  // The user deletes a page through the UI; the snapshot still lists it.
   fs.rmSync(path.join(crashDir, 'pages', 'empty.md'), { force: true });
   // Recreate the crash state: legacy file back in place, no backup, index lost.
   fs.copyFileSync(path.join(crashDir, 'pages.json.bak'), path.join(crashDir, 'pages.json'));
@@ -398,11 +400,147 @@ async function main(): Promise<void> {
       /# 崩溃窗口后改的标题/,
       '迁移重建 store 时不得覆盖已存在的页面文件',
     );
-    // `onlyCreate` still adds pages the store lacks, so the snapshot is not simply ignored.
-    assert.ok(fs.existsSync(path.join(crashDir, 'pages', 'empty.md')), '旧快照中缺失的页面仍应被补建');
+    // The snapshot is residue, not data: re-importing it would undo the deletion. (A genuine first
+    // migration still creates every page the snapshot holds — see the first block of this suite.)
+    assert.ok(
+      !fs.existsSync(path.join(crashDir, 'pages', 'empty.md')),
+      '重迁移不得复活用户已删除的页面',
+    );
+    assert.ok(
+      fs.existsSync(path.join(crashDir, 'pages', 'legacy.md')),
+      '未被删除的页面应保留',
+    );
   } finally {
     afterCrash.stop();
     fs.rmSync(crashDir, { recursive: true, force: true });
+  }
+
+  /* ---- A deleted page stays deleted across a re-migration (API level) ---- */
+  // The reporter's exact path: migrate, delete a page through the API, then restore the crash
+  // window. `onlyCreate` recreated `doomed.md` from the snapshot and `/api/tree` listed it again.
+  const delDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-del-'));
+  fs.writeFileSync(path.join(delDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const delFirst = await startServer(delDir);
+  const delBase = `http://127.0.0.1:${delFirst.port}`;
+  try {
+    let cookie = '';
+    const api = async (endpoint: string, opts: RequestInit = {}) => {
+      const res = await fetch(`${delBase}/api/${endpoint}`, {
+        headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+        ...opts,
+      });
+      const sc = res.headers.get('set-cookie');
+      if (sc) cookie = sc.split(';')[0];
+      return res;
+    };
+    const state = await (await api('auth/state')).json();
+    const ks = pbkdf2Sync('pw123456', Buffer.from(state.salt, 'hex'), state.iters, 32, 'sha256').toString('hex');
+    await api('auth/setup', { method: 'POST', body: JSON.stringify({ user: 'tester', ks }) });
+    const del = await api('pages/empty', { method: 'DELETE' });
+    assert.equal(del.status, 200, '删除页面应成功');
+  } finally {
+    delFirst.stop();
+  }
+  assert.ok(!fs.existsSync(path.join(delDir, 'pages', 'empty.md')), '删除后文件应消失');
+
+  // Restore the crash window: snapshot back, no backup, no index.
+  fs.copyFileSync(path.join(delDir, 'pages.json.bak'), path.join(delDir, 'pages.json'));
+  fs.rmSync(path.join(delDir, 'pages.json.bak'), { force: true });
+  fs.rmSync(path.join(delDir, 'spaces.json'), { force: true });
+
+  const delAgain = await startServer(delDir);
+  try {
+    assert.ok(
+      !fs.existsSync(path.join(delDir, 'pages', 'empty.md')),
+      '重启后不得为已删除的页面重建文件',
+    );
+    const tree = await (await fetch(`http://127.0.0.1:${delAgain.port}/api/tree`)).json();
+    assert.ok(
+      !tree.pages.some((p: any) => p.slug === 'empty'),
+      '接口不应再次列出已删除的页面',
+    );
+  } finally {
+    delAgain.stop();
+    fs.rmSync(delDir, { recursive: true, force: true });
+  }
+
+  /* ---- An index emptied while the server runs is repaired on the next read ---- */
+  // Startup repairs an index that names no spaces, but `readDb` only re-ran `ensureData` when
+  // `storeExists` was false — and an empty index satisfies it. So an index emptied by a sync tool
+  // or a hand edit mid-run was read as "no spaces": each page collapsed onto the fallback space and
+  // the next ordinary save wrote that back, silently reassigning the user's pages.
+  const liveIdxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-liveidx-'));
+  fs.mkdirSync(path.join(liveIdxDir, 'pages'), { recursive: true });
+  fs.writeFileSync(
+    path.join(liveIdxDir, 'pages', 'mine.md'),
+    '---\ntitle: 我的页\nspace: myspace\n---\n\n正文\n',
+    'utf8',
+  );
+  fs.writeFileSync(
+    path.join(liveIdxDir, 'spaces.json'),
+    '{"version":4,"spaces":[{"slug":"myspace","title":"我的空间","desc":"","home":"mine","createdAt":1,"updatedAt":1}]}',
+    'utf8',
+  );
+
+  const liveIdxBoot = await startServer(liveIdxDir);
+  try {
+    // Empty the index without restarting — the running server must notice.
+    fs.writeFileSync(path.join(liveIdxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+    const tree = await (await fetch(`http://127.0.0.1:${liveIdxBoot.port}/api/tree`)).json();
+    assert.deepEqual(tree.spaces.map((s: any) => s.slug), ['myspace'], '运行期空索引应按页面重建');
+    assert.equal(
+      tree.pages.find((p: any) => p.slug === 'mine')?.space,
+      'myspace',
+      '页面不应被折叠到兜底空间',
+    );
+    assert.match(
+      fs.readFileSync(path.join(liveIdxDir, 'pages', 'mine.md'), 'utf8'),
+      /\nspace: myspace\n/,
+      '页面文件的归属不应被改写',
+    );
+  } finally {
+    liveIdxBoot.stop();
+    fs.rmSync(liveIdxDir, { recursive: true, force: true });
+  }
+
+  /* ---- The documented way to re-import an old export actually works ---- */
+  // The marker makes a reappearing `pages.json` residue by design, so the README tells the user to
+  // remove the marker, the backup and the index to import deliberately. A procedure that only lives
+  // in prose drifts silently, so it is asserted here: all three must go, and the migration must
+  // still only add missing pages.
+  const escDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-esc-'));
+  fs.writeFileSync(path.join(escDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const escFirst = await startServer(escDir);
+  await fetch(`http://127.0.0.1:${escFirst.port}/api/pages/legacy`);
+  escFirst.stop();
+
+  // A new export to import, containing one new page and no trace of the existing ones.
+  fs.writeFileSync(
+    path.join(escDir, 'pages.json'),
+    JSON.stringify({
+      version: 4,
+      spaces: V3_DB.spaces,
+      pages: [{ ...V3_DB.pages[0], slug: 'imported', title: '导入页', content: '# 导入正文\n' }],
+    }),
+    'utf8',
+  );
+  // Remove all three: with any one left the file is treated as residue and moved aside.
+  fs.rmSync(path.join(escDir, 'pages.json.migrated'), { force: true });
+  fs.rmSync(path.join(escDir, 'pages.json.bak'), { force: true });
+  fs.rmSync(path.join(escDir, 'spaces.json'), { force: true });
+
+  const escAgain = await startServer(escDir);
+  try {
+    assert.ok(fs.existsSync(path.join(escDir, 'pages', 'imported.md')), '按文档删除三个文件后应能导入');
+    assert.ok(fs.existsSync(path.join(escDir, 'pages', 'legacy.md')), '导入不得删除既有页面');
+    assert.match(
+      fs.readFileSync(path.join(escDir, 'pages', 'legacy.md'), 'utf8'),
+      /^# 旧标题/m,
+      '导入不得覆盖既有页面',
+    );
+  } finally {
+    escAgain.stop();
+    fs.rmSync(escDir, { recursive: true, force: true });
   }
 
   /* ---- A differing legacy file is preserved, not discarded as a duplicate ---- */
