@@ -30,6 +30,14 @@ assert.deepEqual(
 );
 assert.ok(!/\.flex-spacer\b/.test(css), 'style.css 不应再保留 flex-spacer 规则');
 
+// The toolbar box must hug its buttons and center itself: a full-width box left the
+// right half empty. `fit-content` shrinks it, `margin-inline: auto` centers it, and
+// `max-width: 100%` keeps it scrollable instead of overflowing on narrow screens.
+const toolbarRule = css.match(/#toolbar\s*\{[^}]*\}/)?.[0] ?? '';
+assert.match(toolbarRule, /width:\s*fit-content/, '#toolbar 应收缩到按钮宽度');
+assert.match(toolbarRule, /margin-inline:\s*auto/, '#toolbar 应水平居中');
+assert.match(toolbarRule, /max-width:\s*100%/, '#toolbar 应限制最大宽度以免溢出');
+
 // The last button carries removeFormat; it must sit right after a separator, not be flung
 // to the far edge. Walk the DOM: previous element of the button is the divider, and the
 // element before that is the insertHorizontalRule command it logically continues.
