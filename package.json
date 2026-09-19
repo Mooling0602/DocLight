@@ -6,10 +6,10 @@
   "scripts": {
     "build": "npm run build:server && npm run build:client && npm run build:tests",
     "build:server": "tsc --project tsconfig.server.json",
-    "build:client": "tsc --project tsconfig.client.json",
+    "build:client": "tsc --project tsconfig.client.json && node scripts/build-client.mjs",
     "build:tests": "tsc --project tsconfig.tests.json",
     "start": "npm run build && node dist/server.js",
-    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/toolbar-layout.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js"
+    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/toolbar-layout.test.js && node dist/tests/markdown.test.js && node dist/tests/store.test.js && node dist/tests/migration.test.js && node dist/tests/edit-mode.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js && node dist/tests/space-sort.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -18,16 +18,26 @@
     "dist/server.js",
     "dist/beian.js",
     "dist/config.js",
+    "dist/markdown.js",
+    "dist/store.js",
+    "dist/sort.js",
     "public/",
-    "template/pages.json"
+    "template/"
   ],
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.4.0",
+    "@types/turndown": "^5.0.6",
+    "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "smol-toml": "^1.8.0"
+    "dompurify": "^3.4.15",
+    "marked": "^16.4.2",
+    "smol-toml": "^1.8.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "yaml": "^2.9.1"
   }
 }

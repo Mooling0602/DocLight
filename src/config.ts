@@ -159,7 +159,7 @@ export const CONFIG_TEMPLATE = `# DocLight 配置文件
 # true 时端口被占用直接报错退出，不再向后探测（默认 false）。
 #strictPort = false
 
-# 数据目录（存放 pages.json、auth.json）；默认 <项目根>/data。
+# 数据目录（存放 pages/*.md、spaces.json、auth.json）；默认 <项目根>/data。
 # 需持久化或受保护时改为绝对路径，例如 "/var/lib/doclight"。
 #dataDir = "/var/lib/doclight"
 

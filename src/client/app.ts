@@ -1,14 +1,20 @@
 /* ============================================================
    DocLight · app.ts — framework-free single-page frontend
-   v3 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
+   v4 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
+   Page content is Markdown; the reading view renders it and the editor converts both ways.
    ============================================================ */
-'use strict';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+import { htmlToMarkdown } from '../markdown.js';
+import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS } from '../sort.js';
+import type { SortKey } from '../sort.js';
 
 interface Space {
   slug: string;
   title: string;
   desc: string;
   home: string | null;
+  sort?: SortKey;
   createdAt: number;
   updatedAt: number;
 }
@@ -57,12 +63,23 @@ interface ApiError {
   needAuth?: boolean;
 }
 
+type EditMode = 'visual' | 'markdown';
+
+// Editor hints carry <kbd> chips, so they are assigned with innerHTML — textContent would
+// replace the child nodes and strip the key styling the shell's markup defines.
+const EDIT_HINTS: Record<EditMode, string> = {
+  visual: 'Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版',
+  markdown: '直接编辑 Markdown 源码 · <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存',
+};
+
 interface AppState {
   spaces: Space[];
   pages: PageMeta[];
   page: Page | null;
   space: Space | null;
   dirty: boolean;
+  /** Active editing surface. Both modes share one Markdown document; switching re-serialises. */
+  editMode: EditMode;
   pendingEdit: string | null;
   authed: boolean;
   authSetup: boolean;
@@ -105,14 +122,51 @@ function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString('zh-CN');
 }
 
-function wordCount(html: unknown): number {
-  const box = document.createElement('div');
-  box.innerHTML = String(html || '');
-  const text = box.textContent.trim();
+/* Count the visible text only, so Markdown syntax (fences, link targets, emphasis marks)
+   never inflates the number. Kept self-contained — it needs no DOM and is unit-tested by
+   extracting this function from the compiled bundle (see src/tests/wordcount.test.ts). */
+function wordCount(markdown: unknown): number {
+  const text = String(markdown || '')
+    .replace(/^\s{0,3}```.*$/gm, ' ')          // fence lines only — code text is still counted
+    .replace(/`/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')     // images contribute no text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')   // links keep their label, drop the target
+    .replace(/<[^>]*>/g, ' ')                  // preserved inline HTML
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
+    .replace(/[*_]{1,3}/g, '')
+    .replace(/~{1,2}/g, '')
+    .trim();
   if (!text) return 0;
   const cjk = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
   const words = (text.replace(/[\u4e00-\u9fff\u3400-\u4dbf]/g, ' ').match(/[A-Za-z0-9_'-]+/g) || []).length;
   return cjk + words;
+}
+
+/**
+ * Sanitizer policy for rendered content. DOMPurify's default allow-list keeps the whole
+ * family of form controls, and a form rendered into a document can POST whatever a reader
+ * types to an arbitrary host — there is no legitimate use for one here, so they are dropped.
+ * The single exception is the GFM task-list checkbox, which the editor itself produces: the
+ * hook below keeps that one type, forces it inert, and removes every other input.
+ */
+const PURIFY_OPTIONS = {
+  ADD_ATTR: ['target'],
+  FORBID_TAGS: ['form', 'button', 'select', 'textarea', 'option', 'optgroup', 'fieldset', 'legend'],
+};
+DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
+  if (node.nodeName !== 'INPUT') return;
+  if ((node.getAttribute('type') || '').toLowerCase() === 'checkbox') node.setAttribute('disabled', '');
+  else node.remove();
+});
+
+/** Render Markdown to safe HTML. Raw HTML in the source passes through `marked` and is then
+    sanitised with DOMPurify, so inline preservation cannot become an XSS vector. */
+function renderMarkdown(markdown: unknown): string {
+  const source = String(markdown ?? '');
+  if (!source.trim()) return '';
+  let html = '';
+  try { html = marked.parse(source, { async: false }) as string; } catch { return ''; }
+  return DOMPurify.sanitize(html, PURIFY_OPTIONS);
 }
 
 function normalizeUrl(u: unknown): string {
@@ -213,6 +267,7 @@ const S: AppState = {
   page: null,         // current page detail
   space: null,        // current space (used by the space index view)
   dirty: false,
+  editMode: 'visual',
   pendingEdit: null,
   authed: false,
   authSetup: false,
@@ -237,6 +292,9 @@ const el = {
   article: $('#article'),
   editWrap: $('#edit-wrap'),
   editor: $('#editor'),
+  sourceEditor: $('#source-editor'),
+  modeToggle: $('#mode-toggle'),
+  editHint: $('#edit-hint'),
   titleInput: $('#title-input'),
   empty: $('#empty-state'),
   toolbarWrap: $('#toolbar-wrap'),
@@ -829,7 +887,7 @@ function renderArticle(page) {
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
        <a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>
-     </div>` + page.content;
+     </div>` + renderMarkdown(page.content);
 
   decorate(el.article);
   $('#copy-link').addEventListener('click', () => {
@@ -878,6 +936,52 @@ function placeCaretEnd(node) {
   sel.addRange(range);
 }
 
+/** Read the document from whichever surface is active, in Markdown form. */
+function currentMarkdown(): string {
+  return S.editMode === 'markdown'
+    ? el.sourceEditor.value
+    : htmlToMarkdown(el.editor.innerHTML);
+}
+
+/** Reflect the active mode on the segmented control, visually and for assistive tech. */
+function renderModeToggle(mode: EditMode) {
+  $$('#mode-toggle .seg-btn').forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('is-on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+}
+
+/**
+ * Switch between the visual (contenteditable) and Markdown (textarea) surfaces without
+ * losing edits. Both surfaces describe the same Markdown document, so the outgoing one is
+ * serialised first and the incoming one is rebuilt from it. Kept idempotent: selecting the
+ * already-active mode does nothing, so a stray click cannot reflow the document.
+ */
+function setEditMode(mode: EditMode, focus = true) {
+  if (S.editMode === mode) return;
+  // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
+  const markdown = currentMarkdown();
+  S.editMode = mode;
+
+  const visual = mode === 'visual';
+  el.editor.hidden = !visual;
+  el.sourceEditor.hidden = visual;
+  // The formatting toolbar only makes sense for the WYSIWYG surface; Markdown is edited raw.
+  el.toolbarWrap.hidden = !visual;
+  el.editHint.innerHTML = visual ? EDIT_HINTS.visual : EDIT_HINTS.markdown;
+
+  if (visual) {
+    el.editor.innerHTML = renderMarkdown(markdown);
+    if (focus) placeCaretEnd(el.editor);
+    setTimeout(() => refreshToolbarState(), 50);
+  } else {
+    el.sourceEditor.value = markdown;
+    if (focus) el.sourceEditor.focus();
+  }
+  renderModeToggle(mode);
+}
+
 function enterEdit(focus = true) {
   if (!S.page) return;
   S.dirty = false;
@@ -887,10 +991,19 @@ function enterEdit(focus = true) {
   el.empty.hidden = true;
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = false;
-  el.toolbarWrap.hidden = false;
   el.editWrap.hidden = false;
   el.titleInput.value = S.page.title;
-  el.editor.innerHTML = S.page.content || '';
+
+  // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
+  // the editor has a valid document on either side.
+  S.editMode = 'visual';
+  el.editor.innerHTML = renderMarkdown(S.page.content);
+  el.sourceEditor.value = S.page.content || '';
+  el.editor.hidden = false;
+  el.sourceEditor.hidden = true;
+  el.toolbarWrap.hidden = false;
+  el.editHint.innerHTML = EDIT_HINTS.visual;
+  renderModeToggle('visual');
   if (focus) placeCaretEnd(el.editor);
   setTimeout(() => refreshToolbarState(), 50);
 }
@@ -907,7 +1020,9 @@ async function saveDoc() {
   if (!S.page) return;
   if (!S.dirty) { await exitEdit(false); return; }
   const title = el.titleInput.value.trim() || '无标题页面';
-  const content = el.editor.innerHTML;
+  // Storage is Markdown regardless of the active surface: the visual editor is serialised,
+  // the Markdown editor is already raw text.
+  const content = currentMarkdown();
   el.btnSave.disabled = true;
   try {
     const updated = await api<Page>('pages/' + encodeURIComponent(S.page.slug), {
@@ -962,7 +1077,7 @@ function currentBlockTag() {
 }
 
 function refreshToolbarState() {
-  if (el.editWrap.hidden) return;
+  if (el.editWrap.hidden || S.editMode !== 'visual') return;
   const states = ['bold', 'italic', 'underline', 'strikeThrough',
                   'insertUnorderedList', 'insertOrderedList',
                   'justifyLeft', 'justifyCenter', 'justifyRight'];
@@ -1203,6 +1318,35 @@ async function renameSpaceFlow(space) {
     else renderSidebar(el.search.value);
     toast('空间已重命名 ✓');
   } catch (err) { toast(err.message, 3000); }
+}
+
+async function setSpaceSort(space, key) {
+  if (!space) return;
+  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
+  // `sort` key and a future change of the default still reaches the files that never set one.
+  const body = { sort: key === DEFAULT_SORT ? null : key };
+  try {
+    const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
+      method: 'PUT', body: JSON.stringify(body),
+    });
+    const i = S.spaces.findIndex(s => s.slug === space.slug);
+    if (i >= 0) S.spaces[i] = updated;
+    // Order is computed server-side from the page files, so the tree has to be refetched rather
+    // than re-sorted here — that keeps one definition of the order instead of two that can drift.
+    const tree = await api<TreeResponse>('tree');
+    S.spaces = tree.spaces || S.spaces;
+    S.pages = tree.pages || S.pages;
+    if (S.space?.slug === space.slug) {
+      S.space = S.spaces.find(s => s.slug === space.slug) || S.space;
+      renderSpace(S.space);
+    } else {
+      renderSidebar(el.search.value);
+    }
+    toast('排序已更新 ✓');
+  } catch (err) {
+    toast(err.message, 3000);
+    renderSpace(space);   // Put the select back to the stored value.
+  }
 }
 
 async function slugSpaceFlow(space) {
@@ -1506,6 +1650,12 @@ function renderSpace(space) {
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
        <div class="space-acts">
+         <label class="sort-pick">
+           <span>排序</span>
+           <select id="sp-sort" title="侧栏与总览的页面顺序">
+             ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
+           </select>
+         </label>
          <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
          <button class="btn btn-ghost" id="sp-rename">重命名</button>
          <button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>
@@ -1516,6 +1666,7 @@ function renderSpace(space) {
 
   el.article.hidden = false;
   decorate(el.article);
+  $('#sp-sort').addEventListener('change', (e) => setSpaceSort(space, (e.target as HTMLSelectElement).value));
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-slug-edit').addEventListener('click', () => slugSpaceFlow(space));
@@ -1634,6 +1785,12 @@ $('#btn-edit').addEventListener('click', () => {
 $('#btn-save').addEventListener('click', () => saveDoc());
 $('#btn-cancel').addEventListener('click', tryCancelEdit);
 
+$('#mode-toggle').addEventListener('click', e => {
+  const btn = e.target.closest('.seg-btn');
+  if (!btn) return;
+  setEditMode(btn.dataset.mode as EditMode);
+});
+
 $('#menu-page').addEventListener('click', e => {
   const act = e.target.closest('.menu-item')?.dataset.act;
   if (!act) return;
@@ -1672,6 +1829,45 @@ document.addEventListener('click', e => {
 
 $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
+el.sourceEditor.addEventListener('input', markDirty);
+
+// Tab indents the Markdown surface instead of moving focus — code blocks and nested lists are
+// the common reason to reach for it. The operation is line-based: with a multi-line selection
+// every touched line is indented / outdented, never replaced by the two spaces (which would
+// silently delete the selection).
+el.sourceEditor.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const ta = el.sourceEditor;
+  const value = ta.value;
+  const selStart = ta.selectionStart;
+  const selEnd = ta.selectionEnd;
+
+  // The block spans whole lines: from the start of the caret's line to the end of the last
+  // selected line (a bare caret therefore touches exactly its own line).
+  const blockStart = value.lastIndexOf('\n', selStart - 1) + 1;
+  const breakAfter = value.indexOf('\n', selEnd);
+  const blockEnd = breakAfter === -1 ? value.length : breakAfter;
+  const lines = value.slice(blockStart, blockEnd).split('\n');
+
+  const replaced = e.shiftKey
+    ? lines.map(line => line.replace(/^ {1,4}/, ''))
+    : lines.map(line => '  ' + line);
+  const next = replaced.join('\n');
+  if (next === value.slice(blockStart, blockEnd)) return; // Shift+Tab with nothing to remove.
+
+  const hadSelection = selEnd > selStart;
+  ta.setRangeText(next, blockStart, blockEnd, 'preserve');
+  if (hadSelection) {
+    ta.setSelectionRange(blockStart, blockStart + next.length);
+  } else {
+    // Keep the caret on the same character, shifted by the first line's length change and
+    // clamped so an outdent cannot push it before the line start.
+    const caret = Math.max(blockStart, selStart + (replaced[0].length - lines[0].length));
+    ta.setSelectionRange(caret, caret);
+  }
+  markDirty();
+});
 
 // Global shortcuts
 document.addEventListener('keydown', e => {

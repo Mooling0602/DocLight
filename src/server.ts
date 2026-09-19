@@ -18,9 +18,13 @@
  *   DOCLIGHT_STRICT_PORT fail instead of scanning for the next free port
  *   DOCLIGHT_CONFIG      path to the TOML configuration file
  *
+ * Pages are stored as Markdown files (`<dataDir>/pages/<slug>.md`, YAML front matter) with the
+ * spaces in `<dataDir>/spaces.json`; see src/store.ts. A legacy single `pages.json` (v3 HTML or
+ * v4 Markdown) is split into that layout on first start.
+ *
  * API:
  *   GET    /api/pages        page list (without content)
- *   GET    /api/pages/:slug  single page detail
+ *   GET    /api/pages/:slug  single page detail (Markdown content)
  *   POST   /api/pages        create { title }
  *   PUT    /api/pages/:slug  update { title?, content?, slug?, space?, parent? }
  *   DELETE /api/pages/:slug  delete
@@ -42,32 +46,10 @@ import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
+import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore, isSortKey, SORT_KEYS } from './store.js';
 import type { AppConfig } from './config.js';
-
-interface Space {
-  slug: string;
-  title: string;
-  desc: string;
-  home: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface Page {
-  slug: string;
-  space: string;
-  parent: string | null;
-  title: string;
-  content: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface Database {
-  version: 3;
-  spaces: Space[];
-  pages: Page[];
-}
+import type { Database, Page, Space, WriteOptions, SortKey } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -108,48 +90,230 @@ const CONFIG: AppConfig = (() => {
 // relocatable. `dataDir` defaults to the project layout and can be redirected to a
 // persistent volume through the config file or DOCLIGHT_DATA_DIR.
 const DATA_DIR = CONFIG.dataDir;
-const DATA_FILE = path.join(DATA_DIR, 'pages.json');
-// The sample site ships as plain JSON in template/pages.json (tracked) instead of being
-// generated in code. The data directory itself is git-ignored, so runtime content never
-// mixes with the shipped example.
-const TEMPLATE_FILE = path.join(ROOT, 'template', 'pages.json');
+// Pages are stored as real Markdown files (`data/pages/<slug>.md`, YAML front matter) and the
+// spaces as `data/spaces.json`; see src/store.ts. A single legacy `data/pages.json` (v3 or v4)
+// is split into that layout on first start.
+const LEGACY_DATA_FILE = path.join(DATA_DIR, 'pages.json');
+// Proof that this data directory has already been migrated to the file layout. Deliberately not a
+// dotfile: sync tools commonly exclude those by default, and losing this marker is exactly what
+// would let a stale snapshot be re-migrated. See `legacyFileIsResidue`.
+const MIGRATION_MARKER = path.join(DATA_DIR, 'pages.json.migrated');
+const TEMPLATE_DIR = path.join(ROOT, 'template');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- Data layer */
 
-/** Load the shipped sample site (template/pages.json) as the initial database. */
+/** The shipped sample site, laid out like the store (template/spaces.json + template/pages/*.md). */
 function seedDb(): Database {
-  let raw: any;
-  try {
-    raw = JSON.parse(fs.readFileSync(TEMPLATE_FILE, 'utf8'));
-  } catch {
-    console.warn(`· 未找到示例数据 ${TEMPLATE_FILE}，将以空站点启动`);
-    return { version: 3, spaces: [], pages: [] };
+  const seeded = seedFromTemplate(TEMPLATE_DIR);
+  if (!seeded) {
+    console.warn(`· 未找到示例数据 ${TEMPLATE_DIR}，将以空站点启动`);
+    return { version: 4, spaces: [], pages: [] };
   }
-  if (!raw || raw.version !== 3) {
-    console.warn(`· 示例数据 ${TEMPLATE_FILE} 格式不正确，将以空站点启动`);
-    return { version: 3, spaces: [], pages: [] };
-  }
-  const spaces: Space[] = raw.spaces || [];
-  const pages: Page[] = raw.pages || [];
-  // Refresh the sample timestamps on first run: shift every record by one common delta so
-  // the designed ordering is preserved and the sample does not read as "created months ago".
-  const stamps = [...spaces, ...pages]
-    .map((r) => r.updatedAt)
-    .filter((t): t is number => Number.isFinite(t));
-  if (stamps.length) {
-    const delta = Date.now() - Math.max(...stamps);
-    for (const r of [...spaces, ...pages]) { r.createdAt += delta; r.updatedAt += delta; }
-  }
-  return { version: 3, spaces, pages };
+  return seeded;
 }
 
+/**
+ * Bring the data directory up to the Markdown-file layout on startup:
+ *   1. a legacy `pages.json` is split into `spaces.json` + `pages/*.md` (HTML bodies converted);
+ *   2. otherwise, a fresh store is seeded from the shipped sample.
+ */
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) {
-    writeDb(seedDb());
-    console.log(`· 已从示例数据初始化 → ${DATA_FILE}`);
+
+  // An index that parses but names no spaces cannot classify the pages: readStore would collapse
+  // every one of them onto a synthetic fallback and the next write would persist that loss. When
+  // pages exist the index is therefore rebuilt from them, exactly as for a missing index. A site
+  // the user deliberately emptied has no pages, so it is left alone rather than re-seeded.
+  if (spacesIndexIsEmpty(DATA_DIR)) {
+    const repaired = recoverStore(DATA_DIR);
+    if (repaired) {
+      console.warn(`· ${path.join(DATA_DIR, 'spaces.json')} 不含任何空间，已按现有页面重建索引（页面文件未改动）`);
+      writeSpaces(DATA_DIR, repaired.spaces);
+      // A rebuilt index makes the store authoritative again, so any lingering legacy file is
+      // retired here too — otherwise a later lost index would fall through to the legacy branch.
+      retireLegacyFile();
+      return;
+    }
+    // No pages to rebuild from. An empty index is consistent with a site the user emptied on
+    // purpose, but if a legacy file is also present *it* is this site's real data — the index was
+    // written empty and the pages never made it out of the single file. Retiring it here (which the
+    // `storeExists` branch below would do, an empty-but-parseable index counting as a store) would
+    // move the user's only copy aside unread and leave them looking at an empty site. A file already
+    // superseded by an earlier migration is residue, not data, so it is left to below.
+    if (fs.existsSync(LEGACY_DATA_FILE) && !legacyFileIsResidue()) {
+      migrateLegacyFile();
+      return;
+    }
   }
+
+  if (storeExists(DATA_DIR)) {
+    // The store is authoritative. A legacy file left behind by an older version must be moved
+    // out of the way: if `spaces.json` is ever lost, that stale snapshot would otherwise win the
+    // legacy branch below and silently re-import pre-edit content over the live page files.
+    retireLegacyFile();
+    return;
+  }
+
+  // A legacy file already superseded by an earlier migration is a stale re-appearance — the retire
+  // step failed, or the file was copied back in. Migrating it would re-import pre-edit content over
+  // the live page files, and with `onlyCreate` it would still resurrect every page the user has
+  // since *deleted* (a missing file looks like one the snapshot should supply). It is therefore
+  // retired instead (its bytes preserved) and the store is rebuilt from those files below.
+  if (fs.existsSync(LEGACY_DATA_FILE) && legacyFileIsResidue()) {
+    console.warn(`· ${path.basename(LEGACY_DATA_FILE)} 已被此前的迁移取代，判定为残留，将按页面文件恢复`);
+    retireLegacyFile();
+  } else if (fs.existsSync(LEGACY_DATA_FILE)) {
+    // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
+    // already sitting in `pages/` survive this because a write only unlinks files the caller
+    // declared removed, never every file the incoming db happens not to mention.
+    migrateLegacyFile();
+    return;
+  }
+
+  // With no legacy file, pages on disk mean the spaces index alone was lost. It is derived data
+  // (every page carries its space in its front matter), so it is rebuilt from the pages rather
+  // than papered over with the sample, which would overwrite any page sharing a sample's name.
+  // Only the index is written: the page files are the source of truth and are left as they are.
+  const recovered = recoverStore(DATA_DIR);
+  if (recovered) {
+    console.warn(`· 未找到 ${path.join(DATA_DIR, 'spaces.json')}，已按现有页面重建索引（页面文件未改动）`);
+    writeSpaces(DATA_DIR, recovered.spaces);
+    return;
+  }
+
+  // `onlyCreate` for the same reason as migration: seeding establishes the store, so it must
+  // never overwrite a page file that is already there.
+  writeDb(seedDb(), [], { onlyCreate: true });
+  console.log(`· 已从示例数据初始化 → ${path.join(DATA_DIR, 'pages')}`);
+}
+
+/**
+ * Move a migrated-away `pages.json` aside so it can never shadow the store again, keeping its
+ * bytes as `pages.json.bak` for recovery. When a backup already exists the legacy file is only
+ * removed if it is byte-identical — the crash-between-migration-and-this-step case. A differing
+ * file is not a duplicate (it can be a snapshot copied in from another machine), so its bytes are
+ * kept under a free `.bak.N` name rather than discarded.
+ */
+function retireLegacyFile(): void {
+  if (!fs.existsSync(LEGACY_DATA_FILE)) return;
+  // Written before the move, so a crash between the two still leaves proof the migration happened.
+  // A missing marker would make the surviving legacy file look like a first migration.
+  try { fs.writeFileSync(MIGRATION_MARKER, new Date().toISOString() + '\n', 'utf8'); } catch { /* best effort */ }
+  const backup = LEGACY_DATA_FILE + '.bak';
+  try {
+    if (!fs.existsSync(backup)) {
+      fs.renameSync(LEGACY_DATA_FILE, backup);
+      console.log(`· 已备份迁移前数据 → ${backup}`);
+      return;
+    }
+    if (sameBytes(LEGACY_DATA_FILE, backup)) {
+      fs.unlinkSync(LEGACY_DATA_FILE);
+      return;
+    }
+    const kept = freeBackupName(backup);
+    fs.renameSync(LEGACY_DATA_FILE, kept);
+    console.warn(`· 发现另一份 ${path.basename(LEGACY_DATA_FILE)}（与已有备份不同），已保留为 ${path.basename(kept)}`);
+  } catch {
+    // Best effort: the file is only harmful if the index is later lost *and* it still predates the
+    // page files, so a failed move is left for the next boot to retry rather than risking further
+    // filesystem work. `ensureData` above also refuses to migrate a file that has a backup.
+  }
+}
+
+/**
+ * Whether the legacy file has already been superseded by a migration of this data directory.
+ *
+ * The `.bak` alone was not enough: `onlyCreate` protects page files that exist, so a re-import kept
+ * the user's edits but resurrected every page they had *deleted*, since a missing file looks exactly
+ * like one the snapshot should supply. The marker is written by `retireLegacyFile` just before it
+ * moves the file, so it survives a failed move and the file being copied back in — the cases that
+ * were actually reachable. The `.bak` check remains for data directories migrated by an older
+ * version, which has a backup but no marker.
+ *
+ * The one window still not covered is a crash in the instant between the store write and the retire
+ * call, where nothing distinguishes a replay from a first migration. It is idempotent in effect:
+ * pages already written are left alone, and the user cannot have deleted anything in a window they
+ * never got to use.
+ */
+function legacyFileIsResidue(): boolean {
+  return fs.existsSync(MIGRATION_MARKER) || fs.existsSync(LEGACY_DATA_FILE + '.bak');
+}
+
+/** Byte comparison of two files, false on any read error. */
+function sameBytes(a: string, b: string): boolean {
+  try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; }
+}
+
+/** First unused `<backup>.N` path, so preserving a file never clobbers an existing one. */
+function freeBackupName(backup: string): string {
+  for (let n = 1; ; n++) {
+    const candidate = `${backup}.${n}`;
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+}
+
+/**
+ * Convert a pre-store `data/pages.json` into the file layout, then retire the original to
+ * `pages.json.bak`. The move is the point: leaving the original in place is what let a later
+ * lost index re-import stale content over the user's edits.
+ */
+function migrateLegacyFile(): void {
+  let raw: any = null;
+  try { raw = JSON.parse(fs.readFileSync(LEGACY_DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
+  if (!raw || (raw.version !== 3 && raw.version !== 4)) {
+    // An unreadable legacy file is not proof the site is empty: pages already in `pages/` are the
+    // user's data and seeding over them would replace every one sharing a sample's name.
+    const salvage = recoverStore(DATA_DIR);
+    retireLegacyFile();
+    if (salvage) {
+      console.warn('· 旧数据格式无法识别，已按现有页面恢复（页面文件未改动）');
+      writeSpaces(DATA_DIR, salvage.spaces);
+      return;
+    }
+    console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
+    writeDb(seedDb(), [], { onlyCreate: true });
+    return;
+  }
+
+  // Pages on disk outrank the snapshot's index: a space the user created after the snapshot was
+  // taken is named by its pages' front matter but not by `spaces`, and writing that list verbatim
+  // would drop the space and send its pages to the fallback on the next read.
+  const live = recoverStore(DATA_DIR);
+  const spaces: Space[] = mergeSpaces(raw.spaces || [], live?.spaces ?? []);
+  const fromHtml = raw.version === 3;
+  const pages: Page[] = (raw.pages || []).map((p: Page) => ({
+    ...p,
+    content: fromHtml ? htmlToMarkdown(p.content) : String(p.content ?? ''),
+  }));
+  // `onlyCreate`: an existing `<slug>.md` is live data and outranks this snapshot. That is what
+  // makes a re-migration harmless — e.g. the legacy file survived its retirement (a crash between
+  // the store write and the move) and the index was later lost, so this path runs again. Without
+  // it, the stale snapshot would overwrite the user's edits; with it, only missing pages are added.
+  writeDb({ version: 4, spaces, pages }, [], { onlyCreate: true });
+  // Only after the store is safely written: the rename both preserves the original and stops it
+  // from being treated as live data on any later boot.
+  retireLegacyFile();
+  console.log(
+    fromHtml
+      ? '· 数据已从 v3（HTML）迁移为 Markdown 文件'
+      : '· 数据已从 pages.json 迁移为 Markdown 文件',
+  );
+}
+
+function readDb(): Database {
+  // Same condition as startup: an index that exists but names no spaces cannot classify the pages,
+  // and `storeExists` alone accepts it. Without this, an index emptied while the server is running
+  // (sync tool, hand edit) is read as "no spaces": every page collapses onto the fallback space and
+  // the next ordinary save persists that, silently reassigning pages. It is also why such a request
+  // would 404 on a space move — the target space no longer exists in memory.
+  if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
+  return readStore(DATA_DIR);
+}
+/** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
+ *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
+function writeDb(db: Database, removed: Iterable<string> = [], options: WriteOptions = {}): void {
+  writeStore(DATA_DIR, db, removed, options);
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -163,33 +327,13 @@ function descendantsOf(list: Page[], slug: string): Set<string> {
   }
   return out;
 }
-function readDb(): Database {
-  try {
-    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    if (raw && raw.version === 3) return { version: 3, spaces: raw.spaces || [], pages: raw.pages || [] };
-  } catch { /* fallthrough */ }
-  console.log('· 数据非 v3 格式，已重置为初始示例数据（早期开发阶段，不做兼容）');
-  const fresh = seedDb();
-  writeDb(fresh);
-  return fresh;
-}
-function writeDb(db: Database): void {
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-  fs.renameSync(tmp, DATA_FILE);
-}
 
 /* ---------------------------------------------------- Content sanitizing (XSS) */
 
-function sanitizeHtml(html: unknown): string {
-  return String(html || '')
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base|form)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-    .replace(/<\/?\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*>/gi, '')
-    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/(href|src)\s*=\s*(["'])?\s*(?:javascript|vbscript):[^\s>]*/gi,
-      (_m, attr, q) => `${attr}=${q ? q + '#' + q : '"#"'}`)
-    .slice(0, 500 * 1024);
-}
+/* Markdown itself needs no tag scrubbing: `marked` output is sanitised in the browser with
+   DOMPurify before it is inserted into the DOM, and raw HTML in the source is subject to the
+   same pass. A regex scrubber here would instead corrupt code blocks that legitimately show
+   HTML examples. The server only bounds the length (see sanitizeMarkdown in src/markdown.ts). */
 
 function randomToken(len = 7): string {
   const abc = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -487,6 +631,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           if (!t) return json(res, 400, { error: '空间名称不能为空' });
           nextTitle = t;
         }
+        // `null` clears the preference back to the default, so the key can stay out of the file
+        // rather than being pinned to whatever the default happened to be at the time.
+        let nextSort: SortKey | null = null;
+        if (body.sort !== undefined) {
+          if (body.sort === null) nextSort = null;
+          else if (isSortKey(body.sort)) nextSort = body.sort;
+          else return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
+        }
 
         if (nextSlug !== null) {
           const ns = nextSlug;
@@ -495,6 +647,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         }
         if (nextTitle !== null) db.spaces[idx].title = nextTitle;
         if (body.desc !== undefined) db.spaces[idx].desc = String(body.desc).trim().slice(0, 200);
+        if (body.sort !== undefined) {
+          if (nextSort === null) delete db.spaces[idx].sort;
+          else db.spaces[idx].sort = nextSort;
+        }
         db.spaces[idx].updatedAt = Date.now();
         writeDb(db);
         return json(res, 200, db.spaces[idx]);
@@ -505,7 +661,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         const removedPages = db.pages.filter(p => p.space === spaceSlug).map(p => p.slug);
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
-        writeDb(db);
+        writeDb(db, removedPages);
         return json(res, 200, { ok: true, removedSpace: spaceSlug, removedPages });
       }
     }
@@ -526,6 +682,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     if (req.method === 'PUT') {
       const body = await readBody(req);
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
+      let renamed = false;
       if (body.slug !== undefined) {
         const ns = String(body.slug || '').trim();
         if (!SLUG_RE.test(ns)) return json(res, 400, { error: 'slug 只能含小写字母、数字、下划线（1–80 位）' });
@@ -534,6 +691,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           return json(res, 400, { error: '该 slug 已被占用' });
         }
         if (ns !== slug) {
+          renamed = true;
           db.pages.forEach(p => { if (p.parent === slug) p.parent = ns; });
           db.pages[idx].slug = ns;
           const sp = db.spaces.find(s => s.home === slug);
@@ -566,18 +724,21 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (!t) return json(res, 400, { error: '标题不能为空' });
         db.pages[idx].title = t;
       }
-      if (body.content !== undefined) db.pages[idx].content = sanitizeHtml(body.content);
+      if (body.content !== undefined) db.pages[idx].content = sanitizeMarkdown(body.content);
       db.pages[idx].updatedAt = Date.now();
-      writeDb(db);
+      // A slug rename leaves the old file behind, so it is declared for removal here; the store
+      // keeps it if the new slug happens to reuse the same name.
+      writeDb(db, renamed ? [slug] : []);
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'DELETE') {
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
       const doomed = [slug, ...descendantsOf(db.pages, slug)];
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
-      const sp = db.spaces.find(s => s.home === slug);
-      if (sp) sp.home = null;
-      writeDb(db);
+      // Any space whose home was among the removed pages (the page itself or a descendant)
+      // would otherwise keep a pointer to a slug that no longer resolves.
+      for (const sp of db.spaces) if (sp.home && doomed.includes(sp.home)) sp.home = null;
+      writeDb(db, doomed);
       return json(res, 200, { ok: true, removed: doomed });
     }
   }
@@ -653,7 +814,7 @@ async function main(): Promise<void> {
     try { fs.writeFileSync(path.join(ROOT, '.server.pid'), String(process.pid)); } catch { /* ignore */ }
     console.log(`\n  ✦ DocLight 文档站已就绪 (PID ${process.pid})`);
     console.log(`    本机访问  http://localhost:${port}`);
-    console.log(`    数据文件  ${DATA_FILE}\n`);
+    console.log(`    数据目录  ${DATA_DIR}\n`);
   } catch (err) {
     console.error('启动失败:', err instanceof Error ? err.message : err);
     process.exit(1);
