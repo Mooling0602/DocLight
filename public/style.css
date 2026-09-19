@@ -601,11 +601,9 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 /* The footer badge is an image, so it must opt out of the article-level `img` decorations
    (border-radius/box-shadow) that would clip and ring a 16px icon. */
 .sf-badge { flex: none; width: 16px; height: 16px; object-fit: contain; border-radius: 0; box-shadow: none; }
-/* Self-drawn stand-in shown only when the official image fails to load; it follows the
-   theme via currentColor. `[hidden]` must win over the display the flex parent implies. */
-.sf-badge-fallback { color: var(--text-3); }
-.sf-link:hover .sf-badge-fallback { color: currentColor; }
-.sf-badge[hidden] { display: none; }
+/* Client-side stand-in shown only when the official image fails to load; it follows the theme. */
+svg.sf-badge { color: var(--text-3); }
+.sf-link:hover svg.sf-badge { color: currentColor; }
 
 /* ---------- Responsive ---------- */
 #btn-menu { display: none; }

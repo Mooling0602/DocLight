@@ -1714,8 +1714,39 @@ el.list.addEventListener('click', e => {
 /* ============================================================
    Boot
    ============================================================ */
+
+/**
+ * The server renders the official public-security badge as a remote image (the raw HTML an
+ * audit inspects must contain only the official mark). If that host is unreachable the badge
+ * would silently vanish, so swap in a drawn shield client-side. This is why the fallback is
+ * attached here and not emitted by the server: it never appears in the response markup, so it
+ * cannot be mistaken for the official badge during a filing check.
+ */
+function enhanceFilingBadges(): void {
+  $$('img.sf-badge').forEach(img => {
+    // A cached/broken image may have already fired `error` before this ran.
+    const replace = () => {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'sf-badge');
+      svg.setAttribute('viewBox', '0 0 16 16');
+      svg.setAttribute('width', '16');
+      svg.setAttribute('height', '16');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('focusable', 'false');
+      svg.innerHTML =
+        '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="currentColor" opacity=".18"/>' +
+        '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
+        '<path d="M5.8 8.1 7.4 9.7l2.9-3.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
+      img.replaceWith(svg);
+    };
+    if (img.complete && img.naturalWidth === 0) replace();
+    else img.addEventListener('error', replace, { once: true });
+  });
+}
+
 (async function boot() {
   el.editor.dataset.placeholder = '这里空空如也……开始书写你的第一段文字吧 ✍️';
+  enhanceFilingBadges();
   try {
     const tree = await api<TreeResponse>('tree');
     S.spaces = tree.spaces || [];
