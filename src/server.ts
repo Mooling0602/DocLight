@@ -18,8 +18,9 @@
  *   DOCLIGHT_STRICT_PORT fail instead of scanning for the next free port
  *   DOCLIGHT_CONFIG      path to the TOML configuration file
  *
- * Page content is stored as Markdown (database v4); legacy v3 HTML is migrated once on
- * first read (see src/markdown.ts).
+ * Pages are stored as Markdown files (`<dataDir>/pages/<slug>.md`, YAML front matter) with the
+ * spaces in `<dataDir>/spaces.json`; see src/store.ts. A legacy single `pages.json` (v3 HTML or
+ * v4 Markdown) is split into that layout on first start.
  *
  * API:
  *   GET    /api/pages        page list (without content)
@@ -46,33 +47,9 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
+import { readStore, writeStore, storeExists, seedFromTemplate } from './store.js';
 import type { AppConfig } from './config.js';
-
-interface Space {
-  slug: string;
-  title: string;
-  desc: string;
-  home: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface Page {
-  slug: string;
-  space: string;
-  parent: string | null;
-  title: string;
-  /** Page body as Markdown (database v4). v3 databases held HTML and are migrated on read. */
-  content: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface Database {
-  version: 4;
-  spaces: Space[];
-  pages: Page[];
-}
+import type { Database, Page, Space } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -113,48 +90,82 @@ const CONFIG: AppConfig = (() => {
 // relocatable. `dataDir` defaults to the project layout and can be redirected to a
 // persistent volume through the config file or DOCLIGHT_DATA_DIR.
 const DATA_DIR = CONFIG.dataDir;
-const DATA_FILE = path.join(DATA_DIR, 'pages.json');
-// The sample site ships as plain JSON in template/pages.json (tracked) instead of being
-// generated in code. The data directory itself is git-ignored, so runtime content never
-// mixes with the shipped example.
-const TEMPLATE_FILE = path.join(ROOT, 'template', 'pages.json');
+// Pages are stored as real Markdown files (`data/pages/<slug>.md`, YAML front matter) and the
+// spaces as `data/spaces.json`; see src/store.ts. A single legacy `data/pages.json` (v3 or v4)
+// is split into that layout on first start.
+const LEGACY_DATA_FILE = path.join(DATA_DIR, 'pages.json');
+const TEMPLATE_DIR = path.join(ROOT, 'template');
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- Data layer */
 
-/** Load the shipped sample site (template/pages.json) as the initial database. */
+/** The shipped sample site, laid out like the store (template/spaces.json + template/pages/*.md). */
 function seedDb(): Database {
-  let raw: any;
-  try {
-    raw = JSON.parse(fs.readFileSync(TEMPLATE_FILE, 'utf8'));
-  } catch {
-    console.warn(`· 未找到示例数据 ${TEMPLATE_FILE}，将以空站点启动`);
+  const seeded = seedFromTemplate(TEMPLATE_DIR);
+  if (!seeded) {
+    console.warn(`· 未找到示例数据 ${TEMPLATE_DIR}，将以空站点启动`);
     return { version: 4, spaces: [], pages: [] };
   }
-  if (!raw || raw.version !== 4) {
-    console.warn(`· 示例数据 ${TEMPLATE_FILE} 格式不正确，将以空站点启动`);
-    return { version: 4, spaces: [], pages: [] };
-  }
-  const spaces: Space[] = raw.spaces || [];
-  const pages: Page[] = raw.pages || [];
-  // Refresh the sample timestamps on first run: shift every record by one common delta so
-  // the designed ordering is preserved and the sample does not read as "created months ago".
-  const stamps = [...spaces, ...pages]
-    .map((r) => r.updatedAt)
-    .filter((t): t is number => Number.isFinite(t));
-  if (stamps.length) {
-    const delta = Date.now() - Math.max(...stamps);
-    for (const r of [...spaces, ...pages]) { r.createdAt += delta; r.updatedAt += delta; }
-  }
-  return { version: 4, spaces, pages };
+  return seeded;
 }
 
+/**
+ * Bring the data directory up to the Markdown-file layout on startup:
+ *   1. a legacy `pages.json` is split into `spaces.json` + `pages/*.md` (HTML bodies converted);
+ *   2. otherwise, a fresh store is seeded from the shipped sample.
+ */
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) {
-    writeDb(seedDb());
-    console.log(`· 已从示例数据初始化 → ${DATA_FILE}`);
+  if (storeExists(DATA_DIR)) return;
+
+  if (fs.existsSync(LEGACY_DATA_FILE)) {
+    migrateLegacyFile();
+    return;
   }
+  writeDb(seedDb());
+  console.log(`· 已从示例数据初始化 → ${path.join(DATA_DIR, 'pages')}`);
+}
+
+/**
+ * Convert a pre-store `data/pages.json` into the file layout. The original is kept beside it
+ * (`.bak`, written exclusively so a retry cannot clobber it) because the rewrite is
+ * irreversible and a bad conversion must remain recoverable.
+ */
+function migrateLegacyFile(): void {
+  let raw: any = null;
+  try { raw = JSON.parse(fs.readFileSync(LEGACY_DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
+  if (!raw || (raw.version !== 3 && raw.version !== 4)) {
+    console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
+    writeDb(seedDb());
+    return;
+  }
+
+  const backup = LEGACY_DATA_FILE + '.bak';
+  if (!fs.existsSync(backup)) {
+    fs.writeFileSync(backup, JSON.stringify(raw, null, 2), { encoding: 'utf8', flag: 'wx' });
+    console.log(`· 已备份迁移前数据 → ${backup}`);
+  }
+
+  const spaces: Space[] = raw.spaces || [];
+  const fromHtml = raw.version === 3;
+  const pages: Page[] = (raw.pages || []).map((p: Page) => ({
+    ...p,
+    content: fromHtml ? htmlToMarkdown(p.content) : String(p.content ?? ''),
+  }));
+  writeDb({ version: 4, spaces, pages });
+  console.log(
+    fromHtml
+      ? '· 数据已从 v3（HTML）迁移为 Markdown 文件'
+      : '· 数据已从 pages.json 迁移为 Markdown 文件',
+  );
+}
+
+function readDb(): Database {
+  if (!storeExists(DATA_DIR)) ensureData();
+  return readStore(DATA_DIR);
+}
+function writeDb(db: Database): void {
+  writeStore(DATA_DIR, db);
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -167,43 +178,6 @@ function descendantsOf(list: Page[], slug: string): Set<string> {
     }
   }
   return out;
-}
-function readDb(): Database {
-  let raw: any = null;
-  try { raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
-  if (raw && raw.version === 4) {
-    return { version: 4, spaces: raw.spaces || [], pages: raw.pages || [] };
-  }
-  // v3 stored HTML. Convert each page body once and persist, so existing sites keep their
-  // content when the storage format changes instead of being reset to the sample data.
-  if (raw && raw.version === 3) {
-    // The rewrite is in place and irreversible, so the original HTML is kept next to it
-    // first. Written exclusively (`wx`) so a retry after a failed migration cannot lose the
-    // one copy of the pre-migration data; a failure here aborts rather than proceeding.
-    const backup = DATA_FILE + '.v3.bak';
-    if (!fs.existsSync(backup)) {
-      fs.writeFileSync(backup, JSON.stringify(raw, null, 2), { encoding: 'utf8', flag: 'wx' });
-      console.log(`· 已备份迁移前数据 → ${backup}`);
-    }
-    const spaces: Space[] = raw.spaces || [];
-    const pages: Page[] = (raw.pages || []).map((p: Page) => ({
-      ...p,
-      content: htmlToMarkdown(p.content),
-    }));
-    const migrated: Database = { version: 4, spaces, pages };
-    writeDb(migrated);
-    console.log('· 数据已从 v3（HTML）迁移为 v4（Markdown）');
-    return migrated;
-  }
-  console.log('· 数据格式无法识别，已重置为初始示例数据');
-  const fresh = seedDb();
-  writeDb(fresh);
-  return fresh;
-}
-function writeDb(db: Database): void {
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-  fs.renameSync(tmp, DATA_FILE);
 }
 
 /* ---------------------------------------------------- Content sanitizing (XSS) */
@@ -675,7 +649,7 @@ async function main(): Promise<void> {
     try { fs.writeFileSync(path.join(ROOT, '.server.pid'), String(process.pid)); } catch { /* ignore */ }
     console.log(`\n  ✦ DocLight 文档站已就绪 (PID ${process.pid})`);
     console.log(`    本机访问  http://localhost:${port}`);
-    console.log(`    数据文件  ${DATA_FILE}\n`);
+    console.log(`    数据目录  ${DATA_DIR}\n`);
   } catch (err) {
     console.error('启动失败:', err instanceof Error ? err.message : err);
     process.exit(1);

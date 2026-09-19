@@ -45,10 +45,10 @@
           # would crash on start. package.json therefore carries a `files` whitelist,
           # which takes precedence over .gitignore and ships exactly:
           #   dist/server.js, dist/beian.js, dist/config.js, dist/markdown.js,
-          #   public/, template/pages.json
+          #   dist/store.js, public/, template/
           # The whitelist names the compiled files individually instead of `dist/` so the
           # compiled tests (which `require('jsdom')`, a devDependency pruned from the
-          # output) stay out. `template/pages.json` is the first-run sample site.
+          # output) stay out. `template/` is the first-run sample site (spaces.json + pages/*.md).
           #
           # Layout matters: server.js resolves its root as `__dirname/..`, and in the
           # packed tree `public/` and `template/` sit next to `dist/`, so
@@ -291,7 +291,7 @@
                 # list elements are unquoted, so a value with a space would be parsed
                 # by systemd as a second assignment and silently truncated (observed:
                 # `© 2026 Mooling` became `©`). The store copy is read-only;
-                # pages.json and auth.json live in the state directory, which systemd
+                # pages/*.md, spaces.json and auth.json live in the state directory, which systemd
                 # also makes writable for the dynamic user.
                 StateDirectory = "doclight";
                 WorkingDirectory = "/var/lib/doclight";

@@ -7,7 +7,7 @@
 ## 启动
 
 ```bash
-npm install               # 安装依赖（运行时：smol-toml、marked、turndown、dompurify）
+npm install               # 安装依赖（运行时：smol-toml、marked、turndown、dompurify、yaml）
 npm start                 # 构建并自动探测空闲端口（默认从 4173 起）
 PORT=8080 npm start       # 临时指定起始端口（环境变量覆盖配置文件）
 ```
@@ -56,7 +56,7 @@ copyright = "© 2026 Mooling"
 | `DOCLIGHT_CONFIG` | `<项目根>/doclight.toml` | 配置文件路径 |
 | `PORT` | `4173` | 起始端口；被占用时自动向后探测 |
 | `DOCLIGHT_HOST` | 全部网卡 | 监听地址，如 `127.0.0.1` |
-| `DOCLIGHT_DATA_DIR` | `<项目根>/data` | 数据目录（`pages.json`、`auth.json`） |
+| `DOCLIGHT_DATA_DIR` | `<项目根>/data` | 数据目录（`pages/*.md`、`spaces.json`、`auth.json`） |
 | `DOCLIGHT_STRICT_PORT` | 未设置 | 非空即启用；端口占用直接报错，不再向后探测 |
 | `DOCLIGHT_ICP` | 未设置 | 网站备案号，如 `浙ICP备12345678号-1` |
 | `DOCLIGHT_ICP_URL` | 工信部备案系统 | 覆盖备案号链接 |
@@ -119,12 +119,16 @@ DocLight/
 │   ├── config.ts      # 分层配置：内置默认值 < TOML 文件 < 环境变量
 │   ├── beian.ts       # 备案号页脚渲染（服务端注入）
 │   ├── markdown.ts    # Markdown ⇄ HTML 转换（服务端迁移与前端共用）
+│   ├── store.ts       # 文件存储：每页一个 .md（YAML front matter）+ spaces.json
 │   ├── client/app.ts  # 前端单页应用
 │   └── tests/         # TypeScript 回归测试
 ├── doclight.toml      # 配置文件（首启自动生成全注释模板；已 gitignore）
-├── template/pages.json # 示例站点（首次启动复制到数据目录）
+├── template/          # 示例站点（首次启动复制到数据目录）
+│   ├── spaces.json    # 空间元数据
+│   └── pages/*.md     # 每页一个 Markdown 文件
 ├── data/              # 运行时数据目录（已 gitignore，首启自动创建）
-│   ├── pages.json     # 文档数据（由 template/ 初始化）
+│   ├── pages/*.md     # 每页一个 Markdown 文件（front matter + 正文）
+│   ├── spaces.json    # 空间元数据
 │   └── auth.json      # 站长账号（敏感，绝不提交）
 ├── flake.nix          # Nix 打包 + NixOS 模块（含备案配置）
 └── public/
@@ -133,17 +137,38 @@ DocLight/
     └── app.js         # esbuild 打包产物（自动生成）
 ```
 
-> 首次启动时若数据目录里没有 `pages.json`，会从 `template/pages.json` 复制一份示例站点过去；
+> 首次启动时若数据目录里没有 `spaces.json`，会从 `template/` 复制一份示例站点过去；
 > `data/` 整个目录都在 `.gitignore` 中，因此运行时内容不会与仓库里的示例数据混在一起。
-> 想更换默认示例，直接编辑 `template/pages.json` 即可。
+> 想更换默认示例，直接编辑 `template/pages/*.md` 即可。
 
 ### 内容格式与迁移
 
-`pages.json` 的 `version` 为 `4`，页面 `content` 保存 **Markdown**。Markdown 无法表达的
-格式（下划线 `<u>`、对齐 / 颜色等内联样式）会**原样保留为内联 HTML**，因此可视化编辑与
-Markdown 存储之间的往返是无损的；渲染时先经 `marked` 解析、再由 DOMPurify 净化后插入
-DOM，内联 HTML 因此不会成为 XSS 入口。旧 `version: 3`（HTML）数据在服务端**首次读取时
-自动逐页迁移并回写**，无需手动转换。
+页面正文以 **Markdown** 存储，且**每页一个真实 `.md` 文件**：
+
+```
+data/pages/welcome.md
+---
+title: 欢迎使用 DocLight
+space: default
+parent: null
+createdAt: 1787769399200
+updatedAt: 1787769399200
+---
+
+# 欢迎使用 DocLight ✦
+…正文…
+```
+
+这样可以直接导出、放进 Git 管理，或用任意编辑器**离线修改**——服务端每次读取都从磁盘
+重建，改动无需重启即可生效。front matter 缺失时会从容错处理：标题从首个 `#` 标题推断、
+时间取文件时间；未知键忽略；指向已删除空间的页面回退到第一个空间而不是消失。
+
+Markdown 无法表达的格式（下划线 `<u>`、对齐 / 颜色等内联样式）会**原样保留为内联 HTML**；
+渲染时先经 `marked` 解析、再由 DOMPurify 净化后插入 DOM，内联 HTML 因此不会成为 XSS 入口。
+
+**旧数据自动迁移**：若数据目录里存在旧版单文件 `data/pages.json`（`version: 3` 的 HTML
+或 `version: 4` 的 Markdown 字符串），首次启动会将其拆分并写入上述文件布局，原文件另存为
+`pages.json.bak` 以便回退，内容不会丢失。
 
 ### 可视化 / Markdown 双模式
 
@@ -236,8 +261,8 @@ NixOS 上也可以声明式部署：
 服务以 `DynamicUser` 运行，数据落在 `/var/lib/doclight`（systemd `StateDirectory`）。
 配置了 `address = "0.0.0.0"` 时才需要 `openFirewall = true`。
 
-> **为什么数据目录必须外置**：包安装到只读的 Nix store，而 DocLight 会写 `pages.json`
-> 和 `auth.json`。模块把 `dataDir` 写进生成的 TOML 并同时设置 `DOCLIGHT_DATA_DIR` 对齐
+> **为什么数据目录必须外置**：包安装到只读的 Nix store，而 DocLight 会写 `pages/*.md`、
+> `spaces.json` 和 `auth.json`。模块把 `dataDir` 写进生成的 TOML 并同时设置 `DOCLIGHT_DATA_DIR` 对齐
 > systemd 状态目录；`strictPort = true` 也由模块固定注入，端口占用直接失败——否则自动
 > 探测会静默漂到下一个端口，反向代理就落空了。
 >

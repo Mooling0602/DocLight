@@ -13,6 +13,7 @@ import { pbkdf2Sync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as YAML from 'yaml';
 
 const root = path.resolve(__dirname, '../..');
 const serverEntry = path.join(root, 'dist', 'server.js');
@@ -90,7 +91,16 @@ async function main(): Promise<void> {
     return { status: res.status, body: await res.json().catch(() => null) };
   };
   const readTree = async () => (await api('tree')).body;
-  const readDisk = () => JSON.parse(fs.readFileSync(path.join(server.dataDir, 'pages.json'), 'utf8'));
+  // Pages are stored as individual Markdown files; a rename must be reflected in each file's
+  // front matter (the space lives there, not in a central index).
+  const readDisk = () => ({
+    pages: fs.readdirSync(path.join(server.dataDir, 'pages'))
+      .filter(name => name.endsWith('.md'))
+      .map(name => {
+        const raw = fs.readFileSync(path.join(server.dataDir, 'pages', name), 'utf8');
+        return YAML.parse(raw.match(/^---\n([\s\S]*?)\n---/)?.[1] || '') as Record<string, unknown>;
+      }),
+  });
 
   try {
     /* ---- Authenticate: writes require a session ---- */

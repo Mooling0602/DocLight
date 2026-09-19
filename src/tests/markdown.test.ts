@@ -78,12 +78,16 @@ assert.equal(sanitizeMarkdown(null), '');
   const purify = createDOMPurify(domForPurify.window as unknown as Parameters<typeof createDOMPurify>[0]);
   const roundTrip = (markdown: string): string =>
     htmlToMarkdown(purify.sanitize(marked.parse(markdown, { async: false }) as string));
-  const seed = JSON.parse(fs.readFileSync(path.join(root, 'template', 'pages.json'), 'utf8'));
-  assert.equal(seed.version, 4, '示例数据应为 v4（Markdown）');
-  for (const page of seed.pages) {
-    const once = roundTrip(page.content);
-    assert.equal(once, page.content.trim(), `${page.slug}: 打开再保存不应改动内容`);
-    assert.equal(roundTrip(once), once, `${page.slug}: 二次往返应稳定`);
+  // The sample site is laid out like the store: each page is its own Markdown file.
+  const pagesDir = path.join(root, 'template', 'pages');
+  const files = fs.readdirSync(pagesDir).filter(name => name.endsWith('.md'));
+  assert.ok(files.length > 0, '示例站点应包含 Markdown 页面文件');
+  for (const file of files) {
+    const raw = fs.readFileSync(path.join(pagesDir, file), 'utf8');
+    const body = (raw.match(/^---\n[\s\S]*?\n---\n\n?([\s\S]*)$/)?.[1] ?? raw).replace(/\n$/, '');
+    const once = roundTrip(body);
+    assert.equal(once, body.trim(), `${file}: 打开再保存不应改动内容`);
+    assert.equal(roundTrip(once), once, `${file}: 二次往返应稳定`);
   }
 }
 

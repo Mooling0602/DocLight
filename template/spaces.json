@@ -1,0 +1,13 @@
+{
+  "version": 4,
+  "spaces": [
+    {
+      "slug": "default",
+      "title": "欢迎使用 DocLight",
+      "desc": "DocLight 默认空间",
+      "home": "welcome",
+      "createdAt": 1787769399200,
+      "updatedAt": 1787769399200
+    }
+  ]
+}
