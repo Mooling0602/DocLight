@@ -255,7 +255,22 @@ export function writeStore(
     try { fs.unlinkSync(path.join(dir, `${slug}.md`)); } catch { /* best effort */ }
   }
 
-  writeSpaces(dataDir, db.spaces);
+  // The index obeys the same rule as the page files: under `onlyCreate` a *valid* existing
+  // `spaces.json` is live data — the user may have renamed a space or created one since the
+  // snapshot was taken — so the snapshot's list must not replace it. A truncated or malformed
+  // index is not live data, so it is still repaired rather than left broken.
+  if (!options.onlyCreate || !storeExists(dataDir)) writeSpaces(dataDir, db.spaces);
+}
+
+/**
+ * Append the spaces in `extra` that `base` does not already name, preserving `base`'s order.
+ * A migration carries a snapshot's space list, which cannot know about a space the user created
+ * after it was taken; writing that list verbatim would drop the space and send its pages to the
+ * fallback on the next read.
+ */
+export function mergeSpaces(base: Space[], extra: Space[]): Space[] {
+  const seen = new Set(base.map((s) => s.slug));
+  return [...base, ...extra.filter((s) => !seen.has(s.slug))];
 }
 
 /** Write only the spaces index, leaving every page file untouched. */

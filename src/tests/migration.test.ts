@@ -386,6 +386,92 @@ async function main(): Promise<void> {
     fs.rmSync(dupDir, { recursive: true, force: true });
   }
 
+  /* ---- A re-migration must not revert or drop space metadata ---- */
+  // A space's title/description live only in `spaces.json` (a page's front matter records which
+  // space it belongs to, never what that space is called), so the same crash window that the
+  // `onlyCreate` page guard covers would, without an equivalent guard on the index, silently
+  // revert a renamed space and delete a space the user created after the snapshot was taken —
+  // while the page files keep pointing at it.
+  const spaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-space-'));
+  fs.writeFileSync(path.join(spaceDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const spaceFirst = await startServer(spaceDir);
+  await fetch(`http://127.0.0.1:${spaceFirst.port}/api/pages/legacy`);
+  spaceFirst.stop();
+
+  // The user's live state: the page moved into a space they created, and that space indexed.
+  const livePage = path.join(spaceDir, 'pages', 'legacy.md');
+  fs.writeFileSync(
+    livePage,
+    fs.readFileSync(livePage, 'utf8').replace(/^space: default$/m, 'space: team'),
+    'utf8',
+  );
+  const liveIdx = JSON.parse(fs.readFileSync(path.join(spaceDir, 'spaces.json'), 'utf8'));
+  liveIdx.spaces.push({
+    slug: 'team', title: '团队空间', desc: '内部资料', home: 'legacy',
+    createdAt: 1700000009000, updatedAt: 1700000009000,
+  });
+  fs.writeFileSync(path.join(spaceDir, 'spaces.json'), JSON.stringify(liveIdx, null, 2) + '\n', 'utf8');
+  // Recreate the crash state: stale snapshot back with no backup, index lost.
+  fs.copyFileSync(path.join(spaceDir, 'pages.json.bak'), path.join(spaceDir, 'pages.json'));
+  fs.rmSync(path.join(spaceDir, 'pages.json.bak'), { force: true });
+  fs.rmSync(path.join(spaceDir, 'spaces.json'), { force: true });
+
+  const afterSpace = await startServer(spaceDir);
+  try {
+    const idx = JSON.parse(fs.readFileSync(path.join(spaceDir, 'spaces.json'), 'utf8'));
+    assert.deepEqual(
+      idx.spaces.map((s: any) => s.slug).sort(),
+      ['default', 'team'],
+      '迁移不得丢掉用户在快照之后自建的空间',
+    );
+    // The page file still names `team`; the index must agree, or readStore would drop the page
+    // back onto the fallback space and the user's grouping would silently vanish in the UI.
+    assert.match(
+      fs.readFileSync(path.join(spaceDir, 'pages', 'legacy.md'), 'utf8'),
+      /\nspace: team\n/,
+      '页面文件的空间归属不应被回灌',
+    );
+    const tree = await (await fetch(`http://127.0.0.1:${afterSpace.port}/api/tree`)).json();
+    assert.ok(
+      tree.spaces.some((s: any) => s.slug === 'team'),
+      '接口返回的空间应包含用户自建空间',
+    );
+    assert.equal(
+      tree.pages.find((p: any) => p.slug === 'legacy')?.space,
+      'team',
+      '页面应留在用户选择的空间里，而不是被退回默认空间',
+    );
+  } finally {
+    afterSpace.stop();
+    fs.rmSync(spaceDir, { recursive: true, force: true });
+  }
+
+  /* ---- An unreadable legacy file must not seed the sample over live pages ---- */
+  // A garbled `pages.json` proves nothing about the content of `pages/`. Seeding the sample over
+  // it replaced every user page sharing a sample's name (welcome/guide/changelog) — the same
+  // loss the missing-index path already guards against, reached through a different branch.
+  const garbledDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-garbled-'));
+  fs.mkdirSync(path.join(garbledDir, 'pages'), { recursive: true });
+  fs.writeFileSync(
+    path.join(garbledDir, 'pages', 'welcome.md'),
+    '---\ntitle: 我的欢迎页\nspace: mine\n---\n\n我的正文，不能丢。\n',
+    'utf8',
+  );
+  fs.writeFileSync(path.join(garbledDir, 'pages.json'), 'THIS IS NOT JSON {{{\n', 'utf8');
+
+  const garbledBoot = await startServer(garbledDir);
+  try {
+    const welcome = fs.readFileSync(path.join(garbledDir, 'pages', 'welcome.md'), 'utf8');
+    assert.match(welcome, /我的正文，不能丢。/, '旧文件无法解析时不得覆盖既有页面');
+    assert.doesNotMatch(welcome, /欢迎使用 DocLight ✦/, '不得用示例数据填充');
+    const idx = JSON.parse(fs.readFileSync(path.join(garbledDir, 'spaces.json'), 'utf8'));
+    assert.deepEqual(idx.spaces.map((s: any) => s.slug), ['mine'], '索引应按现有页面重建');
+    assert.ok(!fs.existsSync(path.join(garbledDir, 'pages.json')), '无法解析的旧文件也应被移走');
+  } finally {
+    garbledBoot.stop();
+    fs.rmSync(garbledDir, { recursive: true, force: true });
+  }
+
   fs.rmSync(dataDir, { recursive: true, force: true });
   console.log('migration assertions passed');
 }

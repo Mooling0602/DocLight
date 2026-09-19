@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStore, writeStore, writeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
 import type { Database, Page } from '../store.js';
 
 function page(slug: string, over: Partial<Page> = {}): Page {
@@ -98,6 +98,48 @@ try {
   // Without the flag the same write does update the file, proving the option is what protected it.
   writeStore(dir, db(page('live', { content: '# 普通写入\n' })));
   assert.match(fs.readFileSync(pageFile('live'), 'utf8'), /普通写入/, '普通写入应更新已存在的页面');
+
+  /* ---- onlyCreate must protect the spaces index too, not just the page files ---- */
+  // A space's title/description live *only* in `spaces.json` (the page front matter records which
+  // space a page belongs to, never what the space is called). A snapshot carried by a re-migration
+  // therefore cannot be allowed to overwrite a live index, or the user's renamed space reverts.
+  const idxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-idx-'));
+  writeStore(idxDir, db(page('mine')));
+  const liveIndex = {
+    version: 4,
+    spaces: [
+      { slug: 'default', title: '用户改过的空间名', desc: '用户改过的描述', home: null, createdAt: 1, updatedAt: 2 },
+      { slug: 'team', title: '团队空间', desc: '内部资料', home: null, createdAt: 3, updatedAt: 4 },
+    ],
+  };
+  fs.writeFileSync(path.join(idxDir, 'spaces.json'), JSON.stringify(liveIndex, null, 2) + '\n', 'utf8');
+  writeStore(idxDir, db(page('mine')), [], { onlyCreate: true });
+  const kept = JSON.parse(fs.readFileSync(path.join(idxDir, 'spaces.json'), 'utf8'));
+  assert.equal(kept.spaces[0].title, '用户改过的空间名', 'onlyCreate 不得覆盖已存在的空间元数据');
+  assert.deepEqual(kept.spaces.map((s: any) => s.slug), ['default', 'team'], 'onlyCreate 不得丢掉用户自建的空间');
+
+  // A malformed index is not live data, so it must still be repaired rather than preserved.
+  fs.writeFileSync(path.join(idxDir, 'spaces.json'), '', 'utf8');
+  writeStore(idxDir, db(page('mine')), [], { onlyCreate: true });
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(idxDir, 'spaces.json'), 'utf8')).spaces[0].slug,
+    'default',
+    '损坏的索引仍应被修复',
+  );
+  fs.rmSync(idxDir, { recursive: true, force: true });
+
+  /* ---- mergeSpaces keeps the snapshot's order and appends the spaces it cannot know about ---- */
+  // Used by the migration path: the snapshot names the spaces as of the export, while the page
+  // files may name one the user created later. Both must survive, and the snapshot wins a clash.
+  const snapshot = [{ slug: 'default', title: '快照名', desc: '', home: null, createdAt: 1, updatedAt: 2 }];
+  const fromDisk = [
+    { slug: 'team', title: '团队', desc: '内部', home: null, createdAt: 3, updatedAt: 4 },
+    { slug: 'default', title: '磁盘名', desc: '不应生效', home: null, createdAt: 5, updatedAt: 6 },
+  ];
+  const merged = mergeSpaces(snapshot, fromDisk);
+  assert.deepEqual(merged.map(s => s.slug), ['default', 'team'], '合并应保留快照顺序并补上磁盘空间');
+  assert.equal(merged[0].title, '快照名', '同名空间应以快照为准');
+  assert.equal(merged[1].title, '团队', '磁盘独有的空间应被补入');
 
   /* ---- A hand-written file without front matter is readable ---- */
   fs.writeFileSync(pageFile('note'), '# 手写标题\n\n直接写的正文。\n', 'utf8');

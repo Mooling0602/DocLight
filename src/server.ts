@@ -47,7 +47,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore } from './store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore } from './store.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space, WriteOptions } from './store.js';
 
@@ -225,13 +225,25 @@ function migrateLegacyFile(): void {
   let raw: any = null;
   try { raw = JSON.parse(fs.readFileSync(LEGACY_DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
   if (!raw || (raw.version !== 3 && raw.version !== 4)) {
-    console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
+    // An unreadable legacy file is not proof the site is empty: pages already in `pages/` are the
+    // user's data and seeding over them would replace every one sharing a sample's name.
+    const salvage = recoverStore(DATA_DIR);
     retireLegacyFile();
-    writeDb(seedDb());
+    if (salvage) {
+      console.warn('· 旧数据格式无法识别，已按现有页面恢复（页面文件未改动）');
+      writeSpaces(DATA_DIR, salvage.spaces);
+      return;
+    }
+    console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
+    writeDb(seedDb(), [], { onlyCreate: true });
     return;
   }
 
-  const spaces: Space[] = raw.spaces || [];
+  // Pages on disk outrank the snapshot's index: a space the user created after the snapshot was
+  // taken is named by its pages' front matter but not by `spaces`, and writing that list verbatim
+  // would drop the space and send its pages to the fallback on the next read.
+  const live = recoverStore(DATA_DIR);
+  const spaces: Space[] = mergeSpaces(raw.spaces || [], live?.spaces ?? []);
   const fromHtml = raw.version === 3;
   const pages: Page[] = (raw.pages || []).map((p: Page) => ({
     ...p,
