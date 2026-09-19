@@ -62,6 +62,13 @@ interface ApiError {
 
 type EditMode = 'visual' | 'markdown';
 
+// Editor hints carry <kbd> chips, so they are assigned with innerHTML — textContent would
+// replace the child nodes and strip the key styling the shell's markup defines.
+const EDIT_HINTS: Record<EditMode, string> = {
+  visual: 'Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版',
+  markdown: '直接编辑 Markdown 源码 · <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存',
+};
+
 interface AppState {
   spaces: Space[];
   pages: PageMeta[];
@@ -132,6 +139,23 @@ function wordCount(markdown: unknown): number {
   return cjk + words;
 }
 
+/**
+ * Sanitizer policy for rendered content. DOMPurify's default allow-list keeps the whole
+ * family of form controls, and a form rendered into a document can POST whatever a reader
+ * types to an arbitrary host — there is no legitimate use for one here, so they are dropped.
+ * The single exception is the GFM task-list checkbox, which the editor itself produces: the
+ * hook below keeps that one type, forces it inert, and removes every other input.
+ */
+const PURIFY_OPTIONS = {
+  ADD_ATTR: ['target'],
+  FORBID_TAGS: ['form', 'button', 'select', 'textarea', 'option', 'optgroup', 'fieldset', 'legend'],
+};
+DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
+  if (node.nodeName !== 'INPUT') return;
+  if ((node.getAttribute('type') || '').toLowerCase() === 'checkbox') node.setAttribute('disabled', '');
+  else node.remove();
+});
+
 /** Render Markdown to safe HTML. Raw HTML in the source passes through `marked` and is then
     sanitised with DOMPurify, so inline preservation cannot become an XSS vector. */
 function renderMarkdown(markdown: unknown): string {
@@ -139,7 +163,7 @@ function renderMarkdown(markdown: unknown): string {
   if (!source.trim()) return '';
   let html = '';
   try { html = marked.parse(source, { async: false }) as string; } catch { return ''; }
-  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+  return DOMPurify.sanitize(html, PURIFY_OPTIONS);
 }
 
 function normalizeUrl(u: unknown): string {
@@ -942,9 +966,7 @@ function setEditMode(mode: EditMode, focus = true) {
   el.sourceEditor.hidden = visual;
   // The formatting toolbar only makes sense for the WYSIWYG surface; Markdown is edited raw.
   el.toolbarWrap.hidden = !visual;
-  el.editHint.textContent = visual
-    ? 'Enter 换行 · 代码块内 Tab 缩进 · Ctrl/⌘ S 随时保存 · 粘贴内容将自动清理排版'
-    : '直接编辑 Markdown 源码 · 支持标题、列表、引用、代码块、表格等 · 切换回「可视化」自动渲染';
+  el.editHint.innerHTML = visual ? EDIT_HINTS.visual : EDIT_HINTS.markdown;
 
   if (visual) {
     el.editor.innerHTML = renderMarkdown(markdown);
@@ -977,7 +999,7 @@ function enterEdit(focus = true) {
   el.editor.hidden = false;
   el.sourceEditor.hidden = true;
   el.toolbarWrap.hidden = false;
-  el.editHint.textContent = 'Enter 换行 · 代码块内 Tab 缩进 · Ctrl/⌘ S 随时保存 · 粘贴内容将自动清理排版';
+  el.editHint.innerHTML = EDIT_HINTS.visual;
   renderModeToggle('visual');
   if (focus) placeCaretEnd(el.editor);
   setTimeout(() => refreshToolbarState(), 50);

@@ -70,6 +70,9 @@ async function main(): Promise<void> {
   // The active mode must be exposed to assistive tech, not only via an `is-on` class.
   assert.equal($('#mode-toggle [data-mode="visual"]').getAttribute('aria-pressed'), 'true', '可视化按钮应标记为选中');
   assert.equal($('#mode-toggle [data-mode="markdown"]').getAttribute('aria-pressed'), 'false', 'Markdown 按钮应标记为未选中');
+  // The hint is rewritten on every switch, so its <kbd> chips must survive: assigning
+  // textContent instead of innerHTML would silently drop them (and their styling).
+  assert.equal($('#edit-hint').querySelectorAll('kbd').length, 2, '可视化模式提示应保留 kbd 按键标记');
 
   /* ---- Visual → Markdown: the edit made in the WYSIWYG surface must be serialised ---- */
   $('#editor').innerHTML = '<h2>改过的标题</h2><p>新增段落</p>';
@@ -84,6 +87,7 @@ async function main(): Promise<void> {
   assert.match(md, /新增段落/, '新增段落应进入 Markdown');
   assert.equal($('#dirty-pill').hidden, false, '切换不应清除未保存标记');
   assert.equal($('#mode-toggle [data-mode="markdown"]').getAttribute('aria-pressed'), 'true', '切换后按钮选中态应同步');
+  assert.equal($('#edit-hint').querySelectorAll('kbd').length, 3, 'Markdown 模式提示也应保留 kbd 按键标记');
 
   /* ---- Markdown → Visual: raw edits must be rendered back into the WYSIWYG surface ---- */
   const ta = $('#source-editor') as HTMLTextAreaElement;

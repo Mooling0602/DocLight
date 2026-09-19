@@ -177,6 +177,14 @@ function readDb(): Database {
   // v3 stored HTML. Convert each page body once and persist, so existing sites keep their
   // content when the storage format changes instead of being reset to the sample data.
   if (raw && raw.version === 3) {
+    // The rewrite is in place and irreversible, so the original HTML is kept next to it
+    // first. Written exclusively (`wx`) so a retry after a failed migration cannot lose the
+    // one copy of the pre-migration data; a failure here aborts rather than proceeding.
+    const backup = DATA_FILE + '.v3.bak';
+    if (!fs.existsSync(backup)) {
+      fs.writeFileSync(backup, JSON.stringify(raw, null, 2), { encoding: 'utf8', flag: 'wx' });
+      console.log(`· 已备份迁移前数据 → ${backup}`);
+    }
     const spaces: Space[] = raw.spaces || [];
     const pages: Page[] = (raw.pages || []).map((p: Page) => ({
       ...p,
