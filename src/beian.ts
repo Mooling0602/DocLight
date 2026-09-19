@@ -75,17 +75,14 @@ export function readFooterOptions(config: Pick<FooterOptions, 'icp' | 'icpUrl' |
 }
 
 /**
- * The public security badge is drawn inline instead of pointing at the icon hosted by
- * the portal: an external image would break the footer whenever that host is slow or
- * unreachable, and it inherits `currentColor` so it follows both themes.
+ * The public security badge is the icon hosted on the national filing platform
+ * (beian.mps.gov.cn), which is the official artwork expected in a filing audit. The
+ * server emits only this official mark, so the raw HTML an audit inspects never carries
+ * a non-official lookalike. A drawn shield is attached client-side purely as a cosmetic
+ * fallback for when the external host is unreachable (see enhanceFilingBadges in app.ts).
  */
-const POLICE_BADGE = [
-  '<svg class="sf-badge" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">',
-  '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="currentColor" opacity=".18"/>',
-  '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
-  '<path d="M5.8 8.1 7.4 9.7l2.9-3.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
-  '</svg>',
-].join('');
+const POLICE_BADGE =
+  '<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png" alt="" width="16" height="16">';
 
 /**
  * Render the footer markup, or an empty string when nothing is configured so that a

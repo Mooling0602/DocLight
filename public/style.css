@@ -598,8 +598,12 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   transition: color .15s ease;
 }
 .sf-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-.sf-badge { flex: none; color: var(--text-3); }
-.sf-link:hover .sf-badge { color: currentColor; }
+/* The footer badge is an image, so it must opt out of the article-level `img` decorations
+   (border-radius/box-shadow) that would clip and ring a 16px icon. */
+.sf-badge { flex: none; width: 16px; height: 16px; object-fit: contain; border-radius: 0; box-shadow: none; }
+/* Client-side stand-in shown only when the official image fails to load; it follows the theme. */
+svg.sf-badge { color: var(--text-3); }
+.sf-link:hover svg.sf-badge { color: currentColor; }
 
 /* ---------- Responsive ---------- */
 #btn-menu { display: none; }

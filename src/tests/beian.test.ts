@@ -26,6 +26,13 @@ import {
 const root = path.resolve(__dirname, '../..');
 const indexHtmlSource = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 
+// The footer badge is an <img>, so the global article-level `img` rule would clip it with
+// border-radius and ring it with box-shadow. The .sf-badge rule must reset both.
+const styleSource = fs.readFileSync(path.join(root, 'public', 'style.css'), 'utf8');
+const badgeRule = (styleSource.match(/\.sf-badge\s*\{[^}]*\}/) || [''])[0];
+assert.match(badgeRule, /border-radius:\s*0/, '.sf-badge 必须重置全局 img 的圆角');
+assert.match(badgeRule, /box-shadow:\s*none/, '.sf-badge 必须重置全局 img 的阴影');
+
 const FULL = {
   icp: '浙ICP备12345678号-1',
   icpUrl: ICP_PORTAL,
@@ -45,6 +52,16 @@ assert.ok(full.includes('© 2026 Mooling'), '应包含版权行');
 // Links point at the official lookup portals — the actual checkpoint in a filing audit
 assert.ok(full.includes(`href="${ICP_PORTAL}"`), 'ICP 备案号必须链接到工信部');
 assert.ok(full.includes('https://beian.mps.gov.cn/'), '公安备案号必须链接到公安部');
+
+// The public-security badge in the server response must be *only* the official artwork
+// published by the filing platform: an audit inspects the raw HTML, so no hand-drawn
+// lookalike may appear there. (The client attaches a cosmetic fallback if the host is down.)
+assert.ok(
+  full.includes('<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png"'),
+  '公安备案必须使用官方平台的徽标图片',
+);
+assert.ok(!full.includes('sf-badge-fallback'), '服务端输出不得包含自绘兜底徽标');
+assert.ok(!/<svg[^>]*class="sf-badge"/.test(full), '服务端渲染的备案标记必须是官方图片而非自绘 SVG');
 
 // Opening in a new tab requires rel to prevent reverse tabnabbing
 assert.ok(full.includes('rel="noopener noreferrer"'), '外链应带 rel=noopener');
@@ -86,8 +103,10 @@ assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt
 assert.equal(escapeHtml('a & b "c" \'d\''), 'a &amp; b &quot;c&quot; &#39;d&#39;', '引号与 & 应被转义');
 
 const xss = renderFooter({ ...FULL, copyright: '<img src=x onerror=alert(1)>' });
-assert.ok(!xss.includes('<img'), '版权文本中的标签必须被转义，不能注入');
-assert.ok(xss.includes('&lt;img'), '应保留转义后的可见文本');
+// The footer legitimately contains the official badge <img>, so check the payload itself
+// rather than blanket-rejecting every tag: the raw markup must be escaped, never parsed.
+assert.ok(!xss.includes('<img src=x onerror'), '版权文本中的标签必须被转义，不能注入');
+assert.ok(xss.includes('&lt;img src=x onerror=alert(1)&gt;'), '应保留转义后的可见文本');
 
 // The filing number is admin-provided but appears on every page, so links must restrict the protocol
 assert.equal(safeUrl('javascript:alert(1)', ICP_PORTAL), ICP_PORTAL, 'javascript: 应被拒绝');

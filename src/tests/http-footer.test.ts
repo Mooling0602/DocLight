@@ -108,6 +108,10 @@ async function main(): Promise<void> {
       html.includes('https://beian.mps.gov.cn/#/query/webSearch?code=11010502030123'),
       'police number must link to its lookup page',
     );
+    assert.ok(
+      html.includes('src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png"'),
+      'police filing must render the official badge image',
+    );
     assert.ok(html.includes('© 2026 Mooling'), 'copyright line must be preserved');
     assert.ok(!html.includes('DOCLIGHT_FOOTER'), 'marker comment must be consumed');
     // The footer sits inside <main>, before the end of the document — the page bottom required for compliance
