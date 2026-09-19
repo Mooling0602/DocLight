@@ -184,9 +184,15 @@ function writeAtomic(file: string, data: string): void {
 /**
  * Persist the database as Markdown files. Writes are content-compared so an update to one page
  * does not rewrite (and re-stamp) every other file, which keeps the store friendly to `git`
- * and file watchers. Files whose page was deleted are removed.
+ * and file watchers.
+ *
+ * `removed` lists the slugs the caller itself deleted or renamed. Only those files are
+ * unlinked — never "every file the incoming db happens not to mention". That distinction is
+ * what keeps a write from destroying data it never saw: a page whose file could not be read
+ * is absent from `db`, and a seeding or migration write carries only the pages it was given,
+ * so neither may be treated as an authoritative statement that the other files are unwanted.
  */
-export function writeStore(dataDir: string, db: Database): void {
+export function writeStore(dataDir: string, db: Database, removed: Iterable<string> = []): void {
   const dir = pagesDir(dataDir);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -198,18 +204,20 @@ export function writeStore(dataDir: string, db: Database): void {
     if (!sameContent(file, next)) writeAtomic(file, next);
   }
 
-  // Remove orphans (deleted or renamed pages). Only names this store could have produced are
-  // eligible: a hand-added file whose name is not a valid slug is skipped on read, so deleting
-  // it here would destroy content the user never got to see. Temp files never end in `.md`.
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    const slug = entry.name.slice(0, -3);
-    if (!SLUG_RE.test(slug) || wanted.has(slug)) continue;
-    try { fs.unlinkSync(path.join(dir, entry.name)); } catch { /* best effort */ }
+  for (const slug of new Set(removed)) {
+    // A slug that is still live wins: a rename that reuses a name must not delete the new file.
+    if (wanted.has(slug) || !SLUG_RE.test(slug)) continue;
+    try { fs.unlinkSync(path.join(dir, `${slug}.md`)); } catch { /* best effort */ }
   }
 
-  const spaces = JSON.stringify({ version: 4, spaces: db.spaces }, null, 2) + '\n';
-  if (!sameContent(spacesFile(dataDir), spaces)) writeAtomic(spacesFile(dataDir), spaces);
+  writeSpaces(dataDir, db.spaces);
+}
+
+/** Write only the spaces index, leaving every page file untouched. */
+export function writeSpaces(dataDir: string, spaces: Space[]): void {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const next = JSON.stringify({ version: 4, spaces }, null, 2) + '\n';
+  if (!sameContent(spacesFile(dataDir), next)) writeAtomic(spacesFile(dataDir), next);
 }
 
 /* ------------------------------------------------------------ seeding */
@@ -232,4 +240,60 @@ export function seedFromTemplate(templateDir: string): Database | null {
     for (const r of [...db.spaces, ...db.pages]) { r.createdAt += delta; r.updatedAt += delta; }
   }
   return db;
+}
+
+/**
+ * Rebuild a lost `spaces.json` from the page files already on disk.
+ *
+ * The spaces index is derived data — each page carries its space in its front matter — so if
+ * the index alone is lost (deleted, truncated, half-synced) the content is still intact, and
+ * seeding over it would overwrite every page that shares a sample's name. Recovery therefore
+ * synthesises one space per distinct slug named by the pages and leaves the files untouched.
+ *
+ * Returns the reconstructed database, or null when there are no pages to recover from (a
+ * genuinely empty directory belongs to the normal first-run seeding path).
+ */
+export function recoverStore(dataDir: string): Database | null {
+  const dir = pagesDir(dataDir);
+  let entries: fs.Dirent[] = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+
+  const pages: Page[] = [];
+  const slugs = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    const slug = entry.name.slice(0, -3);
+    if (!SLUG_RE.test(slug)) continue;
+    const full = path.join(dir, entry.name);
+    let raw = '';
+    let stat: fs.Stats | null = null;
+    try { raw = fs.readFileSync(full, 'utf8'); stat = fs.statSync(full); } catch { continue; }
+    const { meta, body } = splitFrontMatter(raw);
+    // Read the space straight from the front matter: readStore would map it onto its fallback
+    // when the space list is empty, losing the very grouping this recovery exists to restore.
+    const space = str(meta.space, '') || 'default';
+    slugs.add(space);
+    const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
+    pages.push({
+      slug,
+      space,
+      parent: typeof meta.parent === 'string' && meta.parent ? meta.parent : null,
+      title: str(meta.title, '') || titleFromBody(body, slug),
+      content: body.replace(/\n$/, ''),
+      createdAt: num(meta.createdAt, fallbackTime),
+      updatedAt: num(meta.updatedAt, fallbackTime),
+    });
+  }
+  if (!slugs.size) return null;
+
+  const now = Date.now();
+  const spaces: Space[] = [...slugs].sort().map((slug) => ({
+    slug,
+    title: slug,
+    desc: '',
+    home: pages.find((p) => p.space === slug)?.slug ?? null,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  return { version: 4, spaces, pages };
 }

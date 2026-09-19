@@ -47,7 +47,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, storeExists, seedFromTemplate } from './store.js';
+import { readStore, writeStore, writeSpaces, storeExists, seedFromTemplate, recoverStore } from './store.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space } from './store.js';
 
@@ -118,10 +118,25 @@ function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (storeExists(DATA_DIR)) return;
 
+  // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
+  // already sitting in `pages/` survive this because a write only unlinks files the caller
+  // declared removed, never every file the incoming db happens not to mention.
   if (fs.existsSync(LEGACY_DATA_FILE)) {
     migrateLegacyFile();
     return;
   }
+
+  // With no legacy file, pages on disk mean the spaces index alone was lost. It is derived data
+  // (every page carries its space in its front matter), so it is rebuilt from the pages rather
+  // than papered over with the sample, which would overwrite any page sharing a sample's name.
+  // Only the index is written: the page files are the source of truth and are left as they are.
+  const recovered = recoverStore(DATA_DIR);
+  if (recovered) {
+    console.warn(`· 未找到 ${path.join(DATA_DIR, 'spaces.json')}，已按现有页面重建索引（页面文件未改动）`);
+    writeSpaces(DATA_DIR, recovered.spaces);
+    return;
+  }
+
   writeDb(seedDb());
   console.log(`· 已从示例数据初始化 → ${path.join(DATA_DIR, 'pages')}`);
 }
@@ -164,8 +179,10 @@ function readDb(): Database {
   if (!storeExists(DATA_DIR)) ensureData();
   return readStore(DATA_DIR);
 }
-function writeDb(db: Database): void {
-  writeStore(DATA_DIR, db);
+/** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
+ *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
+function writeDb(db: Database, removed: Iterable<string> = []): void {
+  writeStore(DATA_DIR, db, removed);
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -501,7 +518,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         const removedPages = db.pages.filter(p => p.space === spaceSlug).map(p => p.slug);
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
-        writeDb(db);
+        writeDb(db, removedPages);
         return json(res, 200, { ok: true, removedSpace: spaceSlug, removedPages });
       }
     }
@@ -522,6 +539,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     if (req.method === 'PUT') {
       const body = await readBody(req);
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
+      let renamed = false;
       if (body.slug !== undefined) {
         const ns = String(body.slug || '').trim();
         if (!SLUG_RE.test(ns)) return json(res, 400, { error: 'slug 只能含小写字母、数字、下划线（1–80 位）' });
@@ -530,6 +548,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           return json(res, 400, { error: '该 slug 已被占用' });
         }
         if (ns !== slug) {
+          renamed = true;
           db.pages.forEach(p => { if (p.parent === slug) p.parent = ns; });
           db.pages[idx].slug = ns;
           const sp = db.spaces.find(s => s.home === slug);
@@ -564,7 +583,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       }
       if (body.content !== undefined) db.pages[idx].content = sanitizeMarkdown(body.content);
       db.pages[idx].updatedAt = Date.now();
-      writeDb(db);
+      // A slug rename leaves the old file behind, so it is declared for removal here; the store
+      // keeps it if the new slug happens to reuse the same name.
+      writeDb(db, renamed ? [slug] : []);
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'DELETE') {
@@ -573,7 +594,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
       const sp = db.spaces.find(s => s.home === slug);
       if (sp) sp.home = null;
-      writeDb(db);
+      writeDb(db, doomed);
       return json(res, 200, { ok: true, removed: doomed });
     }
   }

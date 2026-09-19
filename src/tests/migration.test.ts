@@ -149,6 +149,66 @@ async function main(): Promise<void> {
     '已存在的备份不应被覆盖',
   );
 
+  /* ---- A lost spaces.json must not cost the user their pages ---- */
+  // The spaces index is derived data, so seeding the sample over a directory that still holds
+  // pages would replace every page sharing a sample name (welcome/guide/changelog). The store
+  // is repaired from the page files instead; this is asserted end-to-end through a real boot.
+  //
+  // The migrated-away originals are removed first, so this exercises the repair path in
+  // isolation rather than falling through to a fallback that happens to survive by accident.
+  fs.rmSync(path.join(dataDir, 'spaces.json'), { force: true });
+  fs.rmSync(path.join(dataDir, 'pages.json'), { force: true });
+  fs.rmSync(path.join(dataDir, 'pages.json.bak'), { force: true });
+  // A page named after a shipped sample is planted first: without recovery the seeding path
+  // would replace it with the sample, which a plain "the legacy page still loads" check misses.
+  fs.writeFileSync(
+    path.join(dataDir, 'pages', 'welcome.md'),
+    '---\ntitle: 用户自己的欢迎页\nspace: default\n---\n\n这是我的内容，不是示例。\n',
+    'utf8',
+  );
+  const repaired = await startServer(dataDir);
+  try {
+    const res = await fetch(`http://127.0.0.1:${repaired.port}/api/pages/legacy`);
+    assert.equal(res.status, 200, '缺少 spaces.json 时既有页面仍应可读');
+    assert.match((await res.json()).content, /^# 旧标题/m, '页面正文应原样保留');
+
+    const welcome = fs.readFileSync(path.join(dataDir, 'pages', 'welcome.md'), 'utf8');
+    assert.match(welcome, /这是我的内容，不是示例/, '同名页面不得被示例数据覆盖');
+    assert.doesNotMatch(welcome, /欢迎使用 DocLight ✦/, '同名页面不得被示例数据覆盖');
+
+    const files = fs.readdirSync(path.join(dataDir, 'pages')).sort();
+    assert.deepEqual(files, ['empty.md', 'legacy.md', 'welcome.md'], '不得引入示例页面或删除既有页面');
+    assert.ok(fs.existsSync(path.join(dataDir, 'spaces.json')), '重建后应写回 spaces.json');
+    const rebuilt = JSON.parse(fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8'));
+    assert.deepEqual(rebuilt.spaces.map((s: any) => s.slug), ['default'], '空间索引应据页面重建');
+  } finally {
+    repaired.stop();
+  }
+
+  /* ---- A legacy file and hand-written pages together: both survive ---- */
+  // The legacy file is the site's real data and must be migrated; a page already in `pages/`
+  // must not be swept away as an orphan by that migration.
+  const bothDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-both-'));
+  fs.writeFileSync(path.join(bothDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  fs.mkdirSync(path.join(bothDir, 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(bothDir, 'pages', 'handwritten.md'), '# 手写\n\n手写内容\n', 'utf8');
+
+  const both = await startServer(bothDir);
+  try {
+    await fetch(`http://127.0.0.1:${both.port}/api/pages/legacy`);
+    const files = fs.readdirSync(path.join(bothDir, 'pages')).sort();
+    assert.deepEqual(files, ['empty.md', 'handwritten.md', 'legacy.md'], '迁移与手写页面应共存');
+    assert.match(
+      fs.readFileSync(path.join(bothDir, 'pages', 'handwritten.md'), 'utf8'),
+      /手写内容/,
+      '迁移不得删除已存在的手写页面',
+    );
+    assert.ok(fs.existsSync(path.join(bothDir, 'pages', 'legacy.md')), '旧数据仍应被迁移');
+  } finally {
+    both.stop();
+    fs.rmSync(bothDir, { recursive: true, force: true });
+  }
+
   fs.rmSync(dataDir, { recursive: true, force: true });
   console.log('migration assertions passed');
 }

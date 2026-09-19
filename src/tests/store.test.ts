@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStore, writeStore, storeExists } from '../store.js';
+import { readStore, writeStore, writeSpaces, storeExists, recoverStore } from '../store.js';
 import type { Database, Page } from '../store.js';
 
 function page(slug: string, over: Partial<Page> = {}): Page {
@@ -66,14 +66,26 @@ try {
   writeStore(dir, back);
   assert.equal(fs.statSync(pageFile('alpha')).mtimeMs, mtimeBefore, '内容未变时不应重写文件');
 
-  /* ---- Deleting a page removes its file instead of leaving an orphan ---- */
-  writeStore(dir, db(page('alpha')));
-  assert.equal(fs.existsSync(pageFile('beta')), false, '删除的页面文件应被移除');
+  /* ---- Deleting a page removes its file, but only when the caller says so ---- */
+  writeStore(dir, db(page('alpha')), ['beta']);
+  assert.equal(fs.existsSync(pageFile('beta')), false, '调用方声明的删除应移除对应文件');
 
-  /* ---- Renaming a page moves the file ---- */
-  writeStore(dir, db(page('alpha', { slug: 'gamma' })));
+  /* ---- A write that simply omits a page must NOT delete it ---- */
+  // The incoming db is not an authoritative list of what should exist: a page whose file could
+  // not be read is missing from it, and seeding/migration pass only the pages they were given.
+  // Treating that absence as "delete the file" destroyed user content (see recoverStore too).
+  fs.writeFileSync(pageFile('kept'), '---\ntitle: 保留\nspace: default\n---\n\n正文\n', 'utf8');
+  writeStore(dir, db(page('alpha')));
+  assert.ok(fs.existsSync(pageFile('kept')), '未出现在 db 中的文件不应被当作孤儿删除');
+
+  /* ---- Renaming a page moves the file when the old slug is declared ---- */
+  writeStore(dir, db(page('gamma')), ['alpha']);
   assert.equal(fs.existsSync(pageFile('alpha')), false, '重命名后旧文件应消失');
   assert.equal(fs.existsSync(pageFile('gamma')), true, '重命名后应产生新文件');
+
+  /* ---- A rename must not delete the new file when it reuses the old name ---- */
+  writeStore(dir, db(page('keepname')), ['keepname']);
+  assert.ok(fs.existsSync(pageFile('keepname')), '仍被使用的 slug 不应因声明删除而消失');
 
   /* ---- A hand-written file without front matter is readable ---- */
   fs.writeFileSync(pageFile('note'), '# 手写标题\n\n直接写的正文。\n', 'utf8');
@@ -99,6 +111,39 @@ try {
     fs.existsSync(path.join(dir, 'pages', 'README.md')),
     '文件名不合法的文件不应被当成孤儿删除',
   );
+
+  /* ---- A lost spaces.json is rebuilt from the pages, never overwritten by the sample ---- */
+  // Seeding here would replace every page whose name collides with a sample page, so the
+  // pages directory is the source of truth whenever it holds anything.
+  {
+    const lost = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-lost-'));
+    fs.mkdirSync(path.join(lost, 'pages'), { recursive: true });
+    fs.writeFileSync(
+      path.join(lost, 'pages', 'mine.md'),
+      '---\ntitle: 我的文档\nspace: team\n---\n\n重要内容\n',
+      'utf8',
+    );
+    assert.equal(storeExists(lost), false, '缺少 spaces.json 时不应视为已初始化');
+
+    const restored = recoverStore(lost)!;
+    assert.ok(restored, '存在页面文件时应能从磁盘恢复索引');
+    assert.equal(restored.pages.length, 1, '恢复应保留既有页面');
+    assert.equal(restored.pages[0].title, '我的文档', '恢复应保留 front matter 中的标题');
+    assert.equal(restored.pages[0].space, 'team', '空间应取自 front matter 而非回退默认值');
+    assert.deepEqual(restored.spaces.map(s => s.slug), ['team'], '应为每个出现过的空间建索引');
+
+    // Recovery writes only the index, so the page file stays byte-for-byte as the user left it.
+    const before = fs.readFileSync(path.join(lost, 'pages', 'mine.md'), 'utf8');
+    writeSpaces(lost, restored.spaces);
+    assert.equal(fs.readFileSync(path.join(lost, 'pages', 'mine.md'), 'utf8'), before, '恢复不应改写页面文件');
+    assert.equal(storeExists(lost), true, '恢复后应写回 spaces.json');
+
+    // An empty directory is not a recovery case — that is the normal first-run seeding path.
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-empty-'));
+    assert.equal(recoverStore(empty), null, '没有任何页面时不应走恢复路径');
+    fs.rmSync(lost, { recursive: true, force: true });
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
 
   console.log('store assertions passed');
 } finally {
