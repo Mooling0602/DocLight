@@ -255,11 +255,14 @@ export function writeStore(
     try { fs.unlinkSync(path.join(dir, `${slug}.md`)); } catch { /* best effort */ }
   }
 
-  // The index obeys the same rule as the page files: under `onlyCreate` a *valid* existing
+  // The index obeys the same rule as the page files: under `onlyCreate` a *usable* existing
   // `spaces.json` is live data — the user may have renamed a space or created one since the
-  // snapshot was taken — so the snapshot's list must not replace it. A truncated or malformed
-  // index is not live data, so it is still repaired rather than left broken.
-  if (!options.onlyCreate || !storeExists(dataDir)) writeSpaces(dataDir, db.spaces);
+  // snapshot was taken — so the snapshot's list must not replace it. An index that is missing,
+  // truncated or names no spaces is not live data (it cannot classify a single page), so it is
+  // still repaired rather than left broken.
+  if (!options.onlyCreate || !storeExists(dataDir) || spacesIndexIsEmpty(dataDir)) {
+    writeSpaces(dataDir, db.spaces);
+  }
 }
 
 /**

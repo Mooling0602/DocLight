@@ -126,6 +126,16 @@ try {
     'default',
     '损坏的索引仍应被修复',
   );
+
+  // An index naming no spaces is equally unusable — it cannot classify a single page — so a write
+  // that establishes the store must be allowed to fill it in.
+  fs.writeFileSync(path.join(idxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+  writeStore(idxDir, db(page('mine')), [], { onlyCreate: true });
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(idxDir, 'spaces.json'), 'utf8')).spaces.map((s: any) => s.slug),
+    ['default'],
+    '空索引在 onlyCreate 下仍应被写入',
+  );
   fs.rmSync(idxDir, { recursive: true, force: true });
 
   /* ---- mergeSpaces keeps the snapshot's order and appends the spaces it cannot know about ---- */

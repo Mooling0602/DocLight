@@ -296,6 +296,54 @@ async function main(): Promise<void> {
     fs.rmSync(emptiedDir, { recursive: true, force: true });
   }
 
+  /* ---- An empty index beside a legacy file must migrate it, not retire it ---- */
+  // The index is `{"spaces":[]}` and `pages/` is empty, so the repair branch above finds nothing to
+  // rebuild from — yet a legacy file is present and it is this site's *only* copy of the content.
+  // An empty-but-parseable index counts as a store, so the `storeExists` branch would retire that
+  // file unread and leave the user looking at an empty site. It must be migrated instead.
+  const emptyIdxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-emptyidx-'));
+  fs.mkdirSync(path.join(emptyIdxDir, 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(emptyIdxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+  fs.writeFileSync(path.join(emptyIdxDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+
+  const emptyIdxBoot = await startServer(emptyIdxDir);
+  try {
+    assert.ok(fs.existsSync(path.join(emptyIdxDir, 'pages', 'legacy.md')), '空索引旁的旧数据必须被迁移');
+    assert.match(
+      fs.readFileSync(path.join(emptyIdxDir, 'pages', 'legacy.md'), 'utf8'),
+      /^# 旧标题/m,
+      '迁移后的页面应保留原内容',
+    );
+    const idx = JSON.parse(fs.readFileSync(path.join(emptyIdxDir, 'spaces.json'), 'utf8'));
+    assert.deepEqual(idx.spaces.map((s: any) => s.slug), ['default'], '索引应写入迁移出的空间');
+    const tree = await (await fetch(`http://127.0.0.1:${emptyIdxBoot.port}/api/tree`)).json();
+    assert.equal(tree.pages.length, 2, '站点不应显示为空');
+  } finally {
+    emptyIdxBoot.stop();
+    fs.rmSync(emptyIdxDir, { recursive: true, force: true });
+  }
+
+  /* ---- A stale legacy file beside an empty index is still NOT migrated ---- */
+  // The guard above must not undo the reappearance protection: a legacy file next to its own backup
+  // is a failed-retire leftover, so with no pages to recover from it is retired, never imported.
+  const emptyIdxStaleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-emptyidx-stale-'));
+  fs.mkdirSync(path.join(emptyIdxStaleDir, 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(emptyIdxStaleDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+  fs.writeFileSync(path.join(emptyIdxStaleDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  fs.copyFileSync(path.join(emptyIdxStaleDir, 'pages.json'), path.join(emptyIdxStaleDir, 'pages.json.bak'));
+
+  const emptyIdxStaleBoot = await startServer(emptyIdxStaleDir);
+  try {
+    assert.ok(
+      !fs.existsSync(path.join(emptyIdxStaleDir, 'pages', 'legacy.md')),
+      '与备份并存的残留旧文件不应被当作数据导入',
+    );
+    assert.ok(!fs.existsSync(path.join(emptyIdxStaleDir, 'pages.json')), '残留旧文件应被移走');
+  } finally {
+    emptyIdxStaleBoot.stop();
+    fs.rmSync(emptyIdxStaleDir, { recursive: true, force: true });
+  }
+
   /* ---- A legacy file that reappears beside its backup must not revert edits ---- */
   // The exact path that a bare `existsSync` check missed: retire failed (or the file was copied
   // back in), so `pages.json` coexists with the `.bak` after a migration already ran. Migrating it

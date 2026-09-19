@@ -131,6 +131,16 @@ function ensureData(): void {
       retireLegacyFile();
       return;
     }
+    // No pages to rebuild from. An empty index is consistent with a site the user emptied on
+    // purpose, but if a legacy file is also present *it* is this site's real data — the index was
+    // written empty and the pages never made it out of the single file. Retiring it here (which the
+    // `storeExists` branch below would do, an empty-but-parseable index counting as a store) would
+    // move the user's only copy aside unread and leave them looking at an empty site. A legacy file
+    // beside its own backup is the stale-reappearance case, not this one, so it is left to below.
+    if (fs.existsSync(LEGACY_DATA_FILE) && !fs.existsSync(LEGACY_DATA_FILE + '.bak')) {
+      migrateLegacyFile();
+      return;
+    }
   }
 
   if (storeExists(DATA_DIR)) {
