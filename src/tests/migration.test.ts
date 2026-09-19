@@ -149,15 +149,24 @@ async function main(): Promise<void> {
     '已存在的备份不应被覆盖',
   );
 
+  /* ---- Migration retires the legacy file so it cannot shadow the store ---- */
+  // Leaving `pages.json` in place would let a later lost `spaces.json` re-import this stale
+  // snapshot over the user's edits. The store is authoritative once written, so the legacy file
+  // must be moved aside (its bytes kept as `.bak`).
+  assert.ok(
+    !fs.existsSync(path.join(dataDir, 'pages.json')),
+    '迁移完成后旧 pages.json 不应继续留在数据目录',
+  );
+  assert.ok(fs.existsSync(path.join(dataDir, 'pages.json.bak')), '旧数据应保留为 .bak 备份');
+
   /* ---- A lost spaces.json must not cost the user their pages ---- */
   // The spaces index is derived data, so seeding the sample over a directory that still holds
   // pages would replace every page sharing a sample name (welcome/guide/changelog). The store
   // is repaired from the page files instead; this is asserted end-to-end through a real boot.
   //
-  // The migrated-away originals are removed first, so this exercises the repair path in
-  // isolation rather than falling through to a fallback that happens to survive by accident.
+  // The backup is removed too, so the situation is exactly "index gone, pages present" with no
+  // legacy file left to fall through to.
   fs.rmSync(path.join(dataDir, 'spaces.json'), { force: true });
-  fs.rmSync(path.join(dataDir, 'pages.json'), { force: true });
   fs.rmSync(path.join(dataDir, 'pages.json.bak'), { force: true });
   // A page named after a shipped sample is planted first: without recovery the seeding path
   // would replace it with the sample, which a plain "the legacy page still loads" check misses.
@@ -183,6 +192,38 @@ async function main(): Promise<void> {
     assert.deepEqual(rebuilt.spaces.map((s: any) => s.slug), ['default'], '空间索引应据页面重建');
   } finally {
     repaired.stop();
+  }
+
+  /* ---- A lingering legacy file must not revert later edits when the index is lost ---- */
+  // The exact regression this guards: migration writes pages/*.md but (before the fix) left
+  // pages.json behind. The user then edits a page; if spaces.json is later lost, the stale
+  // pages.json would be re-imported and silently overwrite the edit. Retirement makes the store
+  // the only source of truth after migration.
+  const editDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-edit-'));
+  fs.writeFileSync(path.join(editDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const firstRun = await startServer(editDir);
+  await fetch(`http://127.0.0.1:${firstRun.port}/api/pages/legacy`);
+  firstRun.stop();
+
+  // Simulate the user's edit straight in the Markdown file.
+  const editedFile = path.join(editDir, 'pages', 'legacy.md');
+  fs.writeFileSync(
+    editedFile,
+    fs.readFileSync(editedFile, 'utf8').replace('# 旧标题', '# 用户后来改的标题'),
+    'utf8',
+  );
+  // Lose the index; the legacy file must be gone, so recovery (not re-migration) must run.
+  fs.rmSync(path.join(editDir, 'spaces.json'), { force: true });
+  fs.rmSync(path.join(editDir, 'pages.json.bak'), { force: true });
+
+  const afterLose = await startServer(editDir);
+  try {
+    const body = fs.readFileSync(editedFile, 'utf8');
+    assert.match(body, /# 用户后来改的标题/, '索引丢失后用户的编辑必须保留');
+    assert.doesNotMatch(body, /# 旧标题$/, '不得用迁移前的旧内容覆盖用户编辑');
+  } finally {
+    afterLose.stop();
+    fs.rmSync(editDir, { recursive: true, force: true });
   }
 
   /* ---- A legacy file and hand-written pages together: both survive ---- */

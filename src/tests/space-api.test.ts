@@ -151,6 +151,32 @@ async function main(): Promise<void> {
     const gone = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ title: 'x' }) });
     assert.equal(gone.status, 404, 'old slug should no longer resolve');
 
+    /* ---- Page delete removes each file (the store only unlinks declared slugs) ---- */
+    const pageFiles = () => fs.readdirSync(path.join(server.dataDir, 'pages')).filter(n => n.endsWith('.md'));
+    const created = await api('pages', { method: 'POST', body: JSON.stringify({ title: '待删页', space: 'renamed_space' }) });
+    assert.equal(created.status, 201, 'page creation should succeed');
+    const doomedSlug = created.body.slug;
+    assert.ok(pageFiles().includes(`${doomedSlug}.md`), '新建页面应落成 .md 文件');
+    const removePage = await api('pages/' + doomedSlug, { method: 'DELETE' });
+    assert.equal(removePage.status, 200, 'page deletion should succeed');
+    assert.ok(!pageFiles().includes(`${doomedSlug}.md`), '删除页面应同时移除对应 .md 文件');
+    assert.ok((await readTree()).pages.every((p: any) => p.slug !== doomedSlug), '删除后树中不应再有该页面');
+
+    /* ---- A slug rename moves the file rather than leaving an orphan ---- */
+    const renamedPage = await api('pages/welcome', { method: 'PUT', body: JSON.stringify({ slug: 'welcome_renamed' }) });
+    assert.equal(renamedPage.status, 200, 'page slug rename should succeed');
+    assert.ok(!pageFiles().includes('welcome.md'), '改名后旧文件应被移除');
+    assert.ok(pageFiles().includes('welcome_renamed.md'), '改名后应产生新文件');
+
+    /* ---- Deleting a space removes all of its page files ---- */
+    const spaceFilesBefore = pageFiles();
+    assert.ok(spaceFilesBefore.length > 0, '删除空间前应仍有页面文件');
+    const removedSpace = await api('spaces/renamed_space', { method: 'DELETE' });
+    assert.equal(removedSpace.status, 200, 'space deletion should succeed');
+    assert.ok(pageFiles().length === 0, '空间内全部页面文件应被移除');
+    const spaceIndex = JSON.parse(fs.readFileSync(path.join(server.dataDir, 'spaces.json'), 'utf8'));
+    assert.equal(spaceIndex.spaces.length, 0, 'spaces.json 应不再包含已删除空间');
+
     console.log('space API assertions passed');
   } finally {
     server.stop();

@@ -141,8 +141,36 @@ try {
     // An empty directory is not a recovery case — that is the normal first-run seeding path.
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-empty-'));
     assert.equal(recoverStore(empty), null, '没有任何页面时不应走恢复路径');
+
+    // An unusable space name is not minted into a bogus space: it falls back, and because a
+    // page now lives in `default`, that space is created.
+    const odd = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-odd-'));
+    fs.mkdirSync(path.join(odd, 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(odd, 'pages', 'x.md'), '---\ntitle: X\nspace: Bad Name\n---\n\n正文\n', 'utf8');
+    const oddRestored = recoverStore(odd)!;
+    assert.deepEqual(oddRestored.spaces.map(s => s.slug), ['default'], '非法空间名应回退而不是新建');
+    assert.equal(oddRestored.pages[0].space, 'default', '回退后的页面应属于 default');
+
+    // A top-level page is preferred as the space home so readers are not dropped onto a child.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-home-'));
+    fs.mkdirSync(path.join(home, 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'pages', 'child.md'), '---\ntitle: 子页\nspace: s\nparent: parent\n---\n\n子\n', 'utf8');
+    fs.writeFileSync(path.join(home, 'pages', 'parent.md'), '---\ntitle: 父页\nspace: s\n---\n\n父\n', 'utf8');
+    const homeRestored = recoverStore(home)!;
+    assert.equal(homeRestored.spaces[0].home, 'parent', '空间首页应优先取顶层页面');
+
+    /* ---- A truncated index counts as missing, so it is repaired rather than trusted ---- */
+    const truncated = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-trunc-'));
+    fs.mkdirSync(path.join(truncated, 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(truncated, 'pages', 'p.md'), '---\ntitle: P\nspace: s\n---\n\n正文\n', 'utf8');
+    fs.writeFileSync(path.join(truncated, 'spaces.json'), '', 'utf8');
+    assert.equal(storeExists(truncated), false, '空/损坏的 spaces.json 应视为未初始化');
+
     fs.rmSync(lost, { recursive: true, force: true });
     fs.rmSync(empty, { recursive: true, force: true });
+    fs.rmSync(odd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(truncated, { recursive: true, force: true });
   }
 
   console.log('store assertions passed');

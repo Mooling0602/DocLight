@@ -116,7 +116,13 @@ function seedDb(): Database {
  */
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (storeExists(DATA_DIR)) return;
+  if (storeExists(DATA_DIR)) {
+    // The store is authoritative. A legacy file left behind by an older version must be moved
+    // out of the way: if `spaces.json` is ever lost, that stale snapshot would otherwise win the
+    // legacy branch below and silently re-import pre-edit content over the live page files.
+    retireLegacyFile();
+    return;
+  }
 
   // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
   // already sitting in `pages/` survive this because a write only unlinks files the caller
@@ -142,23 +148,38 @@ function ensureData(): void {
 }
 
 /**
- * Convert a pre-store `data/pages.json` into the file layout. The original is kept beside it
- * (`.bak`, written exclusively so a retry cannot clobber it) because the rewrite is
- * irreversible and a bad conversion must remain recoverable.
+ * Move a migrated-away `pages.json` aside so it can never shadow the store again, keeping its
+ * bytes as `pages.json.bak` for recovery. If a backup already exists the legacy file is a
+ * duplicate (a crash between migration and this step), so it is simply removed.
+ */
+function retireLegacyFile(): void {
+  if (!fs.existsSync(LEGACY_DATA_FILE)) return;
+  const backup = LEGACY_DATA_FILE + '.bak';
+  try {
+    if (fs.existsSync(backup)) fs.unlinkSync(LEGACY_DATA_FILE);
+    else {
+      fs.renameSync(LEGACY_DATA_FILE, backup);
+      console.log(`· 已备份迁移前数据 → ${backup}`);
+    }
+  } catch {
+    // Best effort: leaving the file in place is safe while `spaces.json` exists; a later boot
+    // retries. It is only dangerous once the index is lost, which the content check now handles.
+  }
+}
+
+/**
+ * Convert a pre-store `data/pages.json` into the file layout, then retire the original to
+ * `pages.json.bak`. The move is the point: leaving the original in place is what let a later
+ * lost index re-import stale content over the user's edits.
  */
 function migrateLegacyFile(): void {
   let raw: any = null;
   try { raw = JSON.parse(fs.readFileSync(LEGACY_DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
   if (!raw || (raw.version !== 3 && raw.version !== 4)) {
     console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
+    retireLegacyFile();
     writeDb(seedDb());
     return;
-  }
-
-  const backup = LEGACY_DATA_FILE + '.bak';
-  if (!fs.existsSync(backup)) {
-    fs.writeFileSync(backup, JSON.stringify(raw, null, 2), { encoding: 'utf8', flag: 'wx' });
-    console.log(`· 已备份迁移前数据 → ${backup}`);
   }
 
   const spaces: Space[] = raw.spaces || [];
@@ -168,6 +189,9 @@ function migrateLegacyFile(): void {
     content: fromHtml ? htmlToMarkdown(p.content) : String(p.content ?? ''),
   }));
   writeDb({ version: 4, spaces, pages });
+  // Only after the store is safely written: the rename both preserves the original and stops it
+  // from being treated as live data on any later boot.
+  retireLegacyFile();
   console.log(
     fromHtml
       ? '· 数据已从 v3（HTML）迁移为 Markdown 文件'
@@ -592,8 +616,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
       const doomed = [slug, ...descendantsOf(db.pages, slug)];
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
-      const sp = db.spaces.find(s => s.home === slug);
-      if (sp) sp.home = null;
+      // Any space whose home was among the removed pages (the page itself or a descendant)
+      // would otherwise keep a pointer to a slug that no longer resolves.
+      for (const sp of db.spaces) if (sp.home && doomed.includes(sp.home)) sp.home = null;
       writeDb(db, doomed);
       return json(res, 200, { ok: true, removed: doomed });
     }

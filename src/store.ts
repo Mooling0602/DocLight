@@ -48,9 +48,19 @@ const FRONT_MATTER_FENCE = '---';
 const spacesFile = (dataDir: string) => path.join(dataDir, 'spaces.json');
 const pagesDir = (dataDir: string) => path.join(dataDir, 'pages');
 
-/** A store is considered initialized once its spaces file exists. */
+/**
+ * Whether the store is initialized. The test is on *parsed content*, not mere existence: a
+ * truncated or malformed `spaces.json` must be treated as missing so startup repairs it from
+ * the page files. Testing `existsSync` alone would let a zero-byte index through, and every
+ * page would then silently collapse onto the fallback space.
+ */
 export function storeExists(dataDir: string): boolean {
-  return fs.existsSync(spacesFile(dataDir));
+  try {
+    const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
+    return !!parsed && Array.isArray(parsed.spaces);
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------ front matter */
@@ -271,7 +281,10 @@ export function recoverStore(dataDir: string): Database | null {
     const { meta, body } = splitFrontMatter(raw);
     // Read the space straight from the front matter: readStore would map it onto its fallback
     // when the space list is empty, losing the very grouping this recovery exists to restore.
-    const space = str(meta.space, '') || 'default';
+    // An unusable value (typo/uppercase/empty) is not a name any space could have had, so it
+    // falls back rather than being minted into a bogus space the API could never address.
+    const named = str(meta.space, '');
+    const space = SLUG_RE.test(named) ? named : 'default';
     slugs.add(space);
     const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
     pages.push({
@@ -287,13 +300,12 @@ export function recoverStore(dataDir: string): Database | null {
   if (!slugs.size) return null;
 
   const now = Date.now();
-  const spaces: Space[] = [...slugs].sort().map((slug) => ({
-    slug,
-    title: slug,
-    desc: '',
-    home: pages.find((p) => p.space === slug)?.slug ?? null,
-    createdAt: now,
-    updatedAt: now,
-  }));
+  const spaces: Space[] = [...slugs].sort().map((slug) => {
+    const own = pages.filter((p) => p.space === slug);
+    // Prefer a top-level page as the space home; without an index the original choice is gone,
+    // and dropping a reader onto a nested child would lose the context of its parent.
+    const home = own.find((p) => p.parent === null)?.slug ?? own[0]?.slug ?? null;
+    return { slug, title: slug, desc: '', home, createdAt: now, updatedAt: now };
+  });
   return { version: 4, spaces, pages };
 }
