@@ -47,7 +47,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, storeExists, seedFromTemplate, recoverStore } from './store.js';
+import { readStore, writeStore, writeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore } from './store.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space } from './store.js';
 
@@ -116,6 +116,20 @@ function seedDb(): Database {
  */
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  // An index that parses but names no spaces cannot classify the pages: readStore would collapse
+  // every one of them onto a synthetic fallback and the next write would persist that loss. When
+  // pages exist the index is therefore rebuilt from them, exactly as for a missing index. A site
+  // the user deliberately emptied has no pages, so it is left alone rather than re-seeded.
+  if (spacesIndexIsEmpty(DATA_DIR)) {
+    const repaired = recoverStore(DATA_DIR);
+    if (repaired) {
+      console.warn(`· ${path.join(DATA_DIR, 'spaces.json')} 不含任何空间，已按现有页面重建索引（页面文件未改动）`);
+      writeSpaces(DATA_DIR, repaired.spaces);
+      return;
+    }
+  }
+
   if (storeExists(DATA_DIR)) {
     // The store is authoritative. A legacy file left behind by an older version must be moved
     // out of the way: if `spaces.json` is ever lost, that stale snapshot would otherwise win the
@@ -124,10 +138,17 @@ function ensureData(): void {
     return;
   }
 
-  // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
-  // already sitting in `pages/` survive this because a write only unlinks files the caller
-  // declared removed, never every file the incoming db happens not to mention.
-  if (fs.existsSync(LEGACY_DATA_FILE)) {
+  // A legacy file sitting next to its own backup proves a migration already ran for this data
+  // directory, so this copy is a stale re-appearance — the retire step failed, or the file was
+  // copied back in. Migrating it would re-import pre-edit content over the live page files, so it
+  // is retired instead (its bytes preserved) and the store is rebuilt from those files below.
+  if (fs.existsSync(LEGACY_DATA_FILE) && fs.existsSync(LEGACY_DATA_FILE + '.bak')) {
+    console.warn(`· ${path.basename(LEGACY_DATA_FILE)} 与已有备份并存，判定为迁移残留，将按页面文件恢复`);
+    retireLegacyFile();
+  } else if (fs.existsSync(LEGACY_DATA_FILE)) {
+    // A legacy single file is the site's real data, so it is migrated first. Hand-written pages
+    // already sitting in `pages/` survive this because a write only unlinks files the caller
+    // declared removed, never every file the incoming db happens not to mention.
     migrateLegacyFile();
     return;
   }
@@ -149,21 +170,44 @@ function ensureData(): void {
 
 /**
  * Move a migrated-away `pages.json` aside so it can never shadow the store again, keeping its
- * bytes as `pages.json.bak` for recovery. If a backup already exists the legacy file is a
- * duplicate (a crash between migration and this step), so it is simply removed.
+ * bytes as `pages.json.bak` for recovery. When a backup already exists the legacy file is only
+ * removed if it is byte-identical — the crash-between-migration-and-this-step case. A differing
+ * file is not a duplicate (it can be a snapshot copied in from another machine), so its bytes are
+ * kept under a free `.bak.N` name rather than discarded.
  */
 function retireLegacyFile(): void {
   if (!fs.existsSync(LEGACY_DATA_FILE)) return;
   const backup = LEGACY_DATA_FILE + '.bak';
   try {
-    if (fs.existsSync(backup)) fs.unlinkSync(LEGACY_DATA_FILE);
-    else {
+    if (!fs.existsSync(backup)) {
       fs.renameSync(LEGACY_DATA_FILE, backup);
       console.log(`· 已备份迁移前数据 → ${backup}`);
+      return;
     }
+    if (sameBytes(LEGACY_DATA_FILE, backup)) {
+      fs.unlinkSync(LEGACY_DATA_FILE);
+      return;
+    }
+    const kept = freeBackupName(backup);
+    fs.renameSync(LEGACY_DATA_FILE, kept);
+    console.warn(`· 发现另一份 ${path.basename(LEGACY_DATA_FILE)}（与已有备份不同），已保留为 ${path.basename(kept)}`);
   } catch {
-    // Best effort: leaving the file in place is safe while `spaces.json` exists; a later boot
-    // retries. It is only dangerous once the index is lost, which the content check now handles.
+    // Best effort: the file is only harmful if the index is later lost *and* it still predates the
+    // page files, so a failed move is left for the next boot to retry rather than risking further
+    // filesystem work. `ensureData` above also refuses to migrate a file that has a backup.
+  }
+}
+
+/** Byte comparison of two files, false on any read error. */
+function sameBytes(a: string, b: string): boolean {
+  try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; }
+}
+
+/** First unused `<backup>.N` path, so preserving a file never clobbers an existing one. */
+function freeBackupName(backup: string): string {
+  for (let n = 1; ; n++) {
+    const candidate = `${backup}.${n}`;
+    if (!fs.existsSync(candidate)) return candidate;
   }
 }
 

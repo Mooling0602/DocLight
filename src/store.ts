@@ -63,6 +63,21 @@ export function storeExists(dataDir: string): boolean {
   }
 }
 
+/**
+ * Whether the index parses but names no spaces. Such an index cannot classify the pages: with no
+ * valid slug to fall back to, `readStore` collapses every page onto a synthetic name and the next
+ * write persists that loss. It is only *inconsistent* when page files exist — a site the user
+ * deliberately emptied also has an empty index and must be left alone, not re-seeded.
+ */
+export function spacesIndexIsEmpty(dataDir: string): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
+    return !!parsed && Array.isArray(parsed.spaces) && parsed.spaces.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------ front matter */
 
 interface FrontMatter {

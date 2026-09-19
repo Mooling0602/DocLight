@@ -250,6 +250,108 @@ async function main(): Promise<void> {
     fs.rmSync(bothDir, { recursive: true, force: true });
   }
 
+  /* ---- An index with no spaces is repaired from the pages, not clicked through ---- */
+  // `{"spaces":[]}` parses, so storeExists() is true and startup used to return early. But with no
+  // space to fall back to, readStore collapsed every page onto 'default' and the next write
+  // persisted it, silently losing the real grouping. Startup must rebuild from the page files.
+  const blankIdxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-blankidx-'));
+  fs.mkdirSync(path.join(blankIdxDir, 'pages'), { recursive: true });
+  fs.writeFileSync(
+    path.join(blankIdxDir, 'pages', 'mine.md'),
+    '---\ntitle: 我的页\nspace: myspace\n---\n\n正文\n',
+    'utf8',
+  );
+  fs.writeFileSync(path.join(blankIdxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+
+  const blankBoot = await startServer(blankIdxDir);
+  try {
+    const idx = JSON.parse(fs.readFileSync(path.join(blankIdxDir, 'spaces.json'), 'utf8'));
+    assert.deepEqual(idx.spaces.map((s: any) => s.slug), ['myspace'], '空索引应按页面重建出真实空间');
+    // The page's own front matter must be untouched by the repair.
+    assert.match(
+      fs.readFileSync(path.join(blankIdxDir, 'pages', 'mine.md'), 'utf8'),
+      /\nspace: myspace\n/,
+      '修复不应改写页面自身的空间归属',
+    );
+  } finally {
+    blankBoot.stop();
+    fs.rmSync(blankIdxDir, { recursive: true, force: true });
+  }
+
+  /* ---- A site the user emptied on purpose is left alone, not re-seeded ---- */
+  // The inverse of the case above: an empty index with no pages is a legitimate state, so seeding
+  // the sample over it would resurrect content the user deleted.
+  const emptiedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-emptied-'));
+  fs.mkdirSync(path.join(emptiedDir, 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(emptiedDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+  const emptiedBoot = await startServer(emptiedDir);
+  emptiedBoot.stop();
+  try {
+    assert.equal(
+      fs.readdirSync(path.join(emptiedDir, 'pages')).length,
+      0,
+      '用户清空后的站点不应被示例数据填充',
+    );
+  } finally {
+    fs.rmSync(emptiedDir, { recursive: true, force: true });
+  }
+
+  /* ---- A legacy file that reappears beside its backup must not revert edits ---- */
+  // The exact path that a bare `existsSync` check missed: retire failed (or the file was copied
+  // back in), so `pages.json` coexists with the `.bak` after a migration already ran. Migrating it
+  // would re-import the stale snapshot over the user's edits; it must be retired and the store
+  // rebuilt from the page files instead.
+  const reappearDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-reappear-'));
+  fs.writeFileSync(path.join(reappearDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const firstBoot = await startServer(reappearDir);
+  await fetch(`http://127.0.0.1:${firstBoot.port}/api/pages/legacy`);
+  firstBoot.stop();
+
+  const liveFile = path.join(reappearDir, 'pages', 'legacy.md');
+  fs.writeFileSync(liveFile, fs.readFileSync(liveFile, 'utf8').replace('# 旧标题', '# 用户改过的标题'), 'utf8');
+  // Retire "fails": the legacy file is back in place while its backup still exists.
+  fs.copyFileSync(path.join(reappearDir, 'pages.json.bak'), path.join(reappearDir, 'pages.json'));
+  fs.rmSync(path.join(reappearDir, 'spaces.json'), { force: true });
+
+  const afterReappear = await startServer(reappearDir);
+  try {
+    assert.match(fs.readFileSync(liveFile, 'utf8'), /# 用户改过的标题/, '残留旧文件不得覆盖用户编辑');
+    assert.ok(!fs.existsSync(path.join(reappearDir, 'pages.json')), '残留的 pages.json 应被移走');
+    assert.ok(fs.existsSync(path.join(reappearDir, 'spaces.json')), '索引应被重建');
+  } finally {
+    afterReappear.stop();
+    fs.rmSync(reappearDir, { recursive: true, force: true });
+  }
+
+  /* ---- A differing legacy file is preserved, not discarded as a duplicate ---- */
+  // The "backup already exists" case was treated as proof of duplication and the file deleted.
+  // That is only true when the bytes match; a snapshot carried in from another machine differs
+  // and its pages would be lost silently.
+  const dupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-dup-'));
+  fs.mkdirSync(path.join(dupDir, 'pages'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dupDir, 'spaces.json'),
+    '{"version":4,"spaces":[{"slug":"default","title":"S","desc":"","home":null,"createdAt":1,"updatedAt":1}]}',
+    'utf8',
+  );
+  fs.writeFileSync(path.join(dupDir, 'pages.json.bak'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  fs.writeFileSync(
+    path.join(dupDir, 'pages.json'),
+    JSON.stringify({ version: 3, spaces: V3_DB.spaces, pages: [{ ...V3_DB.pages[0], slug: 'fromelsewhere', title: '别处的快照' }] }),
+    'utf8',
+  );
+  const dupBoot = await startServer(dupDir);
+  dupBoot.stop();
+  try {
+    assert.ok(!fs.existsSync(path.join(dupDir, 'pages.json')), '残留文件应被移走以免遮挡 store');
+    const kept = fs.readdirSync(dupDir).filter(n => n.startsWith('pages.json') && n !== 'pages.json');
+    assert.ok(kept.some(n => n !== 'pages.json.bak'), '内容不同的文件应以新名字保留而非删除');
+    const allKept = kept.map(n => fs.readFileSync(path.join(dupDir, n), 'utf8')).join('\n');
+    assert.match(allKept, /别处的快照/, '另一份文件的内容必须保全');
+  } finally {
+    fs.rmSync(dupDir, { recursive: true, force: true });
+  }
+
   fs.rmSync(dataDir, { recursive: true, force: true });
   console.log('migration assertions passed');
 }

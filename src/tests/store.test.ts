@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStore, writeStore, writeSpaces, storeExists, recoverStore } from '../store.js';
+import { readStore, writeStore, writeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
 import type { Database, Page } from '../store.js';
 
 function page(slug: string, over: Partial<Page> = {}): Page {
@@ -166,11 +166,38 @@ try {
     fs.writeFileSync(path.join(truncated, 'spaces.json'), '', 'utf8');
     assert.equal(storeExists(truncated), false, '空/损坏的 spaces.json 应视为未初始化');
 
+    /* ---- An index that parses but names no spaces is detected as unusable ---- */
+    // It passes the parse/shape test, yet readStore has no valid slug to fall back to and would
+    // collapse every page onto 'default', persisting that loss on the next write. Startup must be
+    // able to tell this apart from a healthy index, and from a site the user emptied on purpose.
+    const blankIdx = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-blankidx-'));
+    fs.mkdirSync(path.join(blankIdx, 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(blankIdx, 'pages', 'p.md'), '---\ntitle: P\nspace: myspace\n---\n\n正文\n', 'utf8');
+    fs.writeFileSync(path.join(blankIdx, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+    assert.equal(storeExists(blankIdx), true, '空数组索引能解析，故 storeExists 仍为真');
+    assert.equal(spacesIndexIsEmpty(blankIdx), true, '空索引应被识别为不可用');
+
+    // A healthy index and a missing one are both "not empty".
+    fs.writeFileSync(
+      path.join(blankIdx, 'spaces.json'),
+      '{"version":4,"spaces":[{"slug":"s","title":"S","desc":"","home":null,"createdAt":1,"updatedAt":1}]}',
+      'utf8',
+    );
+    assert.equal(spacesIndexIsEmpty(blankIdx), false, '含空间时不应判为空');
+    fs.rmSync(path.join(blankIdx, 'spaces.json'));
+    assert.equal(spacesIndexIsEmpty(blankIdx), false, '索引缺失应由 storeExists 处理，而非此判据');
+
+    // Recovery from the pages restores the real space name instead of collapsing it.
+    fs.writeFileSync(path.join(blankIdx, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
+    const fromBlank = recoverStore(blankIdx)!;
+    assert.deepEqual(fromBlank.spaces.map(s => s.slug), ['myspace'], '应按页面重建出真实空间名');
+
     fs.rmSync(lost, { recursive: true, force: true });
     fs.rmSync(empty, { recursive: true, force: true });
     fs.rmSync(odd, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(truncated, { recursive: true, force: true });
+    fs.rmSync(blankIdx, { recursive: true, force: true });
   }
 
   console.log('store assertions passed');
