@@ -46,6 +46,14 @@ assert.ok(full.includes('© 2026 Mooling'), '应包含版权行');
 assert.ok(full.includes(`href="${ICP_PORTAL}"`), 'ICP 备案号必须链接到工信部');
 assert.ok(full.includes('https://beian.mps.gov.cn/'), '公安备案号必须链接到公安部');
 
+// The public-security badge must be the official artwork published by the filing platform,
+// not a lookalike: an audit checks that the mandated mark is the one actually rendered.
+assert.ok(
+  full.includes('<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png"'),
+  '公安备案必须使用官方平台的徽标图片',
+);
+assert.ok(!full.includes('<svg class="sf-badge"'), '不得使用自绘徽标替代官方图标');
+
 // Opening in a new tab requires rel to prevent reverse tabnabbing
 assert.ok(full.includes('rel="noopener noreferrer"'), '外链应带 rel=noopener');
 
@@ -86,8 +94,10 @@ assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt
 assert.equal(escapeHtml('a & b "c" \'d\''), 'a &amp; b &quot;c&quot; &#39;d&#39;', '引号与 & 应被转义');
 
 const xss = renderFooter({ ...FULL, copyright: '<img src=x onerror=alert(1)>' });
-assert.ok(!xss.includes('<img'), '版权文本中的标签必须被转义，不能注入');
-assert.ok(xss.includes('&lt;img'), '应保留转义后的可见文本');
+// The footer legitimately contains the official badge <img>, so check the payload itself
+// rather than blanket-rejecting every tag: the raw markup must be escaped, never parsed.
+assert.ok(!xss.includes('<img src=x onerror'), '版权文本中的标签必须被转义，不能注入');
+assert.ok(xss.includes('&lt;img src=x onerror=alert(1)&gt;'), '应保留转义后的可见文本');
 
 // The filing number is admin-provided but appears on every page, so links must restrict the protocol
 assert.equal(safeUrl('javascript:alert(1)', ICP_PORTAL), ICP_PORTAL, 'javascript: 应被拒绝');
