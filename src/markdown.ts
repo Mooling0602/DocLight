@@ -11,6 +11,7 @@
  * the client sanitises the result with DOMPurify before it reaches the DOM.
  */
 import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
 
 /** Turndown options shared by every conversion site, so migration and editing stay identical. */
 const TURNDOWN_OPTIONS = {
@@ -24,12 +25,16 @@ const TURNDOWN_OPTIONS = {
 
 function createTurndown(): TurndownService {
   const td = new TurndownService(TURNDOWN_OPTIONS);
+  // GFM covers tables and task list items. It is registered before the hand-written rules so
+  // those still win where they overlap: the plugin treats `<s>` as strikethrough too, and the
+  // explicit rule below keeps the delimiter stable across round-trips.
+  td.use(gfm);
   // Underline has no Markdown syntax: keep the tag so the round-trip is lossless.
   td.addRule('underline', {
     filter: ['u'],
     replacement: (content) => `<u>${content}</u>`,
   });
-  // Strikethrough is GFM `~~text~~`.
+  // Strikethrough is GFM `~~text~~`; `<del>` comes from `marked` rendering `~~…~~`.
   td.addRule('strikethrough', {
     filter: (node) => node.nodeType === 1 && /^(S|STRIKE|DEL)$/.test(node.nodeName),
     replacement: (content) => `~~${content}~~`,
@@ -56,7 +61,10 @@ function tidyListMarkers(markdown: string): string {
   return markdown.split('\n').map((line) => {
     if (/^\s{0,3}(```|~~~)/.test(line)) { inFence = !inFence; return line; }
     if (inFence) return line;
-    return line.replace(/^(\s*)([-*+]|\d+\.)\s{1,}/, '$1$2 ');
+    return line
+      .replace(/^(\s*)([-*+]|\d+\.)\s{1,}/, '$1$2 ')
+      // The GFM task-list rule emits `- [x]  text`; collapse that extra space too.
+      .replace(/^(\s*[-*+] \[[ xX]\])\s{1,}/, '$1 ');
   }).join('\n');
 }
 

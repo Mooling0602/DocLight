@@ -916,6 +916,15 @@ function currentMarkdown(): string {
     : htmlToMarkdown(el.editor.innerHTML);
 }
 
+/** Reflect the active mode on the segmented control, visually and for assistive tech. */
+function renderModeToggle(mode: EditMode) {
+  $$('#mode-toggle .seg-btn').forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('is-on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+}
+
 /**
  * Switch between the visual (contenteditable) and Markdown (textarea) surfaces without
  * losing edits. Both surfaces describe the same Markdown document, so the outgoing one is
@@ -945,7 +954,7 @@ function setEditMode(mode: EditMode, focus = true) {
     el.sourceEditor.value = markdown;
     if (focus) el.sourceEditor.focus();
   }
-  $$('#mode-toggle .seg-btn').forEach(b => b.classList.toggle('is-on', b.dataset.mode === mode));
+  renderModeToggle(mode);
 }
 
 function enterEdit(focus = true) {
@@ -969,7 +978,7 @@ function enterEdit(focus = true) {
   el.sourceEditor.hidden = true;
   el.toolbarWrap.hidden = false;
   el.editHint.textContent = 'Enter 换行 · 代码块内 Tab 缩进 · Ctrl/⌘ S 随时保存 · 粘贴内容将自动清理排版';
-  $$('#mode-toggle .seg-btn').forEach(b => b.classList.toggle('is-on', b.dataset.mode === 'visual'));
+  renderModeToggle('visual');
   if (focus) placeCaretEnd(el.editor);
   setTimeout(() => refreshToolbarState(), 50);
 }
@@ -1761,21 +1770,40 @@ $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
 el.sourceEditor.addEventListener('input', markDirty);
 
-// Tab inserts indentation in the Markdown surface instead of moving focus — code blocks and
-// nested lists are the common reason to reach for it. Shift+Tab removes one indent level.
+// Tab indents the Markdown surface instead of moving focus — code blocks and nested lists are
+// the common reason to reach for it. The operation is line-based: with a multi-line selection
+// every touched line is indented / outdented, never replaced by the two spaces (which would
+// silently delete the selection).
 el.sourceEditor.addEventListener('keydown', e => {
   if (e.key !== 'Tab') return;
   e.preventDefault();
   const ta = el.sourceEditor;
-  const start = ta.selectionStart;
-  const end = ta.selectionEnd;
-  if (e.shiftKey) {
-    const lineStart = ta.value.lastIndexOf('\n', start - 1) + 1;
-    const remove = /^ {1,4}/.exec(ta.value.slice(lineStart))?.[0].length || 0;
-    if (!remove) return;
-    ta.setRangeText('', lineStart, lineStart + remove, 'end');
+  const value = ta.value;
+  const selStart = ta.selectionStart;
+  const selEnd = ta.selectionEnd;
+
+  // The block spans whole lines: from the start of the caret's line to the end of the last
+  // selected line (a bare caret therefore touches exactly its own line).
+  const blockStart = value.lastIndexOf('\n', selStart - 1) + 1;
+  const breakAfter = value.indexOf('\n', selEnd);
+  const blockEnd = breakAfter === -1 ? value.length : breakAfter;
+  const lines = value.slice(blockStart, blockEnd).split('\n');
+
+  const replaced = e.shiftKey
+    ? lines.map(line => line.replace(/^ {1,4}/, ''))
+    : lines.map(line => '  ' + line);
+  const next = replaced.join('\n');
+  if (next === value.slice(blockStart, blockEnd)) return; // Shift+Tab with nothing to remove.
+
+  const hadSelection = selEnd > selStart;
+  ta.setRangeText(next, blockStart, blockEnd, 'preserve');
+  if (hadSelection) {
+    ta.setSelectionRange(blockStart, blockStart + next.length);
   } else {
-    ta.setRangeText('  ', start, end, 'end');
+    // Keep the caret on the same character, shifted by the first line's length change and
+    // clamped so an outdent cannot push it before the line start.
+    const caret = Math.max(blockStart, selStart + (replaced[0].length - lines[0].length));
+    ta.setSelectionRange(caret, caret);
   }
   markDirty();
 });

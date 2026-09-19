@@ -41,6 +41,17 @@ assert.equal(
 // Markdown has no underline syntax: the tag is preserved so the round-trip keeps it.
 assert.equal(htmlToMarkdown('<p><u>下划线</u></p>'), '<u>下划线</u>');
 
+// GFM constructs that the visual editor can produce must survive a save, not collapse to text.
+assert.equal(
+  htmlToMarkdown('<table><thead><tr><th>甲</th><th>乙</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>'),
+  '| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |',
+);
+assert.equal(htmlToMarkdown('<p><s>删除线</s></p>'), '~~删除线~~');
+assert.equal(
+  htmlToMarkdown('<ul><li><input type="checkbox" checked disabled> 完成</li><li><input type="checkbox" disabled> 未完成</li></ul>'),
+  '- [x] 完成\n- [ ] 未完成',
+);
+
 // Inline style is preserved verbatim (alignment / colour); dropping it would lose intent.
 assert.equal(
   htmlToMarkdown('<p style="text-align:center;color:#8a8f9f">居中</p>'),

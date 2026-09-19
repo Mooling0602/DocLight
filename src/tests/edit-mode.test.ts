@@ -67,6 +67,9 @@ async function main(): Promise<void> {
   assert.equal(visible('#editor'), true, '可视化编辑区应可见');
   assert.equal(visible('#source-editor'), false, '源码编辑区初始应隐藏');
   assert.match($('#editor').innerHTML, /<h1[^>]*>标题<\/h1>/, '存储的 Markdown 应被渲染进可视化编辑器');
+  // The active mode must be exposed to assistive tech, not only via an `is-on` class.
+  assert.equal($('#mode-toggle [data-mode="visual"]').getAttribute('aria-pressed'), 'true', '可视化按钮应标记为选中');
+  assert.equal($('#mode-toggle [data-mode="markdown"]').getAttribute('aria-pressed'), 'false', 'Markdown 按钮应标记为未选中');
 
   /* ---- Visual → Markdown: the edit made in the WYSIWYG surface must be serialised ---- */
   $('#editor').innerHTML = '<h2>改过的标题</h2><p>新增段落</p>';
@@ -80,6 +83,7 @@ async function main(): Promise<void> {
   assert.match(md, /## 改过的标题/, '可视化编辑的改动应序列化为 Markdown');
   assert.match(md, /新增段落/, '新增段落应进入 Markdown');
   assert.equal($('#dirty-pill').hidden, false, '切换不应清除未保存标记');
+  assert.equal($('#mode-toggle [data-mode="markdown"]').getAttribute('aria-pressed'), 'true', '切换后按钮选中态应同步');
 
   /* ---- Markdown → Visual: raw edits must be rendered back into the WYSIWYG surface ---- */
   const ta = $('#source-editor') as HTMLTextAreaElement;
@@ -103,8 +107,39 @@ async function main(): Promise<void> {
   assert.equal(puts.length, 1, '保存应发出一次 PUT');
   assert.equal(puts[0].content, '# 最终标题\n\n最终正文。', 'Markdown 模式下保存应原样提交');
 
-  /* ---- Saving from the visual surface still sends Markdown ---- */
+  /* ---- Tab indents whole lines, never replacing a multi-line selection ---- */
   click('#btn-edit');
+  await wait(30);
+  click('#mode-toggle [data-mode="markdown"]');
+  await wait(20);
+  ta.value = '第一行\n第二行\n第三行';
+  ta.setSelectionRange(0, ta.value.length);
+  ta.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const tab = () => ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  const shiftTab = () => ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+
+  tab();
+  assert.equal(ta.value, '  第一行\n  第二行\n  第三行', '多行选区应逐行缩进而非被替换');
+  assert.equal(ta.selectionStart, 0, '整段选区缩进后应仍覆盖整段');
+  assert.equal(ta.selectionEnd, ta.value.length, '整段选区缩进后应仍覆盖整段');
+
+  shiftTab();
+  assert.equal(ta.value, '第一行\n第二行\n第三行', 'Shift+Tab 应逐行减少缩进');
+
+  // A bare caret on a single line indents only that line.
+  ta.value = '甲\n乙';
+  ta.setSelectionRange(1, 1);
+  tab();
+  assert.equal(ta.value, '  甲\n乙', '无选区时应只缩进光标所在行');
+
+  // An outdent with nothing to remove must not delete content.
+  ta.value = '无缩进';
+  ta.setSelectionRange(0, 0);
+  shiftTab();
+  assert.equal(ta.value, '无缩进', '无缩进可去掉时 Shift+Tab 不应改动内容');
+
+  /* ---- Saving from the visual surface still sends Markdown ---- */
+  click('#mode-toggle [data-mode="visual"]');
   await wait(30);
   $('#editor').innerHTML = '<p>可视化 <b>加粗</b></p>';
   $('#editor').dispatchEvent(new window.Event('input', { bubbles: true }));
