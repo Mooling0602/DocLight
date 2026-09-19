@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { JSDOM } from 'jsdom';
 import {
   FOOTER_MARKER,
   ICP_PORTAL,
@@ -53,13 +54,32 @@ assert.ok(full.includes('© 2026 Mooling'), '应包含版权行');
 assert.ok(full.includes(`href="${ICP_PORTAL}"`), 'ICP 备案号必须链接到工信部');
 assert.ok(full.includes('https://beian.mps.gov.cn/'), '公安备案号必须链接到公安部');
 
-// The public-security badge must be the official artwork published by the filing platform,
-// not a lookalike: an audit checks that the mandated mark is the one actually rendered.
+// The public-security badge must be the official artwork published by the filing platform.
+// A hand-drawn shield ships alongside it as a fallback for when the external host is
+// unreachable, but it must start hidden so the official mark is what visitors see.
 assert.ok(
   full.includes('<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png"'),
   '公安备案必须使用官方平台的徽标图片',
 );
-assert.ok(!full.includes('<svg class="sf-badge"'), '不得使用自绘徽标替代官方图标');
+assert.ok(full.includes('class="sf-badge sf-badge-fallback"'), '应提供自绘兜底图标');
+assert.ok(
+  /class="sf-badge sf-badge-fallback"[^>]*\shidden/.test(full),
+  '兜底图标默认必须隐藏，不能与官方图标同时出现',
+);
+
+// Fire the real onerror handler in a DOM: the external image is the primary mark, and if
+// it fails the fallback must take over instead of leaving the badge blank. JSDOM does not
+// load images, so the error is dispatched explicitly.
+const badgeDom = new JSDOM(`<body>${full}</body>`, { runScripts: 'dangerously' });
+const badgeDoc = badgeDom.window.document as Document;
+const badgeImg = badgeDoc.querySelector<HTMLImageElement>('img.sf-badge')!;
+const badgeFallback = badgeDoc.querySelector<SVGElement>('svg.sf-badge-fallback')!;
+assert.ok(badgeImg && badgeFallback, '徽标应同时包含官方图片与自绘兜底');
+assert.equal(badgeFallback.hasAttribute('hidden'), true, '加载成功前兜底应保持隐藏');
+badgeImg.dispatchEvent(new badgeDom.window.Event('error'));
+assert.equal(badgeImg.hidden, true, '官方图片加载失败后应隐藏');
+assert.equal(badgeFallback.hasAttribute('hidden'), false, '官方图片加载失败后应显示自绘兜底');
+badgeDom.window.close();
 
 // Opening in a new tab requires rel to prevent reverse tabnabbing
 assert.ok(full.includes('rel="noopener noreferrer"'), '外链应带 rel=noopener');

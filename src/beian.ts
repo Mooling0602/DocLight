@@ -76,12 +76,24 @@ export function readFooterOptions(config: Pick<FooterOptions, 'icp' | 'icpUrl' |
 
 /**
  * The public security badge uses the icon hosted on the national filing platform
- * (beian.mps.gov.cn). This is the official artwork the platform publishes for filed
- * sites, so the footer shows the mandated badge rather than an approximation.
- * Its intrinsic colors are kept (no `currentColor`) and the size is fixed inline.
+ * (beian.mps.gov.cn), which is the official artwork expected in a filing audit. It is an
+ * external resource, so a hand-drawn shield of the same shape is rendered alongside it and
+ * revealed only if the image fails to load — the badge must never disappear, and the
+ * filing text and link stay intact regardless.
+ *
+ * The fallback is toggled with removeAttribute rather than `svg.hidden = false`:
+ * SVGElement has no `hidden` IDL property, so assigning it would only plant a JS expando
+ * and leave the attribute in place (see the same trap in theme-icon.test.ts).
  */
-const POLICE_BADGE =
-  '<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png" alt="" width="16" height="16">';
+const POLICE_BADGE = [
+  '<img class="sf-badge" src="https://beian.mps.gov.cn/web/assets/logo01.6189a29f.png" alt="" width="16" height="16"',
+  ` onerror="this.hidden=true;this.nextElementSibling.removeAttribute('hidden')">`,
+  '<svg class="sf-badge sf-badge-fallback" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" hidden>',
+  '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="currentColor" opacity=".18"/>',
+  '<path d="M8 1.1 2.9 2.9v4.4c0 3.3 2.1 6.2 5.1 7.7 3-1.5 5.1-4.4 5.1-7.7V2.9L8 1.1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
+  '<path d="M5.8 8.1 7.4 9.7l2.9-3.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+  '</svg>',
+].join('');
 
 /**
  * Render the footer markup, or an empty string when nothing is configured so that a
