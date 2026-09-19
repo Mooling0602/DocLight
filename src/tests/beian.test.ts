@@ -26,6 +26,13 @@ import {
 const root = path.resolve(__dirname, '../..');
 const indexHtmlSource = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 
+// The footer badge is an <img>, so the global article-level `img` rule would clip it with
+// border-radius and ring it with box-shadow. The .sf-badge rule must reset both.
+const styleSource = fs.readFileSync(path.join(root, 'public', 'style.css'), 'utf8');
+const badgeRule = (styleSource.match(/\.sf-badge\s*\{[^}]*\}/) || [''])[0];
+assert.match(badgeRule, /border-radius:\s*0/, '.sf-badge 必须重置全局 img 的圆角');
+assert.match(badgeRule, /box-shadow:\s*none/, '.sf-badge 必须重置全局 img 的阴影');
+
 const FULL = {
   icp: '浙ICP备12345678号-1',
   icpUrl: ICP_PORTAL,
