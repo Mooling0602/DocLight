@@ -7,10 +7,15 @@
 ## 启动
 
 ```bash
-npm install               # 安装依赖（含运行时依赖 smol-toml）
+npm install               # 安装依赖（运行时：smol-toml、marked、turndown、dompurify）
 npm start                 # 构建并自动探测空闲端口（默认从 4173 起）
 PORT=8080 npm start       # 临时指定起始端口（环境变量覆盖配置文件）
 ```
+
+构建分三步：服务端 `tsc`、前端 `tsc` 类型检查 + **esbuild 打包**、测试 `tsc`。前端由
+esbuild 打包成单文件 `public/app.js`（IIFE，非 ES 模块）——`app.ts` 依赖 `marked`、
+`dompurify` 与共享的 `src/markdown.ts`（含 `turndown`），`tsc` 单独输出会留下无法解析的
+`import`。
 
 启动后按提示访问，例如 `http://localhost:4173`。
 
@@ -95,7 +100,8 @@ copyright = "© 2026 Mooling"
 | 类别 | 能力 |
 | --- | --- |
 | 可视化编辑 | H1–H3、粗斜下删、行内代码 / 代码块、列表、引用、链接、图片、分隔线；撤销重做、快捷键（⌘S/B/I/U/Z）、Tab 缩进 |
-| 内容安全 | 服务端 XSS 清洗（剥离脚本/事件属性/危险协议）、粘贴自动清理排版垃圾 |
+| Markdown 存储 | 页面正文以 **Markdown** 落盘，便于导出与离线编辑；旧 v3（HTML）数据在首次读取时**自动迁移**，不丢内容 |
+| 内容安全 | 渲染前用 DOMPurify 净化（剥离脚本/事件属性/危险协议）、粘贴自动清理排版垃圾 |
 | 页面管理 | 新建（slug 自动生成并永久绑定）、重命名、编辑 slug、删除、侧栏搜索 |
 | 空间管理 | 新建 / 重命名 / 编辑 slug / 删除（含空间内全部页面） |
 | 阅读体验 | 正文默认限宽，桌面端可拖拽把手调整宽度（双击复位、本地记忆，自动限制在可视区域内） |
@@ -111,6 +117,7 @@ DocLight/
 │   ├── server.ts      # 后端：静态资源 + REST API + 端口探测
 │   ├── config.ts      # 分层配置：内置默认值 < TOML 文件 < 环境变量
 │   ├── beian.ts       # 备案号页脚渲染（服务端注入）
+│   ├── markdown.ts    # Markdown ⇄ HTML 转换（服务端迁移与前端共用）
 │   ├── client/app.ts  # 前端单页应用
 │   └── tests/         # TypeScript 回归测试
 ├── doclight.toml      # 配置文件（首启自动生成全注释模板；已 gitignore）
@@ -122,17 +129,25 @@ DocLight/
 └── public/
     ├── index.html     # 应用骨架
     ├── style.css      # 主题变量 + 组件样式
-    └── app.js         # TypeScript 编译产物（自动生成）
+    └── app.js         # esbuild 打包产物（自动生成）
 ```
 
 > 首次启动时若数据目录里没有 `pages.json`，会从 `template/pages.json` 复制一份示例站点过去；
 > `data/` 整个目录都在 `.gitignore` 中，因此运行时内容不会与仓库里的示例数据混在一起。
 > 想更换默认示例，直接编辑 `template/pages.json` 即可。
 
+### 内容格式与迁移
+
+`pages.json` 的 `version` 为 `4`，页面 `content` 保存 **Markdown**。Markdown 无法表达的
+格式（下划线 `<u>`、对齐 / 颜色等内联样式）会**原样保留为内联 HTML**，因此可视化编辑与
+Markdown 存储之间的往返是无损的；渲染时先经 `marked` 解析、再由 DOMPurify 净化后插入
+DOM，内联 HTML 因此不会成为 XSS 入口。旧 `version: 3`（HTML）数据在服务端**首次读取时
+自动逐页迁移并回写**，无需手动转换。
+
 ## 开发与测试
 
 ```bash
-npm run build  # 编译服务端、客户端与测试
+npm run build  # 编译服务端、打包客户端、编译测试
 npm test       # 编译并运行所有回归测试
 ```
 

@@ -1,8 +1,11 @@
 /* ============================================================
    DocLight · app.ts — framework-free single-page frontend
-   v3 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
+   v4 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
+   Page content is Markdown; the reading view renders it and the editor converts both ways.
    ============================================================ */
-'use strict';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+import { htmlToMarkdown } from '../markdown.js';
 
 interface Space {
   slug: string;
@@ -105,14 +108,34 @@ function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString('zh-CN');
 }
 
-function wordCount(html: unknown): number {
-  const box = document.createElement('div');
-  box.innerHTML = String(html || '');
-  const text = box.textContent.trim();
+/* Count the visible text only, so Markdown syntax (fences, link targets, emphasis marks)
+   never inflates the number. Kept self-contained — it needs no DOM and is unit-tested by
+   extracting this function from the compiled bundle (see src/tests/wordcount.test.ts). */
+function wordCount(markdown: unknown): number {
+  const text = String(markdown || '')
+    .replace(/^\s{0,3}```.*$/gm, ' ')          // fence lines only — code text is still counted
+    .replace(/`/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')     // images contribute no text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')   // links keep their label, drop the target
+    .replace(/<[^>]*>/g, ' ')                  // preserved inline HTML
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
+    .replace(/[*_]{1,3}/g, '')
+    .replace(/~{1,2}/g, '')
+    .trim();
   if (!text) return 0;
   const cjk = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
   const words = (text.replace(/[\u4e00-\u9fff\u3400-\u4dbf]/g, ' ').match(/[A-Za-z0-9_'-]+/g) || []).length;
   return cjk + words;
+}
+
+/** Render Markdown to safe HTML. Raw HTML in the source passes through `marked` and is then
+    sanitised with DOMPurify, so inline preservation cannot become an XSS vector. */
+function renderMarkdown(markdown: unknown): string {
+  const source = String(markdown ?? '');
+  if (!source.trim()) return '';
+  let html = '';
+  try { html = marked.parse(source, { async: false }) as string; } catch { return ''; }
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
 }
 
 function normalizeUrl(u: unknown): string {
@@ -829,7 +852,7 @@ function renderArticle(page) {
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
        <a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>
-     </div>` + page.content;
+     </div>` + renderMarkdown(page.content);
 
   decorate(el.article);
   $('#copy-link').addEventListener('click', () => {
@@ -890,7 +913,7 @@ function enterEdit(focus = true) {
   el.toolbarWrap.hidden = false;
   el.editWrap.hidden = false;
   el.titleInput.value = S.page.title;
-  el.editor.innerHTML = S.page.content || '';
+  el.editor.innerHTML = renderMarkdown(S.page.content);
   if (focus) placeCaretEnd(el.editor);
   setTimeout(() => refreshToolbarState(), 50);
 }
@@ -907,7 +930,8 @@ async function saveDoc() {
   if (!S.page) return;
   if (!S.dirty) { await exitEdit(false); return; }
   const title = el.titleInput.value.trim() || '无标题页面';
-  const content = el.editor.innerHTML;
+  // The editor is a WYSIWYG surface but storage is Markdown: serialise the DOM on save.
+  const content = htmlToMarkdown(el.editor.innerHTML);
   el.btnSave.disabled = true;
   try {
     const updated = await api<Page>('pages/' + encodeURIComponent(S.page.slug), {

@@ -18,9 +18,12 @@
  *   DOCLIGHT_STRICT_PORT fail instead of scanning for the next free port
  *   DOCLIGHT_CONFIG      path to the TOML configuration file
  *
+ * Page content is stored as Markdown (database v4); legacy v3 HTML is migrated once on
+ * first read (see src/markdown.ts).
+ *
  * API:
  *   GET    /api/pages        page list (without content)
- *   GET    /api/pages/:slug  single page detail
+ *   GET    /api/pages/:slug  single page detail (Markdown content)
  *   POST   /api/pages        create { title }
  *   PUT    /api/pages/:slug  update { title?, content?, slug?, space?, parent? }
  *   DELETE /api/pages/:slug  delete
@@ -42,6 +45,7 @@ import * as path from 'node:path';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
+import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
 import type { AppConfig } from './config.js';
 
 interface Space {
@@ -58,13 +62,14 @@ interface Page {
   space: string;
   parent: string | null;
   title: string;
+  /** Page body as Markdown (database v4). v3 databases held HTML and are migrated on read. */
   content: string;
   createdAt: number;
   updatedAt: number;
 }
 
 interface Database {
-  version: 3;
+  version: 4;
   spaces: Space[];
   pages: Page[];
 }
@@ -124,11 +129,11 @@ function seedDb(): Database {
     raw = JSON.parse(fs.readFileSync(TEMPLATE_FILE, 'utf8'));
   } catch {
     console.warn(`· 未找到示例数据 ${TEMPLATE_FILE}，将以空站点启动`);
-    return { version: 3, spaces: [], pages: [] };
+    return { version: 4, spaces: [], pages: [] };
   }
-  if (!raw || raw.version !== 3) {
+  if (!raw || raw.version !== 4) {
     console.warn(`· 示例数据 ${TEMPLATE_FILE} 格式不正确，将以空站点启动`);
-    return { version: 3, spaces: [], pages: [] };
+    return { version: 4, spaces: [], pages: [] };
   }
   const spaces: Space[] = raw.spaces || [];
   const pages: Page[] = raw.pages || [];
@@ -141,7 +146,7 @@ function seedDb(): Database {
     const delta = Date.now() - Math.max(...stamps);
     for (const r of [...spaces, ...pages]) { r.createdAt += delta; r.updatedAt += delta; }
   }
-  return { version: 3, spaces, pages };
+  return { version: 4, spaces, pages };
 }
 
 function ensureData(): void {
@@ -164,11 +169,25 @@ function descendantsOf(list: Page[], slug: string): Set<string> {
   return out;
 }
 function readDb(): Database {
-  try {
-    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    if (raw && raw.version === 3) return { version: 3, spaces: raw.spaces || [], pages: raw.pages || [] };
-  } catch { /* fallthrough */ }
-  console.log('· 数据非 v3 格式，已重置为初始示例数据（早期开发阶段，不做兼容）');
+  let raw: any = null;
+  try { raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
+  if (raw && raw.version === 4) {
+    return { version: 4, spaces: raw.spaces || [], pages: raw.pages || [] };
+  }
+  // v3 stored HTML. Convert each page body once and persist, so existing sites keep their
+  // content when the storage format changes instead of being reset to the sample data.
+  if (raw && raw.version === 3) {
+    const spaces: Space[] = raw.spaces || [];
+    const pages: Page[] = (raw.pages || []).map((p: Page) => ({
+      ...p,
+      content: htmlToMarkdown(p.content),
+    }));
+    const migrated: Database = { version: 4, spaces, pages };
+    writeDb(migrated);
+    console.log('· 数据已从 v3（HTML）迁移为 v4（Markdown）');
+    return migrated;
+  }
+  console.log('· 数据格式无法识别，已重置为初始示例数据');
   const fresh = seedDb();
   writeDb(fresh);
   return fresh;
@@ -181,15 +200,10 @@ function writeDb(db: Database): void {
 
 /* ---------------------------------------------------- Content sanitizing (XSS) */
 
-function sanitizeHtml(html: unknown): string {
-  return String(html || '')
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base|form)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-    .replace(/<\/?\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*>/gi, '')
-    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/(href|src)\s*=\s*(["'])?\s*(?:javascript|vbscript):[^\s>]*/gi,
-      (_m, attr, q) => `${attr}=${q ? q + '#' + q : '"#"'}`)
-    .slice(0, 500 * 1024);
-}
+/* Markdown itself needs no tag scrubbing: `marked` output is sanitised in the browser with
+   DOMPurify before it is inserted into the DOM, and raw HTML in the source is subject to the
+   same pass. A regex scrubber here would instead corrupt code blocks that legitimately show
+   HTML examples. The server only bounds the length (see sanitizeMarkdown in src/markdown.ts). */
 
 function randomToken(len = 7): string {
   const abc = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -566,7 +580,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (!t) return json(res, 400, { error: '标题不能为空' });
         db.pages[idx].title = t;
       }
-      if (body.content !== undefined) db.pages[idx].content = sanitizeHtml(body.content);
+      if (body.content !== undefined) db.pages[idx].content = sanitizeMarkdown(body.content);
       db.pages[idx].updatedAt = Date.now();
       writeDb(db);
       return json(res, 200, db.pages[idx]);

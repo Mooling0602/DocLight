@@ -34,7 +34,9 @@
           npmDeps = pkgs.importNpmLock { npmRoot = self; };
           npmConfigHook = pkgs.importNpmLock.npmConfigHook;
 
-          # `npm run build` compiles the server, the browser bundle and the tests.
+          # `npm run build` compiles the server, bundles the browser app (esbuild) and
+          # compiles the tests. esbuild's platform binary comes from npm's optional
+          # dependencies, which `importNpmLock` derives from package-lock.json.
           npmBuildScript = "build";
 
           # The default npmInstallHook packs the package with `npm pack`, which honours
@@ -42,7 +44,8 @@
           # artifacts would be silently dropped: the build would succeed and the package
           # would crash on start. package.json therefore carries a `files` whitelist,
           # which takes precedence over .gitignore and ships exactly:
-          #   dist/server.js, dist/beian.js, dist/config.js, public/, template/pages.json
+          #   dist/server.js, dist/beian.js, dist/config.js, dist/markdown.js,
+          #   public/, template/pages.json
           # The whitelist names the compiled files individually instead of `dist/` so the
           # compiled tests (which `require('jsdom')`, a devDependency pruned from the
           # output) stay out. `template/pages.json` is the first-run sample site.
