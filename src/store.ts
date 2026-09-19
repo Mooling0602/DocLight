@@ -241,6 +241,16 @@ export function writeStore(
 
   const wanted = new Set<string>();
   for (const page of db.pages) {
+    // The slug becomes a file name, so it is validated here rather than trusted from the caller.
+    // `readStore` filters such files on the way in, but a write is the only place that can put one
+    // on disk at all — and a slug like `../../x` would escape `pages/` entirely, writing the page
+    // where no later read can find it. The legacy migration is the path that carries slugs the
+    // programme did not mint itself, but validating at the single write chokepoint covers every
+    // caller, including any added later.
+    if (!SLUG_RE.test(page.slug)) {
+      console.warn(`· 跳过文件名不合法的页面：${page.slug}（只允许小写字母、数字、下划线）`);
+      continue;
+    }
     wanted.add(page.slug);
     const file = path.join(dir, `${page.slug}.md`);
     // A file that already exists is the live page, not something the incoming db may replace.

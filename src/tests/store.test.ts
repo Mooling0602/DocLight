@@ -264,6 +264,38 @@ try {
     fs.rmSync(blankIdx, { recursive: true, force: true });
   }
 
+  /* ---- An unsafe slug never reaches the filesystem ---- */
+  // A page slug becomes a file name, so a value like `../../x` would write outside `pages/` — to a
+  // path no later read can find, under whatever identity the service runs as. The legacy migration
+  // is where slugs the programme did not mint itself arrive, but the guard lives in `writeStore`
+  // because that is the only place a file is actually created, covering every caller.
+  const unsafeParent = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-unsafe-'));
+  const unsafeDir = path.join(unsafeParent, 'data');
+  writeStore(unsafeDir, db(
+    page('safe'),
+    page('../escaped'),
+    page('../../escaped'),
+    page('sub/dir'),
+    page('UPPER'),
+  ));
+  // `../escaped` would land beside the data directory, `../../escaped` one level above that.
+  assert.ok(!fs.existsSync(path.join(unsafeParent, 'escaped.md')), '越界 slug 不得写出数据目录之外');
+  assert.ok(
+    !fs.existsSync(path.join(path.dirname(unsafeParent), 'escaped.md')),
+    '越界 slug 不得写到更上一层',
+  );
+  assert.deepEqual(
+    fs.readdirSync(path.join(unsafeDir, 'pages')).sort(),
+    ['safe.md'],
+    '只应写出 slug 合法的页面',
+  );
+  // An unsafe slug cannot be used to unlink a file outside `pages/` either.
+  const outside = path.join(unsafeParent, 'victim.md');
+  fs.writeFileSync(outside, '不该被删\n', 'utf8');
+  writeStore(unsafeDir, db(page('safe')), ['../victim']);
+  assert.ok(fs.existsSync(outside), '越界 slug 也不得用于删除 pages/ 之外的文件');
+  fs.rmSync(unsafeParent, { recursive: true, force: true });
+
   console.log('store assertions passed');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
