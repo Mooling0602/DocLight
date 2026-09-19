@@ -484,7 +484,6 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   animation: rise .25s cubic-bezier(.2,.8,.25,1);
 }
 #toolbar::-webkit-scrollbar { display: none; }
-.flex-spacer { flex: 1; }
 .tbtn {
   flex: none;
   display: inline-grid; place-items: center;
