@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
+import { readStore, writeStore, writeSpaces, sortPages, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
 import type { Database, Page } from '../store.js';
 
 function page(slug: string, over: Partial<Page> = {}): Page {
@@ -263,6 +263,63 @@ try {
     fs.rmSync(truncated, { recursive: true, force: true });
     fs.rmSync(blankIdx, { recursive: true, force: true });
   }
+
+  /* ---- Page order is derived from page data, never from directory order ---- */
+  // `readdirSync` is creation order only on small ext4 directories and hash order on APFS/NTFS or
+  // once the directory gains an htree, so a sidebar built on it can reshuffle unpredictably. The
+  // order must come from the pages themselves, and each space must respect its own key.
+  const ordDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-ord-'));
+  const p3 = (slug: string, createdAt: number, updatedAt: number, space = 'default', title = slug) =>
+    page(slug, { space, title, createdAt, updatedAt });
+  writeSpaces(ordDir, [
+    { slug: 'default', title: 'D', desc: '', home: null, createdAt: 1, updatedAt: 1 },
+    { slug: 'team', title: 'T', desc: '', home: null, sort: 'created_asc', createdAt: 1, updatedAt: 1 },
+  ]);
+  // Written in an order chosen so the answer cannot coincide with directory order.
+  writeStore(ordDir, {
+    version: 4,
+    spaces: [
+      { slug: 'default', title: 'D', desc: '', home: null, createdAt: 1, updatedAt: 1 },
+      { slug: 'team', title: 'T', desc: '', home: null, sort: 'created_asc', createdAt: 1, updatedAt: 1 },
+    ],
+    pages: [
+      p3('b', 10, 100),
+      p3('a', 20, 50),
+      p3('c', 30, 10),
+      p3('x', 5, 5, 'team'),
+      p3('y', 7, 7, 'team'),
+    ],
+  });
+  const ordered = readStore(ordDir);
+  assert.deepEqual(
+    ordered.pages.filter(p => p.space === 'default').map(p => p.slug),
+    ['c', 'a', 'b'],
+    '默认空间应按 createdAt 降序（最新在前）',
+  );
+  assert.deepEqual(
+    ordered.pages.filter(p => p.space === 'team').map(p => p.slug),
+    ['x', 'y'],
+    '空间自己的 sort 应生效，而非所有空间共用一种顺序',
+  );
+
+  // A hand-edited index can hold anything; an unusable key must be dropped, not left in place —
+  // an unknown value matches no comparator and would silently leave that space unordered.
+  const idxPath = path.join(ordDir, 'spaces.json');
+  const rawIdx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+  rawIdx.spaces[0].sort = 'garbage';
+  fs.writeFileSync(idxPath, JSON.stringify(rawIdx, null, 2) + '\n', 'utf8');
+  const cleaned = readStore(ordDir);
+  assert.equal(cleaned.spaces[0].sort, undefined, '非法的 sort 值应被丢弃');
+  assert.deepEqual(
+    cleaned.pages.filter(p => p.space === 'default').map(p => p.slug),
+    ['c', 'a', 'b'],
+    '丢弃非法值后应回到默认排序，而不是目录序',
+  );
+
+  // Ties are broken by slug so the result is a total order, not whatever the sort happened to do.
+  const tied = sortPages([p3('z', 5, 5), p3('m', 5, 5), p3('a', 5, 5)]);
+  assert.deepEqual(tied.map(p => p.slug), ['a', 'm', 'z'], '时间戳相同时应按 slug 定序');
+  fs.rmSync(ordDir, { recursive: true, force: true });
 
   /* ---- An unsafe slug never reaches the filesystem ---- */
   // A page slug becomes a file name, so a value like `../../x` would write outside `pages/` — to a

@@ -47,9 +47,9 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore } from './store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore, isSortKey, SORT_KEYS } from './store.js';
 import type { AppConfig } from './config.js';
-import type { Database, Page, Space, WriteOptions } from './store.js';
+import type { Database, Page, Space, WriteOptions, SortKey } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -631,6 +631,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           if (!t) return json(res, 400, { error: '空间名称不能为空' });
           nextTitle = t;
         }
+        // `null` clears the preference back to the default, so the key can stay out of the file
+        // rather than being pinned to whatever the default happened to be at the time.
+        let nextSort: SortKey | null = null;
+        if (body.sort !== undefined) {
+          if (body.sort === null) nextSort = null;
+          else if (isSortKey(body.sort)) nextSort = body.sort;
+          else return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
+        }
 
         if (nextSlug !== null) {
           const ns = nextSlug;
@@ -639,6 +647,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         }
         if (nextTitle !== null) db.spaces[idx].title = nextTitle;
         if (body.desc !== undefined) db.spaces[idx].desc = String(body.desc).trim().slice(0, 200);
+        if (body.sort !== undefined) {
+          if (nextSort === null) delete db.spaces[idx].sort;
+          else db.spaces[idx].sort = nextSort;
+        }
         db.spaces[idx].updatedAt = Date.now();
         writeDb(db);
         return json(res, 200, db.spaces[idx]);

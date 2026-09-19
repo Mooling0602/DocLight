@@ -6,12 +6,15 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { htmlToMarkdown } from '../markdown.js';
+import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS } from '../sort.js';
+import type { SortKey } from '../sort.js';
 
 interface Space {
   slug: string;
   title: string;
   desc: string;
   home: string | null;
+  sort?: SortKey;
   createdAt: number;
   updatedAt: number;
 }
@@ -1317,6 +1320,35 @@ async function renameSpaceFlow(space) {
   } catch (err) { toast(err.message, 3000); }
 }
 
+async function setSpaceSort(space, key) {
+  if (!space) return;
+  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
+  // `sort` key and a future change of the default still reaches the files that never set one.
+  const body = { sort: key === DEFAULT_SORT ? null : key };
+  try {
+    const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
+      method: 'PUT', body: JSON.stringify(body),
+    });
+    const i = S.spaces.findIndex(s => s.slug === space.slug);
+    if (i >= 0) S.spaces[i] = updated;
+    // Order is computed server-side from the page files, so the tree has to be refetched rather
+    // than re-sorted here — that keeps one definition of the order instead of two that can drift.
+    const tree = await api<TreeResponse>('tree');
+    S.spaces = tree.spaces || S.spaces;
+    S.pages = tree.pages || S.pages;
+    if (S.space?.slug === space.slug) {
+      S.space = S.spaces.find(s => s.slug === space.slug) || S.space;
+      renderSpace(S.space);
+    } else {
+      renderSidebar(el.search.value);
+    }
+    toast('排序已更新 ✓');
+  } catch (err) {
+    toast(err.message, 3000);
+    renderSpace(space);   // Put the select back to the stored value.
+  }
+}
+
 async function slugSpaceFlow(space) {
   if (!space) return;
   const value = await promptModal({
@@ -1618,6 +1650,12 @@ function renderSpace(space) {
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
        <div class="space-acts">
+         <label class="sort-pick">
+           <span>排序</span>
+           <select id="sp-sort" title="侧栏与总览的页面顺序">
+             ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
+           </select>
+         </label>
          <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
          <button class="btn btn-ghost" id="sp-rename">重命名</button>
          <button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>
@@ -1628,6 +1666,7 @@ function renderSpace(space) {
 
   el.article.hidden = false;
   decorate(el.article);
+  $('#sp-sort').addEventListener('change', (e) => setSpaceSort(space, (e.target as HTMLSelectElement).value));
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-slug-edit').addEventListener('click', () => slugSpaceFlow(space));

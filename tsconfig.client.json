@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/client/**/*.ts", "src/markdown.ts", "src/vendor.d.ts"]
+  "include": ["src/client/**/*.ts", "src/markdown.ts", "src/sort.ts", "src/vendor.d.ts"]
 }

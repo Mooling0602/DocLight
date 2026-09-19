@@ -14,12 +14,19 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as YAML from 'yaml';
+import { DEFAULT_SORT, isSortKey } from './sort.js';
+import type { SortKey } from './sort.js';
+
+export { DEFAULT_SORT, SORT_KEYS, isSortKey } from './sort.js';
+export type { SortKey } from './sort.js';
 
 export interface Space {
   slug: string;
   title: string;
   desc: string;
   home: string | null;
+  /** Absent means `DEFAULT_SORT`; omitted from `spaces.json` so untouched spaces stay clean. */
+  sort?: SortKey;
   createdAt: number;
   updatedAt: number;
 }
@@ -145,6 +152,29 @@ function joinFrontMatter(page: Page): string {
   return `${FRONT_MATTER_FENCE}\n${yaml}\n${FRONT_MATTER_FENCE}\n\n${body}\n`;
 }
 
+/* ------------------------------------------------------------ ordering */
+
+/** Tie-break on slug so the order is total: equal timestamps must not leave the result to chance. */
+function bySlug(a: Page, b: Page): number {
+  return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+}
+
+/**
+ * Order pages for display. Applied at read time rather than persisted, so the order follows the
+ * data (an edit changes `updatedAt`) without having to rewrite every page file.
+ */
+export function sortPages(pages: Page[], key: SortKey = DEFAULT_SORT): Page[] {
+  const sorted = [...pages];
+  switch (key) {
+    case 'created_desc': sorted.sort((a, b) => b.createdAt - a.createdAt || bySlug(a, b)); break;
+    case 'created_asc': sorted.sort((a, b) => a.createdAt - b.createdAt || bySlug(a, b)); break;
+    case 'updated_desc': sorted.sort((a, b) => b.updatedAt - a.updatedAt || bySlug(a, b)); break;
+    case 'updated_asc': sorted.sort((a, b) => a.updatedAt - b.updatedAt || bySlug(a, b)); break;
+    case 'title_asc': sorted.sort((a, b) => a.title.localeCompare(b.title, 'zh') || bySlug(a, b)); break;
+  }
+  return sorted;
+}
+
 /* ------------------------------------------------------------ read */
 
 /** Read the whole store from disk. Missing pieces degrade to empty rather than throwing. */
@@ -154,6 +184,11 @@ export function readStore(dataDir: string): Database {
     const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
     if (parsed && Array.isArray(parsed.spaces)) spaces = parsed.spaces;
   } catch { /* empty site */ }
+  // The index is hand-editable, so an unusable `sort` is dropped rather than trusted: an unknown
+  // value would match no comparator and silently leave that space unordered.
+  for (const space of spaces) {
+    if (space.sort !== undefined && !isSortKey(space.sort)) delete space.sort;
+  }
 
   const pages: Page[] = [];
   let entries: fs.Dirent[] = [];
@@ -191,7 +226,17 @@ export function readStore(dataDir: string): Database {
   const fallback = spaces[0]?.slug ?? 'default';
   for (const p of pages) if (!knownSpaces.has(p.space)) p.space = fallback;
 
-  return { version: 4, spaces, pages };
+  // Order each space's pages by that space's own key. A single flat sort cannot do this: two
+  // spaces may choose differently, and the client renders by filtering this array by space, so
+  // what has to be right is the relative order within a space. Pages left over (no spaces at all,
+  // so every page collapsed onto the synthetic fallback) are appended rather than dropped.
+  const ordered: Page[] = [];
+  for (const space of spaces) {
+    ordered.push(...sortPages(pages.filter((p) => p.space === space.slug), space.sort ?? DEFAULT_SORT));
+  }
+  ordered.push(...sortPages(pages.filter((p) => !knownSpaces.has(p.space))));
+
+  return { version: 4, spaces, pages: ordered };
 }
 
 /* ------------------------------------------------------------ write */

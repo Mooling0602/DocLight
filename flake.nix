@@ -45,7 +45,7 @@
           # would crash on start. package.json therefore carries a `files` whitelist,
           # which takes precedence over .gitignore and ships exactly:
           #   dist/server.js, dist/beian.js, dist/config.js, dist/markdown.js,
-          #   dist/store.js, public/, template/
+          #   dist/store.js, dist/sort.js, public/, template/
           # The whitelist names the compiled files individually instead of `dist/` so the
           # compiled tests (which `require('jsdom')`, a devDependency pruned from the
           # output) stay out. `template/` is the first-run sample site (spaces.json + pages/*.md).
