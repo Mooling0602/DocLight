@@ -87,6 +87,18 @@ try {
   writeStore(dir, db(page('keepname')), ['keepname']);
   assert.ok(fs.existsSync(pageFile('keepname')), '仍被使用的 slug 不应因声明删除而消失');
 
+  /* ---- onlyCreate writes missing pages but never overwrites an existing one ---- */
+  // Migration and seeding pass this so a store they are establishing cannot clobber a page file
+  // that is already there (the stale re-import case). Contrast with a normal write below.
+  fs.writeFileSync(pageFile('live'), '---\ntitle: 用户改过的\nspace: default\n---\n\n# 用户改过的\n', 'utf8');
+  writeStore(dir, db(page('live', { content: '# 来自旧快照\n' }), page('added')), [], { onlyCreate: true });
+  assert.match(fs.readFileSync(pageFile('live'), 'utf8'), /用户改过的/, 'onlyCreate 不得覆盖已存在的页面');
+  assert.ok(fs.existsSync(pageFile('added')), 'onlyCreate 仍应补建缺失的页面');
+
+  // Without the flag the same write does update the file, proving the option is what protected it.
+  writeStore(dir, db(page('live', { content: '# 普通写入\n' })));
+  assert.match(fs.readFileSync(pageFile('live'), 'utf8'), /普通写入/, '普通写入应更新已存在的页面');
+
   /* ---- A hand-written file without front matter is readable ---- */
   fs.writeFileSync(pageFile('note'), '# 手写标题\n\n直接写的正文。\n', 'utf8');
   const handEdited = readStore(dir);

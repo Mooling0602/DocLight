@@ -323,6 +323,40 @@ async function main(): Promise<void> {
     fs.rmSync(reappearDir, { recursive: true, force: true });
   }
 
+  /* ---- A re-migration must not overwrite live page files (no .bak needed) ---- */
+  // The crash window `reappearDir` above cannot reach: migration wrote the store but the retire
+  // move never ran, so `pages.json` is back with NO `.bak` beside it. An `existsSync`-based guard
+  // cannot tell this from a first migration, so it re-imports the stale snapshot. Migration must
+  // therefore never overwrite a page file that already exists.
+  const crashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-crash-'));
+  fs.writeFileSync(path.join(crashDir, 'pages.json'), JSON.stringify(V3_DB, null, 2), 'utf8');
+  const crashFirst = await startServer(crashDir);
+  await fetch(`http://127.0.0.1:${crashFirst.port}/api/pages/legacy`);
+  crashFirst.stop();
+
+  const crashFile = path.join(crashDir, 'pages', 'legacy.md');
+  fs.writeFileSync(crashFile, fs.readFileSync(crashFile, 'utf8').replace('# 旧标题', '# 崩溃窗口后改的标题'), 'utf8');
+  // Remove a page so the re-migration has something genuinely missing to add back.
+  fs.rmSync(path.join(crashDir, 'pages', 'empty.md'), { force: true });
+  // Recreate the crash state: legacy file back in place, no backup, index lost.
+  fs.copyFileSync(path.join(crashDir, 'pages.json.bak'), path.join(crashDir, 'pages.json'));
+  fs.rmSync(path.join(crashDir, 'pages.json.bak'), { force: true });
+  fs.rmSync(path.join(crashDir, 'spaces.json'), { force: true });
+
+  const afterCrash = await startServer(crashDir);
+  try {
+    assert.match(
+      fs.readFileSync(crashFile, 'utf8'),
+      /# 崩溃窗口后改的标题/,
+      '迁移重建 store 时不得覆盖已存在的页面文件',
+    );
+    // `onlyCreate` still adds pages the store lacks, so the snapshot is not simply ignored.
+    assert.ok(fs.existsSync(path.join(crashDir, 'pages', 'empty.md')), '旧快照中缺失的页面仍应被补建');
+  } finally {
+    afterCrash.stop();
+    fs.rmSync(crashDir, { recursive: true, force: true });
+  }
+
   /* ---- A differing legacy file is preserved, not discarded as a duplicate ---- */
   // The "backup already exists" case was treated as proof of duplication and the file deleted.
   // That is only true when the bytes match; a snapshot carried in from another machine differs

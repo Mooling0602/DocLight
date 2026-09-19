@@ -49,7 +49,7 @@ import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
 import { readStore, writeStore, writeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore } from './store.js';
 import type { AppConfig } from './config.js';
-import type { Database, Page, Space } from './store.js';
+import type { Database, Page, Space, WriteOptions } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -126,6 +126,9 @@ function ensureData(): void {
     if (repaired) {
       console.warn(`· ${path.join(DATA_DIR, 'spaces.json')} 不含任何空间，已按现有页面重建索引（页面文件未改动）`);
       writeSpaces(DATA_DIR, repaired.spaces);
+      // A rebuilt index makes the store authoritative again, so any lingering legacy file is
+      // retired here too — otherwise a later lost index would fall through to the legacy branch.
+      retireLegacyFile();
       return;
     }
   }
@@ -164,7 +167,9 @@ function ensureData(): void {
     return;
   }
 
-  writeDb(seedDb());
+  // `onlyCreate` for the same reason as migration: seeding establishes the store, so it must
+  // never overwrite a page file that is already there.
+  writeDb(seedDb(), [], { onlyCreate: true });
   console.log(`· 已从示例数据初始化 → ${path.join(DATA_DIR, 'pages')}`);
 }
 
@@ -232,7 +237,11 @@ function migrateLegacyFile(): void {
     ...p,
     content: fromHtml ? htmlToMarkdown(p.content) : String(p.content ?? ''),
   }));
-  writeDb({ version: 4, spaces, pages });
+  // `onlyCreate`: an existing `<slug>.md` is live data and outranks this snapshot. That is what
+  // makes a re-migration harmless — e.g. the legacy file survived its retirement (a crash between
+  // the store write and the move) and the index was later lost, so this path runs again. Without
+  // it, the stale snapshot would overwrite the user's edits; with it, only missing pages are added.
+  writeDb({ version: 4, spaces, pages }, [], { onlyCreate: true });
   // Only after the store is safely written: the rename both preserves the original and stops it
   // from being treated as live data on any later boot.
   retireLegacyFile();
@@ -249,8 +258,8 @@ function readDb(): Database {
 }
 /** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
  *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
-function writeDb(db: Database, removed: Iterable<string> = []): void {
-  writeStore(DATA_DIR, db, removed);
+function writeDb(db: Database, removed: Iterable<string> = [], options: WriteOptions = {}): void {
+  writeStore(DATA_DIR, db, removed, options);
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {

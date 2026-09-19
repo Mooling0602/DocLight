@@ -206,6 +206,19 @@ function writeAtomic(file: string, data: string): void {
   fs.renameSync(tmp, file);
 }
 
+/** Options for `writeStore`. */
+export interface WriteOptions {
+  /**
+   * Write only page files that do not exist yet, never overwriting one. Used by the legacy
+   * migration and first-run seeding: those create the store, so an existing `<slug>.md` is
+   * newer than the source they carry and must win. Without this a legacy `pages.json` that
+   * survives its own retirement (a crash between the store write and the move, or a failed
+   * rename) would, on a later boot with the index lost, re-import its stale snapshot over the
+   * user's live edits.
+   */
+  onlyCreate?: boolean;
+}
+
 /**
  * Persist the database as Markdown files. Writes are content-compared so an update to one page
  * does not rewrite (and re-stamp) every other file, which keeps the store friendly to `git`
@@ -217,7 +230,12 @@ function writeAtomic(file: string, data: string): void {
  * is absent from `db`, and a seeding or migration write carries only the pages it was given,
  * so neither may be treated as an authoritative statement that the other files are unwanted.
  */
-export function writeStore(dataDir: string, db: Database, removed: Iterable<string> = []): void {
+export function writeStore(
+  dataDir: string,
+  db: Database,
+  removed: Iterable<string> = [],
+  options: WriteOptions = {},
+): void {
   const dir = pagesDir(dataDir);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -225,6 +243,8 @@ export function writeStore(dataDir: string, db: Database, removed: Iterable<stri
   for (const page of db.pages) {
     wanted.add(page.slug);
     const file = path.join(dir, `${page.slug}.md`);
+    // A file that already exists is the live page, not something the incoming db may replace.
+    if (options.onlyCreate && fs.existsSync(file)) continue;
     const next = joinFrontMatter(page);
     if (!sameContent(file, next)) writeAtomic(file, next);
   }
