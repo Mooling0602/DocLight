@@ -60,12 +60,16 @@ interface ApiError {
   needAuth?: boolean;
 }
 
+type EditMode = 'visual' | 'markdown';
+
 interface AppState {
   spaces: Space[];
   pages: PageMeta[];
   page: Page | null;
   space: Space | null;
   dirty: boolean;
+  /** Active editing surface. Both modes share one Markdown document; switching re-serialises. */
+  editMode: EditMode;
   pendingEdit: string | null;
   authed: boolean;
   authSetup: boolean;
@@ -236,6 +240,7 @@ const S: AppState = {
   page: null,         // current page detail
   space: null,        // current space (used by the space index view)
   dirty: false,
+  editMode: 'visual',
   pendingEdit: null,
   authed: false,
   authSetup: false,
@@ -260,6 +265,9 @@ const el = {
   article: $('#article'),
   editWrap: $('#edit-wrap'),
   editor: $('#editor'),
+  sourceEditor: $('#source-editor'),
+  modeToggle: $('#mode-toggle'),
+  editHint: $('#edit-hint'),
   titleInput: $('#title-input'),
   empty: $('#empty-state'),
   toolbarWrap: $('#toolbar-wrap'),
@@ -901,6 +909,45 @@ function placeCaretEnd(node) {
   sel.addRange(range);
 }
 
+/** Read the document from whichever surface is active, in Markdown form. */
+function currentMarkdown(): string {
+  return S.editMode === 'markdown'
+    ? el.sourceEditor.value
+    : htmlToMarkdown(el.editor.innerHTML);
+}
+
+/**
+ * Switch between the visual (contenteditable) and Markdown (textarea) surfaces without
+ * losing edits. Both surfaces describe the same Markdown document, so the outgoing one is
+ * serialised first and the incoming one is rebuilt from it. Kept idempotent: selecting the
+ * already-active mode does nothing, so a stray click cannot reflow the document.
+ */
+function setEditMode(mode: EditMode, focus = true) {
+  if (S.editMode === mode) return;
+  // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
+  const markdown = currentMarkdown();
+  S.editMode = mode;
+
+  const visual = mode === 'visual';
+  el.editor.hidden = !visual;
+  el.sourceEditor.hidden = visual;
+  // The formatting toolbar only makes sense for the WYSIWYG surface; Markdown is edited raw.
+  el.toolbarWrap.hidden = !visual;
+  el.editHint.textContent = visual
+    ? 'Enter 换行 · 代码块内 Tab 缩进 · Ctrl/⌘ S 随时保存 · 粘贴内容将自动清理排版'
+    : '直接编辑 Markdown 源码 · 支持标题、列表、引用、代码块、表格等 · 切换回「可视化」自动渲染';
+
+  if (visual) {
+    el.editor.innerHTML = renderMarkdown(markdown);
+    if (focus) placeCaretEnd(el.editor);
+    setTimeout(() => refreshToolbarState(), 50);
+  } else {
+    el.sourceEditor.value = markdown;
+    if (focus) el.sourceEditor.focus();
+  }
+  $$('#mode-toggle .seg-btn').forEach(b => b.classList.toggle('is-on', b.dataset.mode === mode));
+}
+
 function enterEdit(focus = true) {
   if (!S.page) return;
   S.dirty = false;
@@ -910,10 +957,19 @@ function enterEdit(focus = true) {
   el.empty.hidden = true;
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = false;
-  el.toolbarWrap.hidden = false;
   el.editWrap.hidden = false;
   el.titleInput.value = S.page.title;
+
+  // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
+  // the editor has a valid document on either side.
+  S.editMode = 'visual';
   el.editor.innerHTML = renderMarkdown(S.page.content);
+  el.sourceEditor.value = S.page.content || '';
+  el.editor.hidden = false;
+  el.sourceEditor.hidden = true;
+  el.toolbarWrap.hidden = false;
+  el.editHint.textContent = 'Enter 换行 · 代码块内 Tab 缩进 · Ctrl/⌘ S 随时保存 · 粘贴内容将自动清理排版';
+  $$('#mode-toggle .seg-btn').forEach(b => b.classList.toggle('is-on', b.dataset.mode === 'visual'));
   if (focus) placeCaretEnd(el.editor);
   setTimeout(() => refreshToolbarState(), 50);
 }
@@ -930,8 +986,9 @@ async function saveDoc() {
   if (!S.page) return;
   if (!S.dirty) { await exitEdit(false); return; }
   const title = el.titleInput.value.trim() || '无标题页面';
-  // The editor is a WYSIWYG surface but storage is Markdown: serialise the DOM on save.
-  const content = htmlToMarkdown(el.editor.innerHTML);
+  // Storage is Markdown regardless of the active surface: the visual editor is serialised,
+  // the Markdown editor is already raw text.
+  const content = currentMarkdown();
   el.btnSave.disabled = true;
   try {
     const updated = await api<Page>('pages/' + encodeURIComponent(S.page.slug), {
@@ -986,7 +1043,7 @@ function currentBlockTag() {
 }
 
 function refreshToolbarState() {
-  if (el.editWrap.hidden) return;
+  if (el.editWrap.hidden || S.editMode !== 'visual') return;
   const states = ['bold', 'italic', 'underline', 'strikeThrough',
                   'insertUnorderedList', 'insertOrderedList',
                   'justifyLeft', 'justifyCenter', 'justifyRight'];
@@ -1658,6 +1715,12 @@ $('#btn-edit').addEventListener('click', () => {
 $('#btn-save').addEventListener('click', () => saveDoc());
 $('#btn-cancel').addEventListener('click', tryCancelEdit);
 
+$('#mode-toggle').addEventListener('click', e => {
+  const btn = e.target.closest('.seg-btn');
+  if (!btn) return;
+  setEditMode(btn.dataset.mode as EditMode);
+});
+
 $('#menu-page').addEventListener('click', e => {
   const act = e.target.closest('.menu-item')?.dataset.act;
   if (!act) return;
@@ -1696,6 +1759,26 @@ document.addEventListener('click', e => {
 
 $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
+el.sourceEditor.addEventListener('input', markDirty);
+
+// Tab inserts indentation in the Markdown surface instead of moving focus — code blocks and
+// nested lists are the common reason to reach for it. Shift+Tab removes one indent level.
+el.sourceEditor.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const ta = el.sourceEditor;
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  if (e.shiftKey) {
+    const lineStart = ta.value.lastIndexOf('\n', start - 1) + 1;
+    const remove = /^ {1,4}/.exec(ta.value.slice(lineStart))?.[0].length || 0;
+    if (!remove) return;
+    ta.setRangeText('', lineStart, lineStart + remove, 'end');
+  } else {
+    ta.setRangeText('  ', start, end, 'end');
+  }
+  markDirty();
+});
 
 // Global shortcuts
 document.addEventListener('keydown', e => {
