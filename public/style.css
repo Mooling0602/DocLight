@@ -468,13 +468,16 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 /* ---------- Toolbar ---------- */
 #toolbar-wrap {
   position: sticky; top: 0; z-index: 30;
-  /* Horizontal padding must match .container so the toolbar lines up with the left edge of the editor below.
-     Do not cap #toolbar with max-width here — the editor is full width and a centered toolbar would misalign. */
+  /* The toolbar box shrinks to its buttons and centers itself, so no dead width is left
+     inside the box. The wrap keeps the container padding so the box never touches the
+     viewport edges. */
   padding: 10px clamp(18px, 4.5vw, 40px) 4px;
   background: linear-gradient(var(--bg) 62%, transparent);
 }
 #toolbar {
   display: flex; align-items: center; gap: 2px;
+  width: fit-content; max-width: 100%;
+  margin-inline: auto;
   padding: 6px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -484,7 +487,6 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   animation: rise .25s cubic-bezier(.2,.8,.25,1);
 }
 #toolbar::-webkit-scrollbar { display: none; }
-.flex-spacer { flex: 1; }
 .tbtn {
   flex: none;
   display: inline-grid; place-items: center;

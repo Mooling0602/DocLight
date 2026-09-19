@@ -9,7 +9,7 @@
     "build:client": "tsc --project tsconfig.client.json",
     "build:tests": "tsc --project tsconfig.tests.json",
     "start": "npm run build && node dist/server.js",
-    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js"
+    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/toolbar-layout.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js"
   },
   "engines": {
     "node": ">=20"
