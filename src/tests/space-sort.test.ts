@@ -147,6 +147,21 @@ async function main(): Promise<void> {
   assert.deepEqual([...settingsSelect.options].map(o => o.value), [...SORT_KEYS], '设置里的选项应与共享键列表一致');
   assert.equal(settingsSelect.value, DEFAULT_SORT, '设置应显示已存储的排序');
 
+  // Layout regression: the picker reuses the index page's `.sort-pick`, but inside a modal the
+  // generic `.modal select { width: 100% }` rule made the select claim the whole row and squeezed
+  // the "排序" label to one character per line — a vertical two-line label. The modal rules must
+  // neutralise that width so the label stays on one line beside the control.
+  const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');
+  const modalPick = css.match(/\.modal\s+\.sort-pick\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(modalPick, 'style.css 应为弹窗里的排序控件提供作用域限定的 .modal .sort-pick 规则');
+  const modalPickSelect = css.match(/\.modal\s+\.sort-pick\s+select\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(modalPickSelect, 'style.css 应限定 .modal .sort-pick select 的宽度');
+  assert.match(modalPickSelect, /width:\s*auto/, '弹窗里的 select 不应继承 width:100%，否则「排序」标签会被挤成竖排');
+  assert.ok(
+    /display:\s*flex/.test(modalPick) && !/inline-flex/.test(modalPick),
+    '弹窗里的 .sort-pick 应改用 flex 布局，让标签与控件同行分配宽度',
+  );
+
   const putsBefore = puts.length;
   settingsSelect.value = 'title_asc';
   click('#modal-root [data-x=ok]');
