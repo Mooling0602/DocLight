@@ -30,8 +30,10 @@ Co-Authored-By: Tool Name <tool-provider@domain.com>
 ### 作为 DeepSeek Harness 提交
 
 ```plaintext
-Co-Authored-By: DeepSeek Harness <service@deepseek.com>
+Co-Authored-With: [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 ```
+
+> DeepSeek AI 没有可关联的 GitHub 身份，故直接使用其项目仓库地址，也不会出现在可识别的贡献者列表中。
 
 ### 作为 Qoder 提交
 
