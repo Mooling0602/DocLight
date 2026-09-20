@@ -1355,18 +1355,26 @@ async function setSpaceSort(space, key) {
     });
     const i = S.spaces.findIndex(s => s.slug === space.slug);
     if (i >= 0) S.spaces[i] = updated;
+    // Keep `S.space` in step even if the refetch below fails, so the index renders the value the
+    // server just stored rather than the one it replaced.
+    if (S.space?.slug === space.slug) S.space = updated;
     // Order is computed server-side from the page files, so the tree has to be refetched rather
     // than re-sorted here — that keeps one definition of the order instead of two that can drift.
     await refreshTree();
-    if (S.space?.slug === space.slug) {
-      renderSpace(S.space);
-    } else {
-      renderSidebar(el.search.value);
-    }
+    // Only the space index owns a picker to re-render; anywhere else the sidebar is enough. The
+    // entry point is reachable from every route, so rendering the index unconditionally would
+    // navigate the reader away from the article they are on.
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
     toast('排序已更新 ✓');
   } catch (err) {
     toast(err.message, 3000);
-    renderSpace(space);   // Put the select back to the stored value.
+    // The stored value is unchanged, so only the index's own picker needs putting back. Rendering
+    // the index from here used to be unconditional, which from an article — or from the editor —
+    // replaced the view: `renderSpace` clears `S.page`, hides the editor and empties `#editor`,
+    // silently discarding unsaved work with no confirmation.
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
   }
 }
 

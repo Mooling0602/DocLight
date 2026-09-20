@@ -43,6 +43,8 @@ let pages = [
 ];
 let puts: { url: string; body: any }[] = [];
 let treeCalls = 0;
+// Flipped to make the sort PUT fail, so the failure branch can be exercised from other views.
+let sortPutFails = false;
 
 window.fetch = async (url: string, opts: any = {}) => {
   if (url.includes('/api/auth/state')) return { ok: true, json: async () => ({ mode: 'ready', authed: true, user: 'tester', salt: '00', iters: 1 }) };
@@ -50,6 +52,7 @@ window.fetch = async (url: string, opts: any = {}) => {
   if (url.includes('/api/spaces/') && opts.method === 'PUT') {
     const body = JSON.parse(String(opts.body));
     puts.push({ url, body });
+    if (sortPutFails) return { ok: false, status: 500, json: async () => ({ error: '磁盘只读' }) };
     // Mirror the server: applying a sort rewrites the space record (or drops the key for the default).
     if (body.sort === null) delete spaces[0].sort;
     else if (body.sort !== undefined) spaces[0].sort = body.sort;
@@ -150,6 +153,63 @@ async function main(): Promise<void> {
   await wait(80);
   assert.equal(puts.length, putsBefore + 1, '在设置里改排序应发 PUT');
   assert.equal(puts[puts.length - 1].body.sort, 'title_asc', '设置里的 PUT 应带上所选键');
+
+  // A failed save must not navigate. The settings entry is reachable from every route, but the
+  // failure branch used to call `renderSpace` unconditionally — which clears `S.page`, hides the
+  // editor and empties `#editor`. Opened from an article that replaced the reader's view; opened
+  // while editing, it discarded unsaved work with no confirmation.
+  const onArticle = () => document.querySelector('#cluster-view')!.hasAttribute('hidden') === false;
+  click('.tree-row .page-item');
+  await wait(80);
+  assert.ok(onArticle(), '前置：应停在文章页');
+
+  sortPutFails = true;
+  $('.space-row .row-actions').querySelectorAll('.ra-btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  document.querySelector('#menu-row [data-act="settings"]')!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  const failSelect = $('#ss-sort') as HTMLSelectElement;
+  failSelect.value = 'created_asc';
+  click('#modal-root [data-x=ok]');
+  await wait(80);
+  assert.ok(onArticle(), '排序保存失败后应仍停在文章页，而不是跳去空间索引');
+  assert.equal($('#modal-root').hidden, true, '失败后弹窗应关闭');
+
+  // The severe case: editing with unsaved work. The editor must survive a failed sort save.
+  click('#btn-edit');
+  await wait(40);
+  const editor = $('#editor');
+  editor.innerHTML = '<p>尚未保存的内容</p>';
+  editor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal($('#dirty-pill').hidden, false, '前置：应处于未保存状态');
+
+  $('.space-row .row-actions').querySelectorAll('.ra-btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  document.querySelector('#menu-row [data-act="settings"]')!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  ($('#ss-sort') as HTMLSelectElement).value = 'updated_asc';
+  click('#modal-root [data-x=ok]');
+  await wait(80);
+  assert.equal($('#edit-wrap').hidden, false, '排序保存失败不应退出编辑态');
+  assert.match($('#editor').innerHTML, /尚未保存的内容/, '排序保存失败不应清空编辑器内容');
+  assert.equal($('#dirty-pill').hidden, false, '排序保存失败不应丢弃未保存标记');
+  sortPutFails = false;
+
+  // The success path must not navigate either: only the index owns a picker to re-render, and the
+  // sidebar carries the new order everywhere else. `title_asc` is already the stored value by now,
+  // so pick a different key or the modal would correctly skip the PUT.
+  const putsBeforeSuccess = puts.length;
+  $('.space-row .row-actions').querySelectorAll('.ra-btn')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  document.querySelector('#menu-row [data-act="settings"]')!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  ($('#ss-sort') as HTMLSelectElement).value = 'created_asc';
+  click('#modal-root [data-x=ok]');
+  await wait(120);
+  assert.equal(puts.length, putsBeforeSuccess + 1, '成功路径仍应发出 PUT');
+  assert.equal($('#edit-wrap').hidden, false, '从编辑器保存排序成功不应退出编辑态');
+  assert.match($('#editor').innerHTML, /尚未保存的内容/, '保存排序不应影响编辑器内容');
+  assert.equal($('#cluster-view').hasAttribute('hidden'), true, '不应跳转到空间索引');
 
   console.log('space sort assertions passed');
 }
