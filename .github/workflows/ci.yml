@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, vibe]
+  pull_request:
+    branches: [main, vibe]
+  # Manual runs can be started from the Actions tab or with:
+  #   gh workflow run CI --ref <branch> -F run_test=true -F run_nix=false
+  workflow_dispatch:
+    inputs:
+      run_test:
+        description: 运行 Node 测试与包内容检查
+        type: boolean
+        default: true
+      run_nix:
+        description: 运行 Nix flake check（较慢，约 5–10 分钟）
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The input checks only apply to manual runs: on push / pull_request `inputs` is
+  # empty, so the first operand short-circuits and the job always runs.
+  test:
+    name: Test (Node 22)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_test }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # `npm test` also runs `npm run build`, so the packaged artifacts exist by now.
+      - name: Check packaged files
+        run: node .github/workflows/scripts/check-package.mjs
+
+  nix:
+    name: Nix flake check
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_nix }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      # Builds the flake's checks, which reuse the package definition and run
+      # `npm test` inside the Nix build sandbox (verifies npmDeps and the build).
+      - run: nix flake check -L
