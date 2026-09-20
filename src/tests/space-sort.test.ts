@@ -127,6 +127,30 @@ async function main(): Promise<void> {
   assert.ok(treeCalls > beforeCreate, '新建页面后应重新拉取 tree，而不是只改内存数组');
   assert.deepEqual(sidebarOrder(), ['新页面', '甲', '乙', '丙'], '新建后侧栏应按同一个键重排序');
 
+  // A space with a `home` never renders the index view, so the reachable entry point is the
+  // space row menu. Without it the shipped sample space (home: welcome) can't set a sort at all.
+  const actions = $('.space-row .row-actions');
+  const more = actions.querySelectorAll('.ra-btn')[1];
+  more.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  const settings = $('#menu-row [data-act="settings"]');
+  assert.ok(settings, '空间菜单应提供「空间设置」入口');
+  settings!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(20);
+  const modal = $('#modal-root');
+  assert.equal(modal.hidden, false, '空间设置应打开');
+  const settingsSelect = $('#ss-sort') as HTMLSelectElement;
+  assert.ok(settingsSelect, '空间设置应含排序控件');
+  assert.deepEqual([...settingsSelect.options].map(o => o.value), [...SORT_KEYS], '设置里的选项应与共享键列表一致');
+  assert.equal(settingsSelect.value, DEFAULT_SORT, '设置应显示已存储的排序');
+
+  const putsBefore = puts.length;
+  settingsSelect.value = 'title_asc';
+  click('#modal-root [data-x=ok]');
+  await wait(80);
+  assert.equal(puts.length, putsBefore + 1, '在设置里改排序应发 PUT');
+  assert.equal(puts[puts.length - 1].body.sort, 'title_asc', '设置里的 PUT 应带上所选键');
+
   console.log('space sort assertions passed');
 }
 

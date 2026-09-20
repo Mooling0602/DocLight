@@ -401,6 +401,7 @@ function openRowMenu(btn, kind, obj) {
     ? `
       <button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
       <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+      <button class="menu-item" data-act="settings"><span>空间设置…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
@@ -408,7 +409,7 @@ function openRowMenu(btn, kind, obj) {
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
-  const mw = 176, mh = kind === 'space' ? 160 : 190;
+  const mw = 176, mh = kind === 'space' ? 200 : 190;
   rowMenu.style.left = Math.max(8, Math.min(r.left - mw + 12, innerWidth - mw - 8)) + 'px';
   rowMenu.style.top = Math.min(r.bottom + 4, innerHeight - mh - 8) + 'px';
 }
@@ -1369,6 +1370,42 @@ async function setSpaceSort(space, key) {
   }
 }
 
+/**
+ * Space settings: the ordering picker, reachable from the space row menu.
+ *
+ * The same control also sits on the space index, but a space with a `home` never shows that
+ * index — `/space` opens the home page instead — so the sample space shipped with DocLight
+ * would otherwise offer no way to reach it at all.
+ */
+async function spaceSettingsFlow(space) {
+  if (!space) return;
+  const m = openModal(`
+    <h3>空间设置</h3>
+    <p class="desc">${esc(space.title)}</p>
+    <label class="sort-pick" for="ss-sort">
+      <span>排序</span>
+      <select id="ss-sort" title="侧栏与总览的页面顺序">
+        ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
+      </select>
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-x="no">关闭</button>
+      <button class="btn btn-primary" data-x="ok">保存</button>
+    </div>`);
+  const sel = $('#ss-sort', m) as HTMLSelectElement;
+  let settled = false;
+  const finish = async save => {
+    if (settled) return;
+    settled = true;
+    const pick = sel.value;
+    closeModal();
+    if (save && pick !== (space.sort ?? DEFAULT_SORT)) await setSpaceSort(space, pick);
+  };
+  $('[data-x=no]', m).onclick = () => finish(false);
+  $('[data-x=ok]', m).onclick = () => finish(true);
+  activeModalDone = () => finish(false);
+}
+
 async function slugSpaceFlow(space) {
   if (!space) return;
   const value = await promptModal({
@@ -1838,6 +1875,7 @@ rowMenu.addEventListener('click', e => {
     if (!sp) return;
     if (act === 'rename') renameSpaceFlow(sp);
     if (act === 'slug') slugSpaceFlow(sp);
+    if (act === 'settings') spaceSettingsFlow(sp);
     if (act === 'delete') deleteSpaceFlow(sp);
   } else {
     const pg = pageBySlug(slug);
