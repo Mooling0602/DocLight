@@ -32,8 +32,11 @@ window.scrollTo = () => {};
 window.Element.prototype.scrollTo = window.Element.prototype.scrollTo || function () {};
 
 const now = Date.now();
-const spaces: Space[] = [{ slug: 'default', title: '默认空间', desc: '', home: null, createdAt: now, updatedAt: now }];
-const pages = [
+const spaces: Space[] = [
+  { slug: 'default', title: '默认空间', desc: '', home: null, createdAt: now, updatedAt: now },
+];
+// Server order is `created_desc` (DEFAULT_SORT), so the array below is what /api/tree returns.
+let pages = [
   { slug: 'alpha', space: 'default', parent: null, title: '甲', createdAt: 3, updatedAt: 3 },
   { slug: 'beta', space: 'default', parent: null, title: '乙', createdAt: 2, updatedAt: 2 },
   { slug: 'gamma', space: 'default', parent: null, title: '丙', createdAt: 1, updatedAt: 1 },
@@ -52,11 +55,24 @@ window.fetch = async (url: string, opts: any = {}) => {
     else if (body.sort !== undefined) spaces[0].sort = body.sort;
     return { ok: true, json: async () => spaces[0] };
   }
+  if (url.includes('/api/pages') && opts.method === 'POST') {
+    const body = JSON.parse(String(opts.body));
+    const created = { slug: 'delta', space: body.space, parent: body.parent, title: body.title, createdAt: 4, updatedAt: 4 };
+    // The server re-sorts by the space's key, so a newest-first space puts the new page on top.
+    pages = [created, ...pages];
+    return { ok: true, json: async () => ({ ...created, content: '' }) };
+  }
+  if (url.includes('/api/pages/')) {
+    const slug = decodeURIComponent(url.split('/api/pages/')[1]);
+    const meta = pages.find(p => p.slug === slug);
+    return { ok: true, json: async () => ({ ...meta, content: '' }) };
+  }
   return { ok: true, json: async () => ({}) };
 };
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
+const click = (selector: string) => $(selector).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 
 async function main(): Promise<void> {
   window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
@@ -95,6 +111,21 @@ async function main(): Promise<void> {
   assert.equal(select2.title, '侧栏与总览的页面顺序', '排序控件应有说明');
   const label = select2.closest('label');
   assert.ok(label && label.textContent!.includes('排序'), '排序控件应由 label 包裹');
+
+  // Ordinary mutations must re-derive the order too, not only the sort picker. Creating a page
+  // used to push onto the local array, which left the sidebar in its old order until a reload:
+  // the new page belongs on top under the default key.
+  const sidebarOrder = () => [...document.querySelectorAll('.tree-row .page-item .t')].map(n => n.textContent);
+  assert.deepEqual(sidebarOrder(), ['甲', '乙', '丙'], '初始侧栏应按服务端顺序');
+  const beforeCreate = treeCalls;
+  click('#sp-add');
+  await wait(20);
+  const input = $('#modal-root input') as HTMLInputElement;
+  input.value = '新页面';
+  click('#modal-root [data-x=ok]');
+  await wait(80);
+  assert.ok(treeCalls > beforeCreate, '新建页面后应重新拉取 tree，而不是只改内存数组');
+  assert.deepEqual(sidebarOrder(), ['新页面', '甲', '乙', '丙'], '新建后侧栏应按同一个键重排序');
 
   console.log('space sort assertions passed');
 }

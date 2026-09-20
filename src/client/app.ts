@@ -1036,6 +1036,7 @@ async function saveDoc() {
     el.dirtyPill.hidden = true;
     toast('已保存 ✓');
     await exitEdit(false);
+    await refreshTree();          // updatedAt moved, so time-ordered spaces can reorder
     renderSidebar(el.search.value);
   } catch (err) {
     toast(err.message || '保存失败', 3000);
@@ -1320,6 +1321,28 @@ async function renameSpaceFlow(space) {
   } catch (err) { toast(err.message, 3000); }
 }
 
+/**
+ * Re-read the tree after a mutation that can change page order.
+ *
+ * Order is derived from the page fields on the server (see src/sort.ts), so a local splice can
+ * never reproduce it — patching `S.pages` in place would leave the sidebar ordered by the old
+ * key until the next reload. Refetching keeps one definition of the order instead of two that
+ * can drift.
+ *
+ * A failure here is deliberately swallowed: the mutation itself already succeeded, so turning a
+ * failed order-refresh into an error toast would report failure for an action that worked. The
+ * caller's local update stays in place and the order catches up on the next fetch.
+ */
+async function refreshTree() {
+  try {
+    const tree = await api<TreeResponse>('tree');
+    S.spaces = tree.spaces || S.spaces;
+    S.pages = tree.pages || S.pages;
+    // The space index renders `sort`, so it has to point at the refetched record, not the old one.
+    if (S.space) S.space = S.spaces.find(s => s.slug === S.space.slug) || S.space;
+  } catch { /* keep the local state; order is corrected on the next fetch */ }
+}
+
 async function setSpaceSort(space, key) {
   if (!space) return;
   // Choosing the default clears the field rather than writing it, so an untouched space keeps no
@@ -1333,11 +1356,8 @@ async function setSpaceSort(space, key) {
     if (i >= 0) S.spaces[i] = updated;
     // Order is computed server-side from the page files, so the tree has to be refetched rather
     // than re-sorted here — that keeps one definition of the order instead of two that can drift.
-    const tree = await api<TreeResponse>('tree');
-    S.spaces = tree.spaces || S.spaces;
-    S.pages = tree.pages || S.pages;
+    await refreshTree();
     if (S.space?.slug === space.slug) {
-      S.space = S.spaces.find(s => s.slug === space.slug) || S.space;
       renderSpace(S.space);
     } else {
       renderSidebar(el.search.value);
@@ -1427,6 +1447,9 @@ async function createPageFlow(spaceSlug, parent = null) {
       body: JSON.stringify({ title, space: spaceSlug, parent }),
     });
     S.pages.push({ ...page });
+    // Keep the local record for `canonicalPath` even if the refetch below fails, then take the
+    // server's copy: the new page's position depends on the space's sort key.
+    await refreshTree();
     toast('已创建，开始编辑吧');
     S.pendingEdit = page.slug;
     navigate(canonicalPath(page.slug));
@@ -1443,6 +1466,7 @@ async function renameFlow(pg: PageMeta | null = S.page) {
     });
     const i = S.pages.findIndex(p => p.slug === pg.slug);
     if (i >= 0) S.pages[i].title = title;
+    await refreshTree();          // title_asc ordering and the bumped updatedAt come from the server
     if (S.page?.slug === pg.slug) { S.page.title = title; renderArticle(S.page); }
     else if (S.space) renderSpace(S.space);
     else renderSidebar(el.search.value);
@@ -1478,6 +1502,7 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     S.pages.forEach(p => { if (p.parent === old) p.parent = ns; });
     const i = S.pages.findIndex(p => p.slug === old);
     if (i >= 0) { S.pages[i].slug = ns; S.pages[i].updatedAt = updated.updatedAt; }
+    await refreshTree();          // slug is the order's tie-break, so the rank can move
     toast('slug 已更新 ✓');
     if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(ns)); }
     else if (S.space) renderSpace(S.space);
@@ -1528,6 +1553,9 @@ async function moveFlow(pg: PageMeta | null = S.page) {
       });
       const i = S.pages.findIndex(p => p.slug === pg.slug);
       if (i >= 0) { S.pages[i].space = updated.space; S.pages[i].parent = updated.parent; }
+      // The moved page kept its old array slot, which reflects the *source* space's order; only
+      // the server puts it in the right place among its new siblings.
+      await refreshTree();
       toast('已移动 ✓');
       if (S.page?.slug === pg.slug) { S.page = updated; navigate(canonicalPath(pg.slug)); }
       else { renderSidebar(el.search.value); if (S.space) renderSpace(S.space); }
