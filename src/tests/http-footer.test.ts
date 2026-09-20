@@ -192,27 +192,33 @@ async function main(): Promise<void> {
   // `fs.createReadStream(file).pipe(res)` had no 'error' listener, so an asset that becomes
   // unreadable under a live server (a permissions change, an I/O error) emitted an unhandled
   // 'error' and exited the process. The headers are already sent by the time the stream fails, so
-  // the connection is destroyed; the requirement is only that the *server* survives. The
-  // permission change is applied to a real asset, and skipped when the test itself can still read
-  // it — that happens when the suite runs as root, where chmod cannot deny the server either.
-  const asset = path.join(root, 'public', 'style.css');
-  const originalMode = fs.statSync(asset).mode;
+  // the connection is destroyed; the requirement is only that the *server* survives.
+  //
+  // The probe is a file this test creates and removes, not a shipped asset: chmod on a
+  // version-controlled file would leave its mode changed if the process were killed before the
+  // restore below, and git does not track that bit. The probe lives under `public/` because the
+  // handler only ever streams from there, and it is untracked, so a stray copy is both harmless
+  // and visible in `git status`. Skipped when the test itself can still read it — that happens
+  // when the suite runs as root, where chmod cannot deny the server either.
+  const probe = path.join(root, 'public', '__unreadable_probe.txt');
+  fs.writeFileSync(probe, 'probe\n');
   const unreadable = await startServer({});
   try {
-    fs.chmodSync(asset, 0o000);
+    fs.chmodSync(probe, 0o000);
     let denied = false;
-    try { fs.readFileSync(asset); } catch { denied = true; }
+    try { fs.readFileSync(probe); } catch { denied = true; }
     if (denied) {
       // The connection is destroyed mid-response, so the client may legitimately see no bytes at
       // all; what must not happen is the process exiting, which the follow-up request proves.
-      await rawRequest(unreadable.port, 'GET /style.css HTTP/1.1');
+      await rawRequest(unreadable.port, 'GET /__unreadable_probe.txt HTTP/1.1');
       const alive = await fetch(`http://127.0.0.1:${unreadable.port}/`).catch(() => null);
       assert.equal(alive?.status, 200, '静态资源读取失败不得让服务进程退出');
     } else {
       console.log('· 跳过静态资源读取失败断言：当前用户可读 chmod 000 的文件（可能以 root 运行）');
     }
   } finally {
-    fs.chmodSync(asset, originalMode);
+    fs.chmodSync(probe, 0o600);
+    fs.rmSync(probe, { force: true });
     unreadable.stop();
   }
 
