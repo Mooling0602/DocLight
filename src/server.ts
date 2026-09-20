@@ -413,7 +413,12 @@ function indexHtml(): string {
 }
 
 function serveStatic(res: ServerResponse, urlPath: string): void {
-  let rel = decodeURIComponent(urlPath.split('?')[0]);
+  // A malformed escape such as `/%` makes `decodeURIComponent` throw `URIError`. This runs outside
+  // the request promise chain (it is called directly by `handler`), so the throw had nowhere to be
+  // caught and killed the process — one request to any such path took the whole site down.
+  let rel: string;
+  try { rel = decodeURIComponent(urlPath.split('?')[0]); }
+  catch { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Bad Request'); return; }
   if (rel === '/' || rel === '') rel = '/index.html';
   let file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
@@ -778,8 +783,26 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
 
   Promise.resolve(pathname.startsWith('/api/') ? handleApi(req, res, pathname) : null)
     .catch((err: unknown) => {
-      const error = err as { code?: number; message?: string };
-      json(res, error.code || 500, { error: error.message || '服务器内部错误' });
+      // Deliberate failures carry a numeric `code` (413 body too large, 400 invalid JSON) and a
+      // message written for the caller. Everything else is an unexpected fault: `fs` and most Node
+      // errors use a *string* code (`EACCES`, `ENOTDIR`, `ENOSPC`), and passing one of those to
+      // `writeHead` throws `ERR_HTTP_INVALID_STATUS_CODE` — which, thrown from inside a `.catch`,
+      // escaped as an unhandled rejection and killed the process. Any failed write (a read-only
+      // mount, a full disk) took the whole site down instead of returning an error.
+      const error = err as { code?: unknown; message?: string };
+      const status = typeof error.code === 'number' && error.code >= 400 && error.code <= 599
+        ? error.code
+        : 500;
+      if (status === 500) {
+        console.error(`· ${req.method} ${pathname} 处理失败：`, err);
+      }
+      // A 500's text is not the caller's business: `fs` messages embed absolute paths. The
+      // deliberate 4xx messages above are written for the caller and pass through unchanged.
+      const message = status === 500 ? '服务器内部错误' : (error.message || '请求失败');
+      // A handler that already responded and then threw must not be answered twice; `writeHead`
+      // would throw ERR_HTTP_HEADERS_SENT and we would be back to a crashed process.
+      if (res.headersSent) { res.end(); return; }
+      json(res, status, { error: message });
     });
 
   if (!pathname.startsWith('/api/')) serveStatic(res, pathname);

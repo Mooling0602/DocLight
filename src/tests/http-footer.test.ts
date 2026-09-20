@@ -125,6 +125,28 @@ async function main(): Promise<void> {
     filed.stop();
   }
 
+  /* ---- A malformed URI must not kill the process ---- */
+  // `decodeURIComponent` throws URIError on an escape such as `/%`. For /api/ routes that throw is
+  // caught, but the static handler runs *outside* the request promise chain, so it escaped and the
+  // process exited: a single request to any such path took the whole site down.
+  const hardened = await startServer({});
+  try {
+    const bad = await fetch(`http://127.0.0.1:${hardened.port}/%`, { redirect: 'manual' }).catch(() => null);
+    assert.ok(bad, '格式错误的 URL 应得到响应而不是断开连接');
+    assert.equal(bad!.status, 400, '格式错误的转义应返回 400');
+    // The decisive check: the server is still serving.
+    const still = await fetch(`http://127.0.0.1:${hardened.port}/`);
+    assert.equal(still.status, 200, '一次格式错误的请求不得让服务进程退出');
+
+    // The same escape on an API route is contained by the request catch and answers with JSON.
+    const apiBad = await fetch(`http://127.0.0.1:${hardened.port}/api/pages/%`).catch(() => null);
+    assert.ok(apiBad, 'API 侧的格式错误转义也应得到响应');
+    assert.equal(apiBad!.status, 500, 'API 侧的格式错误转义应返回 500');
+    assert.equal((await fetch(`http://127.0.0.1:${hardened.port}/`)).status, 200, 'API 侧异常同样不得终止进程');
+  } finally {
+    hardened.stop();
+  }
+
   console.log('filing footer HTTP assertions passed');
 }
 

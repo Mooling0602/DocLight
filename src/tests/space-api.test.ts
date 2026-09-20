@@ -177,6 +177,45 @@ async function main(): Promise<void> {
     const spaceIndex = JSON.parse(fs.readFileSync(path.join(server.dataDir, 'spaces.json'), 'utf8'));
     assert.equal(spaceIndex.spaces.length, 0, 'spaces.json 应不再包含已删除空间');
 
+    /* ---- A failed write returns 500 and must not take the process down ---- */
+    // `fs` errors carry a *string* code (`EISDIR` here) while the deliberate HTTP failures carry a
+    // number (413, 400). The catch handed either to `writeHead` as the status, so a string code
+    // threw ERR_HTTP_INVALID_STATUS_CODE — from inside a `.catch`, which escaped as an unhandled
+    // rejection and killed the server. Any failed save (a read-only mount, a full disk) therefore
+    // took the whole site offline instead of returning an error.
+    const probe = await api('spaces', { method: 'POST', body: JSON.stringify({ title: '写入失败探测' }) });
+    assert.equal(probe.status, 201, '前置：探测空间应创建成功');
+    const probeSlug = probe.body.slug;
+
+    // A directory where the atomic write wants its temp file: every subsequent write fails EISDIR.
+    const blocker = path.join(server.dataDir, 'spaces.json.tmp');
+    fs.mkdirSync(blocker);
+    try {
+      const failed = await api('spaces/' + probeSlug, {
+        method: 'PUT',
+        body: JSON.stringify({ sort: 'title_asc' }),
+      });
+      assert.equal(failed.status, 500, '写入失败应返回 500，而不是把 errno 字符串当状态码');
+      assert.equal(failed.body.error, '服务器内部错误', '500 不应把内部错误细节透给调用方');
+      assert.ok(!String(failed.body.error).includes(server.dataDir), '500 消息不应泄露文件系统路径');
+
+      // The decisive assertion: the process survived. Before the fix it had already exited and this
+      // request could not connect at all.
+      const alive = await api('tree');
+      assert.equal(alive.status, 200, '单次写入失败不得让服务进程退出');
+    } finally {
+      fs.rmdirSync(blocker);
+    }
+
+    // The store recovers once the obstruction is gone, and nothing was left half-applied.
+    const recovered = await api('spaces/' + probeSlug, {
+      method: 'PUT',
+      body: JSON.stringify({ sort: 'title_asc' }),
+    });
+    assert.equal(recovered.status, 200, '阻塞移除后写入应恢复正常');
+    assert.equal(recovered.body.sort, 'title_asc', '恢复后的写入应真正落盘');
+    await api('spaces/' + probeSlug, { method: 'DELETE' });
+
     console.log('space API assertions passed');
   } finally {
     server.stop();
