@@ -443,7 +443,18 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
   }
 
   res.writeHead(200, headers);
-  fs.createReadStream(file).pipe(res);
+  // An unreadable asset (a permission change under a live server, an I/O error) makes the stream
+  // emit `error`. An 'error' event with no listener is rethrown as an uncaught exception, which
+  // exits the process — so one request for that file took the site down. The headers are already
+  // sent by now, so a status cannot be written: destroy the connection and let the client see a
+  // truncated response instead of losing the server.
+  const stream = fs.createReadStream(file);
+  stream.on('error', (err) => {
+    console.error(`· 读取静态文件失败 ${file}：`, err);
+    stream.destroy();
+    res.destroy();
+  });
+  stream.pipe(res);
 }
 
 /* --------------------------------------------------------------- Auth */
@@ -775,7 +786,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
 }
 
 function handler(req: IncomingMessage, res: ServerResponse): void {
-  const pathname = new URL(req.url || '/', 'http://x').pathname;
+  // Parsing the request target can itself throw: an absolute-form target such as
+  // `GET http://[ HTTP/1.1` (sendable by any raw socket, `curl --request-target` or a scanner)
+  // makes `new URL` raise `ERR_INVALID_URL`. Browsers never send that form, but this line runs
+  // outside the request promise chain, so the bare throw killed the process — the same
+  // take-the-whole-site-down class as the malformed escape in `serveStatic`.
+  let pathname: string;
+  try { pathname = new URL(req.url || '/', 'http://x').pathname; }
+  catch { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Bad Request'); return; }
   const started = Date.now();
   res.on('finish', () => {
     console.log(`${req.method} ${pathname} → ${res.statusCode} (${Date.now() - started}ms)`);

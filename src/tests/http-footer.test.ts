@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -74,6 +75,25 @@ function startServer(env: NodeJS.ProcessEnv): Promise<StartedServer> {
       clearTimeout(timer);
       reject(new Error(`server exited early with code ${code}:\n${output}`));
     });
+  });
+}
+
+/**
+ * Send a hand-written request line and resolve with whatever the server sent back, or `null`
+ * when the connection closed with no bytes (the signature of a process that died mid-request).
+ * `fetch` cannot express these targets: it normalises or refuses them, so the only way to reach
+ * the absolute-form parsing path is to speak HTTP directly.
+ */
+function rawRequest(port: number, requestLine: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1');
+    let data = '';
+    const done = (value: string | null) => { socket.destroy(); resolve(value); };
+    socket.setTimeout(3000, () => done(data || null));
+    socket.on('connect', () => socket.write(`${requestLine}\r\nHost: x\r\nConnection: close\r\n\r\n`));
+    socket.on('data', (chunk) => { data += chunk.toString(); });
+    socket.on('error', () => done(data || null));
+    socket.on('close', () => done(data || null));
   });
 }
 
@@ -145,6 +165,55 @@ async function main(): Promise<void> {
     assert.equal((await fetch(`http://127.0.0.1:${hardened.port}/`)).status, 200, 'API 侧异常同样不得终止进程');
   } finally {
     hardened.stop();
+  }
+
+  /* ---- An absolute-form request target must not kill the process ---- */
+  // `new URL(req.url, ...)` is the first line of `handler`, outside the promise chain: an
+  // absolute-form target such as `GET http://[ HTTP/1.1` raises ERR_INVALID_URL and, uncaught,
+  // exited the process. Browsers never send that form, but any raw socket can, so one such request
+  // from a scanner took the whole site down. `fetch` cannot send it — hence the raw socket.
+  const target = await startServer({});
+  try {
+    for (const requestLine of ['GET http://[ HTTP/1.1', 'GET http://[::1 HTTP/1.1', 'GET http://% HTTP/1.1']) {
+      const response = await rawRequest(target.port, requestLine);
+      assert.ok(response, `${requestLine} 应得到响应而不是断开连接`);
+      assert.match(response!, /^HTTP\/1\.1 400 /, `${requestLine} 应返回 400`);
+      const alive = await fetch(`http://127.0.0.1:${target.port}/`).catch(() => null);
+      assert.equal(alive?.status, 200, `${requestLine} 之后服务仍应在运行`);
+    }
+    // The control: an ordinary origin-form target still succeeds on the same server.
+    const ok = await rawRequest(target.port, 'GET / HTTP/1.1');
+    assert.match(ok!, /^HTTP\/1\.1 200 /, '对照的普通请求应返回 200');
+  } finally {
+    target.stop();
+  }
+
+  /* ---- An unreadable asset must not kill the process ---- */
+  // `fs.createReadStream(file).pipe(res)` had no 'error' listener, so an asset that becomes
+  // unreadable under a live server (a permissions change, an I/O error) emitted an unhandled
+  // 'error' and exited the process. The headers are already sent by the time the stream fails, so
+  // the connection is destroyed; the requirement is only that the *server* survives. The
+  // permission change is applied to a real asset, and skipped when the test itself can still read
+  // it — that happens when the suite runs as root, where chmod cannot deny the server either.
+  const asset = path.join(root, 'public', 'style.css');
+  const originalMode = fs.statSync(asset).mode;
+  const unreadable = await startServer({});
+  try {
+    fs.chmodSync(asset, 0o000);
+    let denied = false;
+    try { fs.readFileSync(asset); } catch { denied = true; }
+    if (denied) {
+      // The connection is destroyed mid-response, so the client may legitimately see no bytes at
+      // all; what must not happen is the process exiting, which the follow-up request proves.
+      await rawRequest(unreadable.port, 'GET /style.css HTTP/1.1');
+      const alive = await fetch(`http://127.0.0.1:${unreadable.port}/`).catch(() => null);
+      assert.equal(alive?.status, 200, '静态资源读取失败不得让服务进程退出');
+    } else {
+      console.log('· 跳过静态资源读取失败断言：当前用户可读 chmod 000 的文件（可能以 root 运行）');
+    }
+  } finally {
+    fs.chmodSync(asset, originalMode);
+    unreadable.stop();
   }
 
   console.log('filing footer HTTP assertions passed');
