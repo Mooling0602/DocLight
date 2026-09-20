@@ -5,7 +5,18 @@ on:
     branches: [main, vibe]
   pull_request:
     branches: [main, vibe]
+  # Manual runs can be started from the Actions tab or with:
+  #   gh workflow run CI --ref <branch> -F run_test=true -F run_nix=false
   workflow_dispatch:
+    inputs:
+      run_test:
+        description: 运行 Node 测试与包内容检查
+        type: boolean
+        default: true
+      run_nix:
+        description: 运行 Nix flake check（较慢，约 5–10 分钟）
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,8 +26,11 @@ permissions:
   contents: read
 
 jobs:
+  # The input checks only apply to manual runs: on push / pull_request `inputs` is
+  # empty, so the first operand short-circuits and the job always runs.
   test:
     name: Test (Node 22)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_test }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -33,6 +47,7 @@ jobs:
 
   nix:
     name: Nix flake check
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_nix }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
