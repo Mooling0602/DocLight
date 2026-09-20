@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "noEmitOnError": true
   },
-  "include": ["src/tests/**/*.ts", "src/beian.ts"]
+  "include": ["src/tests/**/*.ts", "src/beian.ts", "src/markdown.ts", "src/store.ts", "src/vendor.d.ts"]
 }

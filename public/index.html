@@ -17,7 +17,7 @@
   el.dataset.themePref = pref;
 })();
 </script>
-<link rel="stylesheet" href="/style.css?v=13">
+<link rel="stylesheet" href="/style.css?v=14">
 </head>
 <body>
 
@@ -66,6 +66,10 @@
     </div>
 
     <div id="cluster-edit" class="cluster" hidden>
+      <div id="mode-toggle" class="seg" role="group" aria-label="编辑模式">
+        <button class="seg-btn is-on" data-mode="visual" aria-pressed="true" title="所见即所得编辑">可视化</button>
+        <button class="seg-btn" data-mode="markdown" aria-pressed="false" title="直接编辑 Markdown 源码">Markdown</button>
+      </div>
       <span id="dirty-pill" class="pill" hidden>● 未保存</span>
       <button id="btn-cancel" class="btn btn-ghost">取消</button>
       <button id="btn-save" class="btn btn-primary">保存 <kbd>⌘S</kbd></button>
@@ -157,7 +161,8 @@
       <section id="edit-wrap" class="container edit-wrap" hidden>
         <input id="title-input" type="text" placeholder="设置页面标题" maxlength="120" autocomplete="off">
         <div id="editor" contenteditable="true" spellcheck="false" aria-label="文档编辑区"></div>
-        <p class="edit-hint">Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版</p>
+        <textarea id="source-editor" class="source-editor" spellcheck="false" aria-label="Markdown 源码编辑区" placeholder="# 标题&#10;&#10;用 Markdown 写下正文……" hidden></textarea>
+        <p class="edit-hint" id="edit-hint">Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版</p>
       </section>
 
       <div id="empty-state" class="empty" hidden>
