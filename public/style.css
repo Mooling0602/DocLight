@@ -791,6 +791,22 @@ svg.sf-badge { color: var(--text-3); }
 }
 .sort-pick select:hover { border-color: var(--accent); }
 .sort-pick select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/*
+ * The same picker inside a modal needs its own box rules.
+ *
+ * Width: the generic `.modal select` rule sets `width: 100%`, and inside the inline-flex
+ * `.sort-pick` row that squeezed the "排序" label down to one character per line, so it
+ * wrapped into a vertical two-line label. Let the select take the leftover width instead
+ * of claiming all of it.
+ *
+ * Vertical alignment: `.modal input` / `.modal select` carry `margin-bottom: 16px` for
+ * rhythm. On a flex item that margin is part of the centring box, so with `align-items:
+ * center` the select border box sat 8px above the label centre line — the label looked
+ * low against the control. Moving the margin to the row keeps the rhythm identical while
+ * letting the control centre against the label.
+ */
+.modal .sort-pick { display: flex; margin-bottom: 16px; }
+.modal .sort-pick select { width: auto; flex: 1; min-width: 0; margin-bottom: 0; }
 .danger-text { color: var(--danger); }
 .danger-text:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .card .d { font-size: 13px; color: var(--text-2); }
