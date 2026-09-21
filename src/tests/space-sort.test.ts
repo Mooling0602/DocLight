@@ -162,6 +162,31 @@ async function main(): Promise<void> {
     '弹窗里的 .sort-pick 应改用 flex 布局，让标签与控件同行分配宽度',
   );
 
+  // Vertical alignment: `.modal select` carries `margin-bottom: 16px`, and on a flex item that
+  // margin joins the centring box — with `align-items: center` the control's border box sat ~8px
+  // above the label's centre line, so "排序" read as sitting low. The margin belongs on the row:
+  // the control then centres against the label and the 16px rhythm below is unchanged.
+  assert.match(modalPick, /margin-bottom:\s*16px/, '弹窗排序行应承接 16px 下边距，保持与其它弹窗控件的节奏一致');
+  assert.match(
+    modalPickSelect, /margin-bottom:\s*0/,
+    '弹窗里的 select 必须清除 margin-bottom，否则 flex 居中时控件会偏离标签中心线',
+  );
+  // The override relies on specificity (`.modal .sort-pick select` is 0,2,1 against `.modal
+  // select` at 0,1,1), not on source order — so also pin that the scoped selector really is the
+  // more specific one. A future edit that drops a class here would let the 16px margin return.
+  const idCount = (s: string) => (s.match(/#[\w-]+/g) || []).length;
+  const classCount = (s: string) =>
+    (s.match(/\.[\w-]+/g) || []).length +
+    (s.match(/\[[^\]]+\]/g) || []).length +
+    (s.match(/:(?!:)[\w-]+/g) || []).length;
+  const scopedSelector = '.modal .sort-pick select';
+  const genericSelector = '.modal select';
+  assert.ok(
+    idCount(scopedSelector) === idCount(genericSelector) &&
+      classCount(scopedSelector) > classCount(genericSelector),
+    '作用域选择器的特异性必须高于通用 .modal select，margin 归零才生效',
+  );
+
   const putsBefore = puts.length;
   settingsSelect.value = 'title_asc';
   click('#modal-root [data-x=ok]');
