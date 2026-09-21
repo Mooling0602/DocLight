@@ -171,20 +171,32 @@ async function main(): Promise<void> {
     modalPickSelect, /margin-bottom:\s*0/,
     '弹窗里的 select 必须清除 margin-bottom，否则 flex 居中时控件会偏离标签中心线',
   );
-  // The override relies on specificity (`.modal .sort-pick select` is 0,2,1 against `.modal
-  // select` at 0,1,1), not on source order — so also pin that the scoped selector really is the
-  // more specific one. A future edit that drops a class here would let the 16px margin return.
-  const idCount = (s: string) => (s.match(/#[\w-]+/g) || []).length;
-  const classCount = (s: string) =>
-    (s.match(/\.[\w-]+/g) || []).length +
-    (s.match(/\[[^\]]+\]/g) || []).length +
-    (s.match(/:(?!:)[\w-]+/g) || []).length;
-  const scopedSelector = '.modal .sort-pick select';
-  const genericSelector = '.modal select';
+  // The override wins by specificity, not source order. Assert that on the rules actually
+  // present in the stylesheet: comparing two hardcoded selector literals would be a tautology
+  // (a constant-versus-constant comparison cannot fail when the CSS changes), so it would keep
+  // passing even after the scoped rule was weakened.
+  const ruleSelector = (rule: string) => rule.slice(0, rule.indexOf('{')).trim();
+  // A selector list matches through each selector, so the strongest one decides the cascade.
+  // Per CSS, the middle bucket counts classes, attribute selectors and pseudo-classes alike.
+  const specificities = (selectorList: string) =>
+    selectorList.split(',').map((part) => {
+      const ids = (part.match(/#[\w-]+/g) || []).length;
+      const classes =
+        (part.match(/\.[\w-]+/g) || []).length +
+        (part.match(/\[[^\]]+\]/g) || []).length +
+        (part.match(/:(?!:)[\w-]+/g) || []).length;
+      const elements = (part.replace(/[#.][\w-]+/g, ' ').match(/(?:^|\s)[a-zA-Z][\w-]*/g) || []).length;
+      return [ids, classes, elements];
+    });
+  const outranks = (a: number[], b: number[]) =>
+    a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
+  const genericRule = css.match(/\.modal\s+select\s*\{[^}]*margin-bottom:\s*16px[^}]*\}/)?.[0] ?? '';
+  assert.ok(genericRule, 'style.css 应保留设置 16px 下边距的通用 .modal select 规则');
+  const scopedSpecs = specificities(ruleSelector(modalPickSelect));
   assert.ok(
-    idCount(scopedSelector) === idCount(genericSelector) &&
-      classCount(scopedSelector) > classCount(genericSelector),
-    '作用域选择器的特异性必须高于通用 .modal select，margin 归零才生效',
+    scopedSpecs.length === 1 &&
+      specificities(ruleSelector(genericRule)).every((generic) => outranks(scopedSpecs[0], generic)),
+    `作用域选择器 ${ruleSelector(modalPickSelect)} 必须比 ${ruleSelector(genericRule)} 更特异，margin 归零才生效`,
   );
 
   const putsBefore = puts.length;
