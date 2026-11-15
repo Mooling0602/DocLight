@@ -147,6 +147,58 @@ async function main(): Promise<void> {
   assert.deepEqual([...settingsSelect.options].map(o => o.value), [...SORT_KEYS], '设置里的选项应与共享键列表一致');
   assert.equal(settingsSelect.value, DEFAULT_SORT, '设置应显示已存储的排序');
 
+  // Layout regression: the picker reuses the index page's `.sort-pick`, but inside a modal the
+  // generic `.modal select { width: 100% }` rule made the select claim the whole row and squeezed
+  // the "排序" label to one character per line — a vertical two-line label. The modal rules must
+  // neutralise that width so the label stays on one line beside the control.
+  const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');
+  const modalPick = css.match(/\.modal\s+\.sort-pick\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(modalPick, 'style.css 应为弹窗里的排序控件提供作用域限定的 .modal .sort-pick 规则');
+  const modalPickSelect = css.match(/\.modal\s+\.sort-pick\s+select\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(modalPickSelect, 'style.css 应限定 .modal .sort-pick select 的宽度');
+  assert.match(modalPickSelect, /width:\s*auto/, '弹窗里的 select 不应继承 width:100%，否则「排序」标签会被挤成竖排');
+  assert.ok(
+    /display:\s*flex/.test(modalPick) && !/inline-flex/.test(modalPick),
+    '弹窗里的 .sort-pick 应改用 flex 布局，让标签与控件同行分配宽度',
+  );
+
+  // Vertical alignment: `.modal select` carries `margin-bottom: 16px`, and on a flex item that
+  // margin joins the centring box — with `align-items: center` the control's border box sat ~8px
+  // above the label's centre line, so "排序" read as sitting low. The margin belongs on the row:
+  // the control then centres against the label and the 16px rhythm below is unchanged.
+  assert.match(modalPick, /margin-bottom:\s*16px/, '弹窗排序行应承接 16px 下边距，保持与其它弹窗控件的节奏一致');
+  assert.match(
+    modalPickSelect, /margin-bottom:\s*0/,
+    '弹窗里的 select 必须清除 margin-bottom，否则 flex 居中时控件会偏离标签中心线',
+  );
+  // The override wins by specificity, not source order. Assert that on the rules actually
+  // present in the stylesheet: comparing two hardcoded selector literals would be a tautology
+  // (a constant-versus-constant comparison cannot fail when the CSS changes), so it would keep
+  // passing even after the scoped rule was weakened.
+  const ruleSelector = (rule: string) => rule.slice(0, rule.indexOf('{')).trim();
+  // A selector list matches through each selector, so the strongest one decides the cascade.
+  // Per CSS, the middle bucket counts classes, attribute selectors and pseudo-classes alike.
+  const specificities = (selectorList: string) =>
+    selectorList.split(',').map((part) => {
+      const ids = (part.match(/#[\w-]+/g) || []).length;
+      const classes =
+        (part.match(/\.[\w-]+/g) || []).length +
+        (part.match(/\[[^\]]+\]/g) || []).length +
+        (part.match(/:(?!:)[\w-]+/g) || []).length;
+      const elements = (part.replace(/[#.][\w-]+/g, ' ').match(/(?:^|\s)[a-zA-Z][\w-]*/g) || []).length;
+      return [ids, classes, elements];
+    });
+  const outranks = (a: number[], b: number[]) =>
+    a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
+  const genericRule = css.match(/\.modal\s+select\s*\{[^}]*margin-bottom:\s*16px[^}]*\}/)?.[0] ?? '';
+  assert.ok(genericRule, 'style.css 应保留设置 16px 下边距的通用 .modal select 规则');
+  const scopedSpecs = specificities(ruleSelector(modalPickSelect));
+  assert.ok(
+    scopedSpecs.length === 1 &&
+      specificities(ruleSelector(genericRule)).every((generic) => outranks(scopedSpecs[0], generic)),
+    `作用域选择器 ${ruleSelector(modalPickSelect)} 必须比 ${ruleSelector(genericRule)} 更特异，margin 归零才生效`,
+  );
+
   const putsBefore = puts.length;
   settingsSelect.value = 'title_asc';
   click('#modal-root [data-x=ok]');
