@@ -47,7 +47,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore, isSortKey, SORT_KEYS } from './store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug } from './store.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space, WriteOptions, SortKey } from './store.js';
 
@@ -308,12 +308,41 @@ function readDb(): Database {
   // the next ordinary save persists that, silently reassigning pages. It is also why such a request
   // would 404 on a space move — the target space no longer exists in memory.
   if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
-  return readStore(DATA_DIR);
+  const db = readStore(DATA_DIR);
+  // The built-in marker is trusted only when constructed here, not when read from disk.
+  for (const space of db.spaces) delete space.builtIn;
+  // Read the shipped source on every request so release updates are immediately reflected.
+  const template = readStore(TEMPLATE_DIR);
+  const source = template.spaces.find(s => s.slug === 'default');
+  if (!source) throw new Error('内置空间模板缺失或无效，请重新安装完整的 DocLight 发布文件');
+  const sourcePages = template.pages.filter(p => p.space === source.slug);
+  const slugs = new Set(sourcePages.map(p => p.slug));
+  const virtualSlug = (slug: string) => `${BUILT_IN_SLUG}-${slug}`;
+  const virtual: Space = {
+    ...source, slug: BUILT_IN_SLUG, builtIn: true, locked: true,
+    home: source.home && slugs.has(source.home) ? virtualSlug(source.home) : null,
+  };
+  const pages = sourcePages.map(p => ({
+    ...p, slug: virtualSlug(p.slug), space: BUILT_IN_SLUG,
+    parent: p.parent && slugs.has(p.parent) ? virtualSlug(p.parent) : null,
+  }));
+  // Never shadow a pre-existing hand-edited or migrated space with the reserved identity.
+  if (db.spaces.some(s => s.slug === BUILT_IN_SLUG)) {
+    throw new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`);
+  }
+  db.spaces.push(virtual);
+  db.pages.push(...pages);
+  return db;
 }
 /** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
  *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
 function writeDb(db: Database, removed: Iterable<string> = [], options: WriteOptions = {}): void {
-  writeStore(DATA_DIR, db, removed, { preserveLocked: !options.onlyCreate, ...options });
+  const ordinary = options.onlyCreate ? db : {
+    ...db,
+    spaces: db.spaces.filter(s => !s.builtIn),
+    pages: db.pages.filter(p => p.space !== BUILT_IN_SLUG || !isBuiltInPageSlug(p.slug)),
+  };
+  writeStore(DATA_DIR, ordinary, removed, { preserveLocked: !options.onlyCreate, ...options });
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -604,7 +633,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     return json(res, 401, { error: '请先登录后再修改', needAuth: true });
   }
   const db = readDb();
-  const isLocked = (slug: string) => db.spaces.some(s => s.slug === slug && s.locked === true);
+  const isLocked = (slug: string) => slug === BUILT_IN_SLUG || db.spaces.some(s => s.slug === slug && s.locked === true);
   const locked = () => json(res, 423, { error: '空间已锁定' });
 
   /* Full tree: spaces + page metadata */
@@ -634,6 +663,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       const slug = decodeURIComponent(parts[2]);
       const space = db.spaces.find(s => s.slug === slug);
       if (!space) return json(res, 404, { error: '空间不存在' });
+      if (slug === BUILT_IN_SLUG) return locked();
       if (typeof body.locked !== 'boolean') return json(res, 400, { error: 'locked 参数必须为布尔值' });
       if (!body.locked) {
         if (rateLimited(req)) return json(res, 429, { error: '尝试过于频繁，请两分钟后再试' });
@@ -654,7 +684,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         space.locked = true;
       }
       space.updatedAt = Date.now();
-      writeSpaces(DATA_DIR, db.spaces);
+      writeSpaces(DATA_DIR, db.spaces.filter(s => !s.builtIn));
       return json(res, 200, space);
     }
     if (parts.length === 3) {
@@ -712,7 +742,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         const spaceSlug = db.spaces[idx].slug;
         const removedPages = db.pages.filter(p => p.space === spaceSlug).map(p => p.slug);
         if (db.pages.some(p => p.parent && removedPages.includes(p.parent) && isLocked(p.space)) ||
-            db.spaces.some(s => s.locked === true && s.home && removedPages.includes(s.home))) return locked();
+            db.spaces.some(s => isLocked(s.slug) && s.home && removedPages.includes(s.home))) return locked();
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
         writeDb(db, removedPages);
@@ -735,15 +765,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     }
     if (req.method === 'PUT') {
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
-      if (isLocked(db.pages[idx].space)) return locked();
+      if (isBuiltInPageSlug(slug) || isLocked(db.pages[idx].space)) return locked();
       if (typeof body.space === 'string' && isLocked(body.space)) return locked();
       if (typeof body.space === 'string' && body.space !== db.pages[idx].space &&
           (db.pages.some(p => p.parent === slug && isLocked(p.space)) ||
-           db.spaces.some(s => s.home === slug && s.locked === true))) return locked();
+           db.spaces.some(s => s.home === slug && isLocked(s.slug)))) return locked();
       // A rename rewrites direct children and home pointers, even in inconsistent cross-space trees.
       if (body.slug !== undefined && String(body.slug || '').trim() !== slug &&
           (db.pages.some(p => p.parent === slug && isLocked(p.space)) ||
-           db.spaces.some(s => s.home === slug && s.locked === true))) return locked();
+           db.spaces.some(s => s.home === slug && isLocked(s.slug)))) return locked();
       let renamed = false;
       if (body.slug !== undefined) {
         const ns = String(body.slug || '').trim();
@@ -797,7 +827,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
       const doomed = [slug, ...descendantsOf(db.pages, slug)];
       if (db.pages.some(p => doomed.includes(p.slug) && isLocked(p.space)) ||
-          db.spaces.some(s => s.locked === true && s.home && doomed.includes(s.home))) return locked();
+          db.spaces.some(s => isLocked(s.slug) && s.home && doomed.includes(s.home))) return locked();
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
       // Any space whose home was among the removed pages (the page itself or a descendant)
       // would otherwise keep a pointer to a slug that no longer resolves.

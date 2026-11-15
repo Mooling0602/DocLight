@@ -18,6 +18,7 @@ import * as YAML from 'yaml';
 
 const root = path.resolve(__dirname, '../..');
 const serverEntry = path.join(root, 'dist', 'server.js');
+const builtInSpace = 'doclight-default';
 
 interface StartedServer {
   port: number;
@@ -318,7 +319,7 @@ async function main(): Promise<void> {
     const idx = JSON.parse(fs.readFileSync(path.join(emptyIdxDir, 'spaces.json'), 'utf8'));
     assert.deepEqual(idx.spaces.map((s: any) => s.slug), ['default'], '索引应写入迁移出的空间');
     const tree = await (await fetch(`http://127.0.0.1:${emptyIdxBoot.port}/api/tree`)).json();
-    assert.equal(tree.pages.length, 2, '站点不应显示为空');
+    assert.equal(tree.pages.filter((p: any) => p.space !== builtInSpace).length, 2, '站点不应显示为空');
   } finally {
     emptyIdxBoot.stop();
     fs.rmSync(emptyIdxDir, { recursive: true, force: true });
@@ -487,7 +488,7 @@ async function main(): Promise<void> {
     // Empty the index without restarting — the running server must notice.
     fs.writeFileSync(path.join(liveIdxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
     const tree = await (await fetch(`http://127.0.0.1:${liveIdxBoot.port}/api/tree`)).json();
-    assert.deepEqual(tree.spaces.map((s: any) => s.slug), ['myspace'], '运行期空索引应按页面重建');
+    assert.deepEqual(tree.spaces.filter((s: any) => s.slug !== builtInSpace).map((s: any) => s.slug), ['myspace'], '运行期空索引应按页面重建');
     assert.equal(
       tree.pages.find((p: any) => p.slug === 'mine')?.space,
       'myspace',

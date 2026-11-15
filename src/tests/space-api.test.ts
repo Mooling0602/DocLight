@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     /* ---- Seed data ---- */
     const tree = await readTree();
     assert.equal(tree.spaces[0].slug, 'default', 'seed space should be default');
-    assert.ok(tree.pages.every((p: any) => p.space === 'default'), 'seed pages should belong to default');
+    assert.ok(tree.pages.filter((p: any) => p.space !== 'doclight-default').every((p: any) => p.space === 'default'), 'seed pages should belong to default');
 
     /* ---- Validation rejects without touching anything ---- */
     const reserved = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ slug: 'spaces' }) });
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     assert.equal(partiallyBad.status, 400, 'invalid title should be rejected');
     const afterReject = await readTree();
     assert.equal(afterReject.spaces[0].slug, 'default', 'slug must stay untouched when another field is invalid');
-    assert.ok(afterReject.pages.every((p: any) => p.space === 'default'), 'page references must stay untouched');
+    assert.ok(afterReject.pages.filter((p: any) => p.space !== 'doclight-default').every((p: any) => p.space === 'default'), 'page references must stay untouched');
     assert.ok(readDisk().pages.every((p: any) => p.space === 'default'), 'disk must match the untouched tree');
 
     /* ---- Valid updates apply together and carry the references ---- */
@@ -144,7 +144,7 @@ async function main(): Promise<void> {
     assert.equal(renamed.body.slug, 'renamed_space', 'response should carry the new slug');
     assert.equal(renamed.body.title, '改名了', 'response should carry the new title');
     const afterRename = await readTree();
-    assert.ok(afterRename.pages.every((p: any) => p.space === 'renamed_space'), 'pages must re-point to the new space');
+    assert.ok(afterRename.pages.filter((p: any) => p.space !== 'doclight-default').every((p: any) => p.space === 'renamed_space'), 'pages must re-point to the new space');
     assert.ok(readDisk().pages.every((p: any) => p.space === 'renamed_space'), 'disk must match the renamed tree');
 
     /* ---- The old slug stops resolving ---- */

@@ -16,6 +16,7 @@ interface Space {
   home: string | null;
   sort?: SortKey;
   locked?: boolean;
+  builtIn?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -395,6 +396,7 @@ function closeMenus(except) {
 }
 
 function openRowMenu(btn, kind, obj) {
+  if (kind === 'space' && obj.builtIn) return;
   const r = btn.getBoundingClientRect();
   rowMenu.dataset.kind = kind;
   rowMenu.dataset.slug = obj.slug;
@@ -650,7 +652,7 @@ function renderSidebar(filter = '') {
     t.className = 'space-title';
     t.href = '/' + encodeURIComponent(space.slug);
     t.dataset.nav = '';
-    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${space.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${tops.length} 页</span>`;
+    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${space.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : space.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${tops.length} 页</span>`;
 
     const actions = document.createElement('span');
     actions.className = 'row-actions';
@@ -671,7 +673,7 @@ function renderSidebar(filter = '') {
       else openRowMenu(moreBtn, 'space', space);
     });
     if (!space.locked) actions.append(addBtn);
-    actions.append(moreBtn);
+    if (!space.builtIn) actions.append(moreBtn);
 
     head.append(caret, t, actions);
     el.list.appendChild(head);
@@ -877,7 +879,8 @@ function decorate(container) {
 }
 
 function renderArticle(page) {
-  const locked = !!spaceBySlug(page.space)?.locked;
+  const space = spaceBySlug(page.space);
+  const locked = !!space?.locked;
   const chain = chainOf(page.slug);
   const crumbsHtml = chain.map((n, i) =>
     n === chain[chain.length - 1]
@@ -891,7 +894,7 @@ function renderArticle(page) {
        <span>更新于 ${relTime(page.updatedAt)}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
-       ${locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 空间已锁定，只读</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
+       ${locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
      </div>` + renderMarkdown(page.content);
 
   decorate(el.article);
@@ -1750,7 +1753,7 @@ function renderHome() {
     return `<a class="card" data-nav href="/${encodeURIComponent(sp.slug)}">
               <span class="t">${esc(sp.title)}</span>
               ${sp.desc ? `<span class="d">${esc(sp.desc)}</span>` : ''}
-              <span class="s">${sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}更新于 ${relTime(sp.updatedAt)}</span>
+              <span class="s">${sp.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}更新于 ${relTime(sp.updatedAt)}</span>
             </a>`;
   }).join('');
   el.article.innerHTML =
@@ -1789,7 +1792,7 @@ function renderSpace(space) {
 
   el.article.innerHTML =
     `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
-       ${space.locked ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 空间已锁定，只读</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
+       ${space.locked ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
      </div>
      <div class="space-head">
        <div>

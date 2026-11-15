@@ -29,6 +29,8 @@ export interface Space {
   sort?: SortKey;
   /** Only the locked state is persisted. */
   locked?: boolean;
+  /** Source-owned virtual space, never persisted. */
+  builtIn?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -52,6 +54,8 @@ export interface Database {
 
 /** Slugs double as file names, so they must be filesystem-safe. Mirrors the server's rule. */
 const SLUG_RE = /^[a-z0-9_]{1,80}$/;
+export const BUILT_IN_SLUG = 'doclight-default';
+export const isBuiltInPageSlug = (slug: string): boolean => slug.startsWith(`${BUILT_IN_SLUG}-`);
 const FRONT_MATTER_FENCE = '---';
 
 const spacesFile = (dataDir: string) => path.join(dataDir, 'spaces.json');

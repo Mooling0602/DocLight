@@ -26,6 +26,7 @@ const password = 'local-test-password';
 const salt = '00112233445566778899aabbccddeeff';
 const iters = 100;
 const page = { slug: 'readable', space: 'default', parent: null, title: '可阅读页面', createdAt: 1, updatedAt: 1 };
+const builtInPage = { slug: 'built-in-page', space: 'doclight-default', parent: null, title: '内置页面', createdAt: 1, updatedAt: 1 };
 let locked = false;
 let challengeCalls = 0;
 let nonce = '';
@@ -42,7 +43,10 @@ window.fetch = async (input: string, opts: any = {}) => {
     return result({ nonce, salt, iters });
   }
   if (url.includes('/api/tree')) {
-    return result({ spaces: [{ slug: 'default', title: '默认空间', desc: '', home: null, createdAt: 1, updatedAt: 1, locked }], pages: [page] });
+    return result({ spaces: [
+      { slug: 'default', title: '默认空间', desc: '', home: null, createdAt: 1, updatedAt: 1, locked },
+      { slug: 'doclight-default', title: '内置空间', desc: '', home: null, createdAt: 1, updatedAt: 1, locked: true, builtIn: true },
+    ], pages: [page, builtInPage] });
   }
   if (url.includes('/api/spaces/default/lock') && method === 'POST') {
     if (!body.locked) {
@@ -55,6 +59,7 @@ window.fetch = async (input: string, opts: any = {}) => {
     return result({ ok: true, locked });
   }
   if (url.includes('/api/pages/readable')) return result({ ...page, content: '<p>仍然可以阅读正文</p>' });
+  if (url.includes('/api/pages/built-in-page')) return result({ ...builtInPage, content: '内置正文' });
   return result({});
 };
 
@@ -120,6 +125,24 @@ async function main(): Promise<void> {
     assert.notEqual(unlockCalls[0].body.nonce, unlockCalls[1].body.nonce, '每次验证使用不同 nonce');
     assert.ok(document.querySelector('.space-row [title="在此空间新建页面"]'), '解锁后恢复新建入口');
     assert.equal($('#btn-edit').hidden, false, '解锁后恢复编辑入口');
+    click('a.brand');
+    await wait(100);
+    assert.match($('a.card[href="/doclight-default"] .lock-badge').textContent || '', /永久只读/, '空间总览显示永久只读');
+    const builtInRow = $('a.space-title[href="/doclight-default"]').closest('.space-row')!;
+    assert.match(builtInRow.textContent || '', /永久只读/, '内置空间侧栏显示永久只读');
+    assert.equal(builtInRow.querySelector('[title="空间管理"]'), null, '内置空间没有管理菜单');
+    assert.equal(builtInRow.querySelector('[title="在此空间新建页面"]'), null);
+    click('a.space-title[href="/doclight-default"]');
+    await wait(100);
+    assert.match($('#article .lock-badge').textContent || '', /永久只读/, '空间页显示永久只读');
+    assert.equal($<HTMLElement>('.space-acts').hidden, true);
+    click('a.card[data-nav]');
+    await wait(100);
+    assert.match($('#article .lock-badge').textContent || '', /永久只读/, '页面显示永久只读');
+    assert.match($('#article').textContent || '', /内置正文/);
+    assert.equal($('#btn-edit').hidden, true);
+    assert.equal($('#btn-more').hidden, true);
+    assert.equal(calls.filter(c => c.url.includes('/api/spaces/doclight-default/lock')).length, 0);
     console.log('space lock UI assertions passed');
   } finally { dom.window.close(); }
 }
