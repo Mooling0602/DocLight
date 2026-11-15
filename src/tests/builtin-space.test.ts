@@ -79,6 +79,17 @@ async function main(): Promise<void> {
     fs.cpSync(path.join(root, 'dist'), path.join(release, 'dist'), { recursive: true });
     fs.cpSync(path.join(root, 'template'), template, { recursive: true });
     fs.symlinkSync(path.join(root, 'node_modules'), path.join(release, 'node_modules'), 'dir');
+    // A fresh installation has exactly one source-owned space, not a copied writable duplicate.
+    await start();
+    const fresh = await api('tree', 'GET', undefined, false);
+    assert.equal(fresh.status, 200);
+    assert.deepEqual(fresh.body.spaces.map((s: any) => s.slug), [builtIn]);
+    assert.ok(fresh.body.pages.length > 0);
+    assert.ok(fresh.body.pages.every((p: any) => p.space === builtIn));
+    assertVirtualNotPersisted();
+    assert.equal(fs.readdirSync(pagesDir).length, 0);
+    await stop();
+    fs.rmSync(dataDir, { recursive: true, force: true });
     fs.mkdirSync(pagesDir, { recursive: true });
     const originalIndex = JSON.stringify({ version: 4, spaces: [{ slug: 'default', title: 'Old user space', desc: 'Keep me', home: 'welcome', createdAt: 1, updatedAt: 2 }] }, null, 2) + '\n';
     const oldBytes = '---\ntitle: My old welcome\nspace: default\nparent: null\ncreatedAt: 1\nupdatedAt: 2\n---\n\nMy edited content.\n';
@@ -159,6 +170,32 @@ async function main(): Promise<void> {
     assert.equal(fs.readFileSync(path.join(pagesDir, 'welcome.md'), 'utf8'), oldBytes);
     assert.ok(!fs.existsSync(path.join(pagesDir, 'guide.md')));
 
+    // A missing template must not make user-owned content unavailable or unwritable.
+    const savedTemplate = template + '.saved';
+    fs.renameSync(template, savedTemplate);
+    try {
+      const withoutTemplate = await api('tree');
+      assert.equal(withoutTemplate.status, 200);
+      assert.ok(withoutTemplate.body.spaces.some((s: any) => s.slug === 'default'));
+      assert.ok(!withoutTemplate.body.spaces.some((s: any) => s.slug === builtIn));
+      assert.equal((await api('pages/welcome')).body.content, 'My edited content.');
+      assert.equal((await api(`pages/${outside}`, 'PUT', { title: 'Still writable' })).status, 200);
+    } finally { fs.renameSync(savedTemplate, template); }
+    assert.ok((await api('tree')).body.spaces.some((s: any) => s.slug === builtIn));
+    const templateIndex = path.join(template, 'spaces.json');
+    const indexBytes = fs.readFileSync(templateIndex, 'utf8');
+    fs.writeFileSync(templateIndex, '{invalid');
+    try {
+      const brokenTemplate = await api('tree');
+      assert.equal(brokenTemplate.status, 200);
+      assert.ok(brokenTemplate.body.spaces.some((s: any) => s.slug === 'default'));
+      assert.ok(!brokenTemplate.body.spaces.some((s: any) => s.slug === builtIn));
+    } finally { fs.writeFileSync(templateIndex, indexBytes); }
+    assert.ok((await api('tree')).body.spaces.some((s: any) => s.slug === builtIn));
+    const livePage = sourcePages[0];
+    fs.appendFileSync(path.join(template, 'pages', `${livePage.slug}.md`), '\nLive template update.\n');
+    assert.match((await api(`pages/${builtIn}-${livePage.slug}`)).body.content, /Live template update\./, 'template cache must invalidate on file changes');
+
     // Simulate installing a new release with the same data, without mutating the actual checkout.
     await stop();
     const changed = sourcePages[0];
@@ -187,7 +224,9 @@ async function main(): Promise<void> {
     // A manually introduced reserved space must never be silently hidden or overwritten.
     const conflictingIndex = JSON.stringify({ version: 4, spaces: [{ slug: builtIn, title: 'User data', desc: '', home: null, createdAt: 1, updatedAt: 1 }] }, null, 2) + '\n';
     fs.writeFileSync(path.join(dataDir, 'spaces.json'), conflictingIndex);
-    assert.equal((await api('tree')).status, 500);
+    const conflict = await api('tree');
+    assert.equal(conflict.status, 503);
+    assert.match(conflict.body.error, /请先备份/);
     assert.equal(fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8'), conflictingIndex);
     console.log('built-in space integration assertions passed');
   } finally {

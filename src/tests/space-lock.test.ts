@@ -66,6 +66,8 @@ async function proof(pass = password): Promise<{ nonce: string; proof: string }>
 
 async function main(): Promise<void> {
   try {
+    // Seed once so the restart below preserves the data and lock state under test.
+    fs.cpSync(path.join(root, 'template'), dataDir, { recursive: true });
     await start();
     const state = (await api('auth/state')).body;
     const ks = pbkdf2Sync(password, Buffer.from(state.salt, 'hex'), state.iters, 32, 'sha256').toString('hex');

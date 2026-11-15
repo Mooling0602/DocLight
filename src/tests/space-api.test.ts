@@ -27,6 +27,8 @@ interface StartedServer {
 /** Boot dist/server.js on a scraped port and resolve once it is listening. */
 function startServer(): Promise<StartedServer> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-space-test-'));
+  // This suite exercises the ordinary template space, not fresh-install behavior.
+  fs.cpSync(path.join(root, 'template'), dataDir, { recursive: true });
   // Keep the child isolated from any configuration in the developer's environment or a
   // doclight.toml in the repository root: an inherited port or strict mode would change
   // which port the server picks and break the scraped-port assumptions below.

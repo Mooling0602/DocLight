@@ -47,7 +47,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, seedFromTemplate, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug } from './store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug } from './store.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space, WriteOptions, SortKey } from './store.js';
 
@@ -103,20 +103,15 @@ const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- Data layer */
 
-/** The shipped sample site, laid out like the store (template/spaces.json + template/pages/*.md). */
-function seedDb(): Database {
-  const seeded = seedFromTemplate(TEMPLATE_DIR);
-  if (!seeded) {
-    console.warn(`· 未找到示例数据 ${TEMPLATE_DIR}，将以空站点启动`);
-    return { version: 4, spaces: [], pages: [] };
-  }
-  return seeded;
+/** New installations start with no user-owned content; the built-in space is a separate view. */
+function emptyDb(): Database {
+  return { version: 4, spaces: [], pages: [] };
 }
 
 /**
  * Bring the data directory up to the Markdown-file layout on startup:
  *   1. a legacy `pages.json` is split into `spaces.json` + `pages/*.md` (HTML bodies converted);
- *   2. otherwise, a fresh store is seeded from the shipped sample.
+ *   2. otherwise, a fresh empty user store is created.
  */
 function ensureData(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -182,10 +177,9 @@ function ensureData(): void {
     return;
   }
 
-  // `onlyCreate` for the same reason as migration: seeding establishes the store, so it must
-  // never overwrite a page file that is already there.
-  writeDb(seedDb(), [], { onlyCreate: true });
-  console.log(`· 已从示例数据初始化 → ${path.join(DATA_DIR, 'pages')}`);
+  // The template is served virtually, not copied into a duplicate writable space.
+  writeDb(emptyDb(), [], { onlyCreate: true });
+  console.log(`· 已初始化空用户数据目录 → ${DATA_DIR}`);
 }
 
 /**
@@ -271,8 +265,8 @@ function migrateLegacyFile(): void {
       writeSpaces(DATA_DIR, salvage.spaces);
       return;
     }
-    console.warn('· 旧数据格式无法识别，已重置为初始示例数据');
-    writeDb(seedDb(), [], { onlyCreate: true });
+    console.warn('· 旧数据格式无法识别，已建立空用户数据目录');
+    writeDb(emptyDb(), [], { onlyCreate: true });
     return;
   }
 
@@ -301,6 +295,30 @@ function migrateLegacyFile(): void {
   );
 }
 
+// Cache parsed template contents while detecting changes to the index or any Markdown file.
+let templateCache: { signature: string; db: Database } | null = null;
+let templateUnavailable = false;
+function readBuiltInTemplate(): Database | null {
+  try {
+    const dir = path.join(TEMPLATE_DIR, 'pages');
+    const files = [path.join(TEMPLATE_DIR, 'spaces.json'), ...fs.readdirSync(dir)
+      .filter(name => name.endsWith('.md')).sort().map(name => path.join(dir, name))];
+    const signature = JSON.stringify(files.map(file => {
+      const stat = fs.statSync(file, { bigint: true });
+      return [file, stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString()];
+    }));
+    if (templateCache?.signature !== signature) templateCache = { signature, db: readStore(TEMPLATE_DIR) };
+    if (!templateCache.db.spaces.some(s => s.slug === 'default')) throw new Error('invalid template index');
+    templateUnavailable = false;
+    return templateCache.db;
+  } catch {
+    templateCache = null;
+    if (!templateUnavailable) console.warn('· 内置空间模板缺失或无效，暂不显示内置空间；用户数据仍可访问');
+    templateUnavailable = true;
+    return null;
+  }
+}
+
 function readDb(): Database {
   // Same condition as startup: an index that exists but names no spaces cannot classify the pages,
   // and `storeExists` alone accepts it. Without this, an index emptied while the server is running
@@ -311,10 +329,9 @@ function readDb(): Database {
   const db = readStore(DATA_DIR);
   // The built-in marker is trusted only when constructed here, not when read from disk.
   for (const space of db.spaces) delete space.builtIn;
-  // Read the shipped source on every request so release updates are immediately reflected.
-  const template = readStore(TEMPLATE_DIR);
-  const source = template.spaces.find(s => s.slug === 'default');
-  if (!source) throw new Error('内置空间模板缺失或无效，请重新安装完整的 DocLight 发布文件');
+  const template = readBuiltInTemplate();
+  const source = template?.spaces.find(s => s.slug === 'default');
+  if (!template || !source) return db;
   const sourcePages = template.pages.filter(p => p.space === source.slug);
   const slugs = new Set(sourcePages.map(p => p.slug));
   const virtualSlug = (slug: string) => `${BUILT_IN_SLUG}-${slug}`;
@@ -328,7 +345,7 @@ function readDb(): Database {
   }));
   // Never shadow a pre-existing hand-edited or migrated space with the reserved identity.
   if (db.spaces.some(s => s.slug === BUILT_IN_SLUG)) {
-    throw new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`);
+    throw Object.assign(new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`), { code: 503 });
   }
   db.spaces.push(virtual);
   db.pages.push(...pages);
@@ -371,7 +388,7 @@ function randomToken(len = 7): string {
   return t;
 }
 const SLUG_RE = /^[a-z0-9_]{1,80}$/;
-const RESERVED_SLUGS = new Set(['spaces']); // Reserved keyword aliases that pages must not take over.
+const RESERVED_SLUGS = new Set(['spaces', BUILT_IN_SLUG]); // Reserved routes and source-owned identities.
 
 function slugify(title: unknown): string {
   // Yuque-style slugs: lowercase letters, digits and underscores; non-English titles fall back to a random token
@@ -672,6 +689,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
         nonces.delete(nonce);
         const auth = ensureAuthRecord();
+        if (!auth.user) return json(res, 400, { error: '请先完成站长账号初始化，再解锁空间' });
         if (!auth.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
         const proof = String(body.proof || '');
         const expected = hmacStored(auth.stored, nonce);

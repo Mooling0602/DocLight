@@ -921,7 +921,7 @@ function renderArticle(page) {
   el.empty.hidden = true;
   el.article.hidden = false;
   el.clusterEdit.hidden = true;
-  el.clusterView.hidden = false;
+  el.clusterView.hidden = locked;
   el.dirtyPill.hidden = true;
   el.editor.innerHTML = '';
 
@@ -992,6 +992,20 @@ function setEditMode(mode: EditMode, focus = true) {
   renderModeToggle(mode);
 }
 
+// Keep lock status visible in the editor without rebuilding either draft surface.
+function renderEditorLockStatus() {
+  let badge = el.clusterEdit.querySelector('.editor-lock-badge') as HTMLElement | null;
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'lock-badge editor-lock-badge';
+    badge.setAttribute('role', 'status');
+    el.clusterEdit.insertBefore(badge, el.dirtyPill);
+  }
+  const space = S.page && spaceBySlug(S.page.space);
+  badge.hidden = !space?.locked;
+  badge.textContent = space?.builtIn ? '🔒 内置空间，永久只读' : '🔒 空间已锁定，只读；草稿保留，解锁后可保存';
+}
+
 function enterEdit(focus = true) {
   if (!S.page) return;
   if (spaceBySlug(S.page.space)?.locked) { toast('空间已锁定，请先解锁'); return; }
@@ -1002,6 +1016,7 @@ function enterEdit(focus = true) {
   el.empty.hidden = true;
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = false;
+  renderEditorLockStatus();
   el.editWrap.hidden = false;
   el.titleInput.value = S.page.title;
 
@@ -1311,6 +1326,7 @@ async function lockSpaceFlow(space: Space) {
     if (current) current.locked = locked;
     if (S.space?.slug === space.slug) S.space.locked = locked;
     if (!el.editWrap.hidden) {
+      renderEditorLockStatus();
       renderSidebar(el.search.value);
       if (S.page?.space === space.slug) toast(locked ? '空间已锁定，编辑内容仍保留；解锁后才能保存' : '空间已解锁，可以继续保存', 4000);
       else toast(locked ? '空间已锁定' : '空间已解锁');
