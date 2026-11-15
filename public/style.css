@@ -106,6 +106,7 @@ button { font: inherit; cursor: pointer; }
 
 /* Critical fix: the hidden attribute must beat any author display rule */
 [hidden] { display: none !important; }
+.lock-badge { color: var(--text-2); font-size: .82em; font-weight: 600; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }

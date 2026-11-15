@@ -313,7 +313,7 @@ function readDb(): Database {
 /** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
  *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
 function writeDb(db: Database, removed: Iterable<string> = [], options: WriteOptions = {}): void {
-  writeStore(DATA_DIR, db, removed, options);
+  writeStore(DATA_DIR, db, removed, { preserveLocked: !options.onlyCreate, ...options });
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -596,7 +596,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     if (!sess) return json(res, 401, { error: '请先登录后再修改', needAuth: true });
   }
 
+  // Read bodies before taking the snapshot: no await may separate a write's read and commit.
+  const body = (key === 'pages' || key === 'spaces') && (req.method === 'POST' || req.method === 'PUT')
+    ? await readBody(req) : {};
+  // A session may have been revoked while a slow request body was arriving.
+  if ((key === 'pages' || key === 'spaces') && req.method !== 'GET' && !getSession(req)) {
+    return json(res, 401, { error: '请先登录后再修改', needAuth: true });
+  }
   const db = readDb();
+  const isLocked = (slug: string) => db.spaces.some(s => s.slug === slug && s.locked === true);
+  const locked = () => json(res, 423, { error: '空间已锁定' });
 
   /* Full tree: spaces + page metadata */
   if (req.method === 'GET' && key === 'tree' && parts.length === 2) {
@@ -609,7 +618,6 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
   /* ---- Spaces ---- */
   if (key === 'spaces') {
     if (req.method === 'POST' && parts.length === 2) {
-      const body = await readBody(req);
       const title = String(body.title || '').trim().slice(0, 120);
       if (!title) return json(res, 400, { error: '请提供空间名称' });
       const desc = String(body.desc || '').trim().slice(0, 200);
@@ -622,12 +630,39 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       writeDb(db);
       return json(res, 201, space);
     }
+    if (req.method === 'POST' && parts.length === 4 && parts[3] === 'lock') {
+      const slug = decodeURIComponent(parts[2]);
+      const space = db.spaces.find(s => s.slug === slug);
+      if (!space) return json(res, 404, { error: '空间不存在' });
+      if (typeof body.locked !== 'boolean') return json(res, 400, { error: 'locked 参数必须为布尔值' });
+      if (!body.locked) {
+        if (rateLimited(req)) return json(res, 429, { error: '尝试过于频繁，请两分钟后再试' });
+        const nonce = String(body.nonce || '');
+        const exp = nonces.get(nonce);
+        if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
+        nonces.delete(nonce);
+        const auth = ensureAuthRecord();
+        if (!auth.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
+        const proof = String(body.proof || '');
+        const expected = hmacStored(auth.stored, nonce);
+        const ok = /^[a-f0-9]{64}$/.test(proof) &&
+          crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
+        if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
+        failLog.delete(ipOf(req));
+        delete space.locked;
+      } else {
+        space.locked = true;
+      }
+      space.updatedAt = Date.now();
+      writeSpaces(DATA_DIR, db.spaces);
+      return json(res, 200, space);
+    }
     if (parts.length === 3) {
       const slug = decodeURIComponent(parts[2]);
       const idx = db.spaces.findIndex(s => s.slug === slug);
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
-        const body = await readBody(req);
+        if (isLocked(slug)) return locked();
         // Validate all fields before applying anything: an early return must not leave a
         // partially updated tree behind (a slug rename also re-points every page, so it
         // has to be committed together with the rest).
@@ -673,8 +708,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       }
       if (req.method === 'DELETE') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
+        if (isLocked(slug)) return locked();
         const spaceSlug = db.spaces[idx].slug;
         const removedPages = db.pages.filter(p => p.space === spaceSlug).map(p => p.slug);
+        if (db.pages.some(p => p.parent && removedPages.includes(p.parent) && isLocked(p.space)) ||
+            db.spaces.some(s => s.locked === true && s.home && removedPages.includes(s.home))) return locked();
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
         writeDb(db, removedPages);
@@ -696,8 +734,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'PUT') {
-      const body = await readBody(req);
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
+      if (isLocked(db.pages[idx].space)) return locked();
+      if (typeof body.space === 'string' && isLocked(body.space)) return locked();
+      if (typeof body.space === 'string' && body.space !== db.pages[idx].space &&
+          (db.pages.some(p => p.parent === slug && isLocked(p.space)) ||
+           db.spaces.some(s => s.home === slug && s.locked === true))) return locked();
+      // A rename rewrites direct children and home pointers, even in inconsistent cross-space trees.
+      if (body.slug !== undefined && String(body.slug || '').trim() !== slug &&
+          (db.pages.some(p => p.parent === slug && isLocked(p.space)) ||
+           db.spaces.some(s => s.home === slug && s.locked === true))) return locked();
       let renamed = false;
       if (body.slug !== undefined) {
         const ns = String(body.slug || '').trim();
@@ -750,6 +796,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     if (req.method === 'DELETE') {
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
       const doomed = [slug, ...descendantsOf(db.pages, slug)];
+      if (db.pages.some(p => doomed.includes(p.slug) && isLocked(p.space)) ||
+          db.spaces.some(s => s.locked === true && s.home && doomed.includes(s.home))) return locked();
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
       // Any space whose home was among the removed pages (the page itself or a descendant)
       // would otherwise keep a pointer to a slug that no longer resolves.
@@ -760,11 +808,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
   }
 
   if (req.method === 'POST' && key === 'pages' && parts.length === 2) {
-    const body = await readBody(req);
     const title = String(body.title || '').trim().slice(0, 120);
     if (!title) return json(res, 400, { error: '请提供页面标题' });
     const space = String(body.space || '');
     if (!db.spaces.some(s => s.slug === space)) return json(res, 404, { error: '目标空间不存在' });
+    if (isLocked(space)) return locked();
     const parent = body.parent === undefined ? null : body.parent;
     if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
     if (parent) {

@@ -15,6 +15,7 @@ interface Space {
   desc: string;
   home: string | null;
   sort?: SortKey;
+  locked?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -399,17 +400,18 @@ function openRowMenu(btn, kind, obj) {
   rowMenu.dataset.slug = obj.slug;
   rowMenu.innerHTML = kind === 'space'
     ? `
-      <button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
+      <button class="menu-item" data-act="lock"><span>${obj.locked ? '解锁空间…' : '锁定空间…'}</span></button>
+      ${obj.locked ? '' : `<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
       <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
       <button class="menu-item" data-act="settings"><span>空间设置…</span></button>
-      <button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>`
+      <button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>`}`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
       <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
-  const mw = 176, mh = kind === 'space' ? 200 : 190;
+  const mw = 176, mh = kind === 'space' ? (obj.locked ? 50 : 245) : 190;
   rowMenu.style.left = Math.max(8, Math.min(r.left - mw + 12, innerWidth - mw - 8)) + 'px';
   rowMenu.style.top = Math.min(r.bottom + 4, innerHeight - mh - 8) + 'px';
 }
@@ -648,7 +650,7 @@ function renderSidebar(filter = '') {
     t.className = 'space-title';
     t.href = '/' + encodeURIComponent(space.slug);
     t.dataset.nav = '';
-    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${tops.length} 页</span>`;
+    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${space.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${tops.length} 页</span>`;
 
     const actions = document.createElement('span');
     actions.className = 'row-actions';
@@ -668,7 +670,8 @@ function renderSidebar(filter = '') {
       if (toggleShut) rowMenu.hidden = true;
       else openRowMenu(moreBtn, 'space', space);
     });
-    actions.append(addBtn, moreBtn);
+    if (!space.locked) actions.append(addBtn);
+    actions.append(moreBtn);
 
     head.append(caret, t, actions);
     el.list.appendChild(head);
@@ -719,7 +722,7 @@ function renderSidebar(filter = '') {
             if (toggleShut) rowMenu.hidden = true;
             else openRowMenu(pm, 'page', p);
           });
-          acts.append(pa, pm);
+          if (!space.locked) acts.append(pa, pm);
 
           row.append(pc, a, acts);
           if (S.page?.slug === p.slug) row.classList.add('is-active');
@@ -874,6 +877,7 @@ function decorate(container) {
 }
 
 function renderArticle(page) {
+  const locked = !!spaceBySlug(page.space)?.locked;
   const chain = chainOf(page.slug);
   const crumbsHtml = chain.map((n, i) =>
     n === chain[chain.length - 1]
@@ -887,7 +891,7 @@ function renderArticle(page) {
        <span>更新于 ${relTime(page.updatedAt)}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
-       <a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>
+       ${locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 空间已锁定，只读</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
      </div>` + renderMarkdown(page.content);
 
   decorate(el.article);
@@ -896,7 +900,9 @@ function renderArticle(page) {
       .then(() => toast('页面链接已复制'))
       .catch(() => toast('复制失败'));
   });
-  $('#slug-edit').addEventListener('click', () => slugFlow(S.page));
+  $('#slug-edit')?.addEventListener('click', () => slugFlow(S.page));
+  $('#btn-edit').hidden = locked;
+  $('#btn-more').hidden = locked;
 
   // The width cap applies to the reading view only: overview, space index and editor all go full width
   el.article.classList.add('is-reading');
@@ -985,6 +991,7 @@ function setEditMode(mode: EditMode, focus = true) {
 
 function enterEdit(focus = true) {
   if (!S.page) return;
+  if (spaceBySlug(S.page.space)?.locked) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
   // The editor always goes full width, unaffected by the reading-view cap
   el.article.classList.remove('is-reading');
@@ -1019,6 +1026,7 @@ async function exitEdit(reloadFromPage) {
 
 async function saveDoc() {
   if (!S.page) return;
+  if (spaceBySlug(S.page.space)?.locked) { toast('空间已锁定，请先解锁；编辑内容仍保留', 4000); return; }
   if (!S.dirty) { await exitEdit(false); return; }
   const title = el.titleInput.value.trim() || '无标题页面';
   // Storage is Markdown regardless of the active surface: the visual editor is serialised,
@@ -1288,6 +1296,70 @@ $('#toolbar').addEventListener('click', async e => {
 /* ============================================================
    Space operations
    ============================================================ */
+async function lockSpaceFlow(space: Space) {
+  if (!S.authed) {
+    showLoginDialog({ setup: S.authSetup, then: () => { const current = spaceBySlug(space.slug); if (current) lockSpaceFlow(current); } });
+    return;
+  }
+  const locked = !space.locked;
+  const apply = async (body: object) => {
+    await api('spaces/' + encodeURIComponent(space.slug) + '/lock', { method: 'POST', body: JSON.stringify(body) });
+    const current = spaceBySlug(space.slug);
+    if (current) current.locked = locked;
+    if (S.space?.slug === space.slug) S.space.locked = locked;
+    if (!el.editWrap.hidden) {
+      renderSidebar(el.search.value);
+      if (S.page?.space === space.slug) toast(locked ? '空间已锁定，编辑内容仍保留；解锁后才能保存' : '空间已解锁，可以继续保存', 4000);
+      else toast(locked ? '空间已锁定' : '空间已解锁');
+    } else {
+      if (S.space?.slug === space.slug) renderSpace(S.space);
+      else if (S.page?.space === space.slug) renderArticle(S.page);
+      else if (!S.page && !S.space) renderHome();
+      else renderSidebar(el.search.value);
+      toast(locked ? '空间已锁定' : '空间已解锁');
+    }
+  };
+  if (locked) {
+    const yes = await confirmModal({ title: `锁定空间「${space.title}」？`, desc: '锁定后内容仍可阅读，编辑和管理操作需要先解锁。', ok: '锁定' });
+    if (!yes) return;
+    try { await apply({ locked: true }); } catch (err) { toast(err.message || '锁定失败', 4000); }
+    return;
+  }
+  const m = openModal(`
+    <h3>解锁空间「${esc(space.title)}」</h3>
+    <p class="desc">请输入当前登录账号的密码。密码仅在本地用于验证，不会发送明文。</p>
+    <input type="password" autocomplete="current-password" placeholder="登录密码">
+    <p class="desc" data-x="error" style="color:var(--danger)" hidden></p>
+    <div class="modal-actions"><button class="btn btn-ghost" data-x="no">取消</button><button class="btn btn-primary" data-x="ok">解锁</button></div>`);
+  const input = $('input', m) as HTMLInputElement;
+  const button = $('[data-x=ok]', m) as HTMLButtonElement;
+  const error = $('[data-x=error]', m) as HTMLElement;
+  let cancelled = false;
+  const cancel = () => { cancelled = true; input.value = ''; closeModal(); };
+  const submit = async () => {
+    if (button.disabled) return;
+    if (!input.value) { error.textContent = '请输入登录密码'; error.hidden = false; return; }
+    button.disabled = true; button.textContent = '验证中…'; error.hidden = true;
+    try {
+      const ch = await api<AuthChallengeResponse>('auth/challenge');
+      const key = await deriveKeyHex(input.value, ch.salt, ch.iters);
+      const proof = await hmacHex(key, ch.nonce);
+      input.value = '';
+      if (cancelled) return;
+      await apply({ locked: false, nonce: ch.nonce, proof });
+      if (!cancelled) closeModal();
+    } catch (err) {
+      if (cancelled) return;
+      error.textContent = err.message || '解锁失败'; error.hidden = false;
+      button.disabled = false; button.textContent = '解锁';
+    }
+  };
+  $('[data-x=no]', m).onclick = cancel;
+  button.onclick = submit;
+  activeModalDone = cancel;
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+}
+
 async function createSpaceFlow() {
   const title = await promptModal({
     title: '新建空间',
@@ -1560,6 +1632,7 @@ async function moveFlow(pg: PageMeta | null = S.page) {
   const banned = new Set([pg.slug, ...descendantSlugsOf(pg.slug)]);
   const options = [];
   S.spaces.forEach(sp => {
+    if (sp.locked) return;
     options.push({ v: 's:' + sp.slug, label: '📁 ' + sp.title + '（顶层）' });
     const walk = (parent, depth) => {
       spacePages(sp.slug, parent).forEach(p => {
@@ -1637,6 +1710,7 @@ async function deleteFlow(pg: PageMeta | null = S.page) {
 
 function dispatchPageAction(action: string, page: PageMeta | null = S.page): void {
   if (!page) return;
+  if (spaceBySlug(page.space)?.locked) { toast('空间已锁定，请先解锁'); return; }
   switch (action) {
     case 'child': createPageFlow(page.space, page.slug); break;
     case 'rename': renameFlow(page); break;
@@ -1676,7 +1750,7 @@ function renderHome() {
     return `<a class="card" data-nav href="/${encodeURIComponent(sp.slug)}">
               <span class="t">${esc(sp.title)}</span>
               ${sp.desc ? `<span class="d">${esc(sp.desc)}</span>` : ''}
-              <span class="s">${n ? n + ' 个页面 · ' : ''}更新于 ${relTime(sp.updatedAt)}</span>
+              <span class="s">${sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}更新于 ${relTime(sp.updatedAt)}</span>
             </a>`;
   }).join('');
   el.article.innerHTML =
@@ -1715,14 +1789,14 @@ function renderSpace(space) {
 
   el.article.innerHTML =
     `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
-       <a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>
+       ${space.locked ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 空间已锁定，只读</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
      </div>
      <div class="space-head">
        <div>
          <h1>${esc(space.title)}</h1>
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
-       <div class="space-acts">
+       <div class="space-acts"${space.locked ? ' hidden' : ''}>
          <label class="sort-pick">
            <span>排序</span>
            <select id="sp-sort" title="侧栏与总览的页面顺序">
@@ -1735,14 +1809,14 @@ function renderSpace(space) {
        </div>
      </div>
      <div class="cards">${cards || ''}</div>
-     ${tops.length ? '' : '<p class="list-empty" style="padding:30px 0">此空间还没有页面，点击右上角「新建页面」开始创作。</p>'}`;
+     ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${space.locked ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
 
   el.article.hidden = false;
   decorate(el.article);
   $('#sp-sort').addEventListener('change', (e) => setSpaceSort(space, (e.target as HTMLSelectElement).value));
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
-  $('#sp-slug-edit').addEventListener('click', () => slugSpaceFlow(space));
+  $('#sp-slug-edit')?.addEventListener('click', () => slugSpaceFlow(space));
   $('#sp-delete').addEventListener('click', () => deleteSpaceFlow(space));
   renderAuthUI();
   renderSidebar(el.search.value);
@@ -1838,7 +1912,7 @@ document.addEventListener('click', e => {
   const go = () => navigate(a.getAttribute('href') || '/');
   if (S.dirty && !el.editWrap.hidden) {
     confirmModal({ title: '有未保存的修改', desc: '要在离开前保存吗？', ok: '保存并离开' })
-      .then(yes => { if (yes) saveDoc().then(go); else go(); });
+      .then(yes => { if (yes) saveDoc().then(() => { if (!S.dirty) go(); }); else go(); });
     return;
   }
   go();
@@ -1881,6 +1955,8 @@ rowMenu.addEventListener('click', e => {
   if (kind === 'space') {
     const sp = spaceBySlug(slug);
     if (!sp) return;
+    if (act === 'lock') lockSpaceFlow(sp);
+    if (sp.locked) return;
     if (act === 'rename') renameSpaceFlow(sp);
     if (act === 'slug') slugSpaceFlow(sp);
     if (act === 'settings') spaceSettingsFlow(sp);

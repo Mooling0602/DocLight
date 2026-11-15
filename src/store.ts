@@ -27,6 +27,8 @@ export interface Space {
   home: string | null;
   /** Absent means `DEFAULT_SORT`; omitted from `spaces.json` so untouched spaces stay clean. */
   sort?: SortKey;
+  /** Only the locked state is persisted. */
+  locked?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -188,6 +190,7 @@ export function readStore(dataDir: string): Database {
   // value would match no comparator and silently leave that space unordered.
   for (const space of spaces) {
     if (space.sort !== undefined && !isSortKey(space.sort)) delete space.sort;
+    if (space.locked !== true) delete space.locked;
   }
 
   const pages: Page[] = [];
@@ -262,6 +265,8 @@ export interface WriteOptions {
    * user's live edits.
    */
   onlyCreate?: boolean;
+  /** Leave existing pages in locked spaces byte-for-byte unchanged during ordinary writes. */
+  preserveLocked?: boolean;
 }
 
 /**
@@ -285,6 +290,7 @@ export function writeStore(
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
+  const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
   for (const page of db.pages) {
     // The slug becomes a file name, so it is validated here rather than trusted from the caller.
     // `readStore` filters such files on the way in, but a write is the only place that can put one
@@ -300,6 +306,8 @@ export function writeStore(
     const file = path.join(dir, `${page.slug}.md`);
     // A file that already exists is the live page, not something the incoming db may replace.
     if (options.onlyCreate && fs.existsSync(file)) continue;
+    // Serializing the entire tree can normalize unrelated files; a locked page must stay untouched.
+    if (lockedSpaces.has(page.space) && fs.existsSync(file)) continue;
     const next = joinFrontMatter(page);
     if (!sameContent(file, next)) writeAtomic(file, next);
   }
@@ -334,7 +342,8 @@ export function mergeSpaces(base: Space[], extra: Space[]): Space[] {
 /** Write only the spaces index, leaving every page file untouched. */
 export function writeSpaces(dataDir: string, spaces: Space[]): void {
   fs.mkdirSync(dataDir, { recursive: true });
-  const next = JSON.stringify({ version: 4, spaces }, null, 2) + '\n';
+  const normalized = spaces.map(({ locked, ...space }) => locked === true ? { ...space, locked: true } : space);
+  const next = JSON.stringify({ version: 4, spaces: normalized }, null, 2) + '\n';
   if (!sameContent(spacesFile(dataDir), next)) writeAtomic(spacesFile(dataDir), next);
 }
 
