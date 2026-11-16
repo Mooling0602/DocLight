@@ -143,22 +143,12 @@ button { font: inherit; cursor: pointer; }
 .cluster { display: flex; align-items: center; gap: 8px; animation: fadein .18s ease; }
 
 .brand { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; color: var(--text); }
+/* Shares public/assets/favicon.svg with the browser tab icon; the relative URL keeps
+   the asset resolvable under DOCLIGHT_BASE_PATH without a server-side rewrite. */
 .brand-mark {
-  width: 24px; height: 24px; border-radius: 7px; flex: none;
-  background: linear-gradient(135deg, #6a6dff, #494bc9);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 2px 6px rgba(84,87,207,.35);
-  position: relative;
-}
-.brand-mark::after {
-  content: ""; position: absolute; inset: 6px 5px auto 5px; height: 2.6px; border-radius: 2px;
-  background:
-    linear-gradient(#fff 0 0) top/100% 100% no-repeat,
-    linear-gradient(#fff 0 0) center/70% 100% no-repeat,
-    linear-gradient(#fff 0 0) bottom/45% 100% no-repeat;
-  box-shadow: 0 0 0 transparent;
-  opacity: .95;
-  background-position: 0 0, 0 130%, 0 260%;
-  background-size: 100% 32%, 70% 32%, 45% 32%;
+  width: 24px; height: 24px; flex: none;
+  background: url(assets/favicon.svg) center / contain no-repeat;
+  filter: drop-shadow(0 2px 5px rgba(84,87,207,.32));
 }
 .brand-name { font-weight: 700; letter-spacing: -.015em; font-size: 16.5px; }
 

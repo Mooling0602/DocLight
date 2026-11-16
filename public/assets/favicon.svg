@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DocLight">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6a6dff"/>
+      <stop offset="1" stop-color="#494bc9"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#brand)"/>
+  <g fill="#fff">
+    <rect x="19" y="17" width="26" height="5" rx="2.5"/>
+    <rect x="19" y="29.5" width="26" height="5" rx="2.5"/>
+    <rect x="19" y="42" width="15" height="5" rx="2.5"/>
+  </g>
+</svg>
