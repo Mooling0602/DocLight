@@ -27,6 +27,7 @@ const EXPECTED = [
   'dist/server.js',
   'dist/sort.js',
   'dist/store.js',
+  'dist/template-transaction.js',
   'public/app.js',
   'public/index.html',
   'public/style.css',
