@@ -916,6 +916,7 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
       // A handler that already responded and then threw must not be answered twice; `writeHead`
       // would throw ERR_HTTP_HEADERS_SENT and we would be back to a crashed process.
       if (res.headersSent) { res.end(); return; }
+      if (conflict) console.warn('· BUILT_IN_SLUG_CONFLICT：用户空间与内置空间的保留 slug 冲突');
       json(res, status, conflict ? { error: message, errorCode: 'BUILT_IN_SLUG_CONFLICT' } : { error: message });
     });
 

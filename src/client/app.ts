@@ -282,9 +282,9 @@ function showRuntimeConflict(message = BUILT_IN_CONFLICT): void {
   const notice = document.createElement('div');
   notice.id = 'runtime-conflict';
   notice.setAttribute('role', 'alert');
-  notice.style.cssText = 'position:sticky;top:0;z-index:45;padding:12px 20px;background:#fff3cd;color:#4d3500;border-bottom:1px solid #d6ad43';
+  notice.tabIndex = 0;
   notice.textContent = `内置空间名称冲突：${message}。处理完成后请重新加载页面；未保存的草稿请先备份。`;
-  document.body.prepend(notice);
+  document.getElementById('main')!.prepend(notice);
 }
 const S: AppState = {
   spaces: [],         // [{slug,title,desc,home,...}]

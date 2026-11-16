@@ -126,6 +126,14 @@ async function collisionBootTests(): Promise<void> {
 }
 
 async function runtimeConflictTests(): Promise<void> {
+  const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');
+  const rule = css.match(/#runtime-conflict\s*\{([^}]*)\}/)?.[1] || '';
+  assert.match(rule, /max-height:\s*min\(25%,\s*12rem\)/, '长提示必须保留编辑区空间');
+  assert.match(rule, /overflow:\s*auto/, '长提示应可滚动');
+  assert.match(rule, /overflow-wrap:\s*anywhere/, '长文本在窄屏上应换行');
+  assert.match(rule, /background:\s*var\(--bg-inset\)/);
+  assert.match(rule, /color:\s*var\(--text\)/);
+  assert.doesNotMatch(rule, /position:\s*(sticky|fixed|absolute)/, '提示不得覆盖页面');
   for (const mode of ['other', 'refresh', 'write'] as const) {
     const instance = new JSDOM(html, { url: 'http://localhost:4173/default/readable', pretendToBeVisual: true, runScripts: 'outside-only' });
     const w = instance.window as any;
@@ -188,6 +196,10 @@ async function runtimeConflictTests(): Promise<void> {
       assert.equal(!!notice, mode !== 'other', '仅特定冲突显示持久提示');
       if (notice) {
         assert.equal(notice.getAttribute('role'), 'alert');
+        assert.equal(notice.parentElement, d.querySelector('#main'), '提示应位于主区域，而非覆盖顶部栏');
+        assert.equal(notice, d.querySelector('#main')!.firstElementChild, '提示应占据内容上方的正常布局空间');
+        assert.equal((notice as HTMLElement).tabIndex, 0, '较长提示可通过键盘滚动');
+        assert.equal((notice as HTMLElement).style.cssText, '', '提示样式应由主题样式表提供');
         assert.match(notice.textContent || '', mode === 'write' ? /写入时发生冲突/ : /变化后的提示/);
         assert.match(notice.textContent || '', /重新加载.*草稿.*备份/);
         await wait(4400);

@@ -18,6 +18,7 @@ async function main(): Promise<void> {
   let child: ChildProcess | undefined;
   let base = '';
   let cookie = '';
+  let stderr = '';
   const template = path.join(release, 'template');
   const pagesDir = path.join(dataDir, 'pages');
 
@@ -30,6 +31,8 @@ async function main(): Promise<void> {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const running = child;
+    stderr = '';
+    running.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
     base = await new Promise<string>((resolve, reject) => {
       let output = '';
       const timer = setTimeout(() => { running.kill(); reject(new Error('server startup timed out: ' + output)); }, 15000);
@@ -228,10 +231,27 @@ async function main(): Promise<void> {
     const indexBeforeConflict = fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8');
     const conflictingIndex = JSON.stringify({ version: 4, spaces: [{ slug: builtIn, title: 'User data', desc: '', home: null, createdAt: 1, updatedAt: 1 }] }, null, 2) + '\n';
     fs.writeFileSync(path.join(dataDir, 'spaces.json'), conflictingIndex);
-    const conflict = await api('tree');
-    assert.equal(conflict.status, 503);
-    assert.equal(conflict.body.errorCode, 'BUILT_IN_SLUG_CONFLICT', 'conflict exposes a stable machine-readable identifier');
-    assert.match(conflict.body.error, /请先备份/);
+    const beforeConflictStderr = stderr.length;
+    const warning = '· BUILT_IN_SLUG_CONFLICT：用户空间与内置空间的保留 slug 冲突\n';
+    for (let count = 1; count <= 2; count++) {
+      const conflict = await api('tree');
+      assert.equal(conflict.status, 503);
+      assert.equal(conflict.body.errorCode, 'BUILT_IN_SLUG_CONFLICT', 'conflict exposes a stable machine-readable identifier');
+      assert.match(conflict.body.error, /请先备份/);
+      assert.ok(!JSON.stringify(conflict.body).includes(temp), 'response must not expose private paths');
+      await new Promise<void>((resolve, reject) => {
+        const stream = child!.stderr!;
+        const check = () => {
+          if (stderr.slice(beforeConflictStderr).split(warning).length - 1 >= count) {
+            clearTimeout(timer); stream.off('data', check); resolve();
+          }
+        };
+        const timer = setTimeout(() => { stream.off('data', check); reject(new Error('conflict warning timed out')); }, 2000);
+        stream.on('data', check);
+        check();
+      });
+    }
+    assert.equal(stderr.slice(beforeConflictStderr), warning.repeat(2), 'each conflict response logs one safe warning');
     assert.equal(fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8'), conflictingIndex);
     fs.writeFileSync(path.join(dataDir, 'spaces.json'), indexBeforeConflict);
     const recovered = await api('tree');
