@@ -113,6 +113,13 @@ function templateErrorStatus(error: unknown): number {
   return typeof code === 'number' && code >= 400 && code < 600 ? code : 500;
 }
 const BODY_LIMIT = 1024 * 1024; // 1MB
+// Displayed in the shell's sidebar footer. Read once: the running build cannot change version.
+const PACKAGE_VERSION = (() => {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    return typeof parsed.version === 'string' && /^\d+\.\d+\.\d+/.test(parsed.version) ? parsed.version : '';
+  } catch { return ''; }
+})();
 
 /* ---------------------------------------------------------------- Data layer */
 
@@ -492,6 +499,10 @@ function indexHtml(basePath: string): string {
     } catch {
       return '';
     }
+  }
+  // The version comes from package.json, so the footer never drifts from the release.
+  if (PACKAGE_VERSION) {
+    indexHtmlCache = indexHtmlCache.replace(/<span id="app-version">[^<]*<\/span>/, `<span id="app-version">v${PACKAGE_VERSION}</span>`);
   }
   // Cache only the invariant shell: the public prefix belongs to this request.
   let html = indexHtmlCache.replace(/<head>/i, `<head>\n<meta name="doclight-base-path" content="${basePath}">`);
