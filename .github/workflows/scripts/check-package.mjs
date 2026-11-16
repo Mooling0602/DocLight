@@ -29,6 +29,7 @@ const EXPECTED = [
   'dist/store.js',
   'dist/template-transaction.js',
   'public/app.js',
+  'public/assets/favicon.svg',
   'public/index.html',
   'public/style.css',
   'template/pages/changelog.md',
