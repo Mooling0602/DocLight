@@ -679,6 +679,34 @@ svg.sf-badge { color: var(--text-3); }
   .container { padding-bottom: 60px; }
 }
 
+/* A narrow editor needs two rows: keep navigation and theme on the first, editing controls on the second. */
+@media (max-width: 520px) {
+  #topbar:has(#cluster-edit:not([hidden])) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 53px 46px;
+    gap: 0 8px;
+    height: 100px;
+  }
+  #topbar:has(#cluster-edit:not([hidden])) .tb-left { grid-area: 1 / 1; }
+  #topbar:has(#cluster-edit:not([hidden])) .tb-right { display: contents; }
+  #topbar:has(#cluster-edit:not([hidden])) .tb-right > .dropdown-wrap { grid-area: 1 / 2; }
+  #topbar:has(#cluster-edit:not([hidden])) #cluster-edit {
+    grid-area: 2 / 1 / 3 / 3;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    gap: 4px;
+  }
+  #topbar:has(#cluster-edit:not([hidden])) #mode-toggle { flex: none; }
+  #topbar:has(#cluster-edit:not([hidden])) .seg-btn { white-space: nowrap; }
+  #topbar:has(#cluster-edit:not([hidden])) #dirty-pill { white-space: nowrap; flex: none; }
+  #topbar:has(#cluster-edit:not([hidden])) #cluster-edit .btn { flex: none; padding-inline: 9px; }
+  body:has(#cluster-edit:not([hidden])) #layout { height: calc(100vh - 100px); height: calc(100dvh - 100px); }
+  body:has(#cluster-edit:not([hidden])) #sidebar { top: 100px; }
+  body:has(#cluster-edit:not([hidden])) #scrim { top: 100px; }
+}
+
 /* ---------- Print ---------- */
 @media print {
   #topbar, #sidebar, #toolbar-wrap, #edit-wrap, #toasts, #modal-root, #scrim, .meta-row, .site-footer { display: none !important; }

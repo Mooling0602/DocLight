@@ -51,4 +51,14 @@ assert.equal(
   '清除格式应紧跟在插入分组之后',
 );
 
+// On phones the editor has its own header row instead of squeezing the mode labels vertically.
+const editHeader = css.match(/#topbar:has\(#cluster-edit:not\(\[hidden\]\)\)\s*\{([^}]*)\}/)?.[1] ?? '';
+assert.match(editHeader, /grid-template-rows:\s*53px\s+46px/, '窄屏编辑态应分两行显示');
+assert.match(editHeader, /height:\s*100px/, '窄屏编辑态顶栏高度应覆盖两行');
+assert.match(css, /#topbar:has\(#cluster-edit:not\(\[hidden\]\)\)\s+#cluster-edit\s*\{[^}]*grid-area:\s*2\s*\/\s*1\s*\/\s*3\s*\/\s*3/, '编辑按钮应占据第二行');
+assert.match(css, /#topbar:has\(#cluster-edit:not\(\[hidden\]\)\)\s+\.seg-btn\s*\{[^}]*white-space:\s*nowrap/, '编辑模式标签不应断成竖排');
+assert.match(css, /body:has\(#cluster-edit:not\(\[hidden\]\)\)\s+#layout\s*\{[^}]*100dvh\s*-\s*100px/, '内容区域应扣除两行顶栏高度');
+assert.match(css, /body:has\(#cluster-edit:not\(\[hidden\]\)\)\s+#sidebar\s*\{[^}]*top:\s*100px/, '移动导航应位于编辑顶栏下方');
+assert.match(css, /body:has\(#cluster-edit:not\(\[hidden\]\)\)\s+#scrim\s*\{[^}]*top:\s*100px/, '导航遮罩应位于编辑顶栏下方');
+
 console.log('toolbar layout assertions passed');
