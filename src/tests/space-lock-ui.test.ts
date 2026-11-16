@@ -75,6 +75,56 @@ const click = (selector: string) => $(selector).dispatchEvent(new window.MouseEv
 const openSpaceMenu = async () => { click('.space-row .row-actions [title="空间管理"]'); await wait(); };
 const submit = () => click('#modal-root [data-x=ok]');
 
+async function collisionBootTests(): Promise<void> {
+  const message = '数据目录中已有空间 doclight-default，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug';
+  const bundle = fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8');
+  const boot = async (tree: any, status: number) => {
+    const instance = new JSDOM(html, { url: 'http://localhost:4173/default/readable', pretendToBeVisual: true, runScripts: 'outside-only' });
+    const w = instance.window as any;
+    w.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+    w.scrollTo = () => {};
+    w.Element.prototype.scrollTo = function () {};
+    w.Element.prototype.scrollIntoView = function () {};
+    w.fetch = async (input: string) => String(input).includes('/api/tree')
+      ? result(tree, status)
+      : String(input).includes('/api/auth/state')
+        ? result({ mode: 'ready', authed: false, user: null, salt, iters })
+        : result({ ...page, content: '恢复正文' });
+    w.eval(bundle);
+    await wait(100);
+    return instance;
+  };
+  const conflict = await boot({ error: message }, 503);
+  try {
+    const d = conflict.window.document;
+    const notice = d.querySelector('[role=alert]');
+    assert.ok(notice, '冲突时显示可访问的持久提示');
+    assert.match(notice.textContent || '', /请先备份.*spaces\.json.*front matter/);
+    assert.match(notice.textContent || '', /重新加载/);
+    assert.equal((d.querySelector('#btn-new') as HTMLElement).hidden, true);
+    assert.equal((d.querySelector('#empty-state') as HTMLElement).hidden, true);
+    assert.equal(d.querySelector('#btn-home-new'), null);
+    assert.doesNotMatch(d.querySelector('#page-list')!.textContent || '', /创建空间/);
+    assert.equal(conflict.window.location.pathname, '/default/readable', '冲突不应将深链接误判为不存在');
+    conflict.window.dispatchEvent(new conflict.window.PopStateEvent('popstate'));
+    await wait(4400);
+    assert.ok(d.querySelector('[role=alert]'), '提示应持续存在，不能随 toast 消失');
+  } finally { conflict.window.close(); }
+  for (const [body, status] of [[{ error: 'unrelated private error' }, 503], [{ error: message }, 500]] as const) {
+    const other = await boot(body, status);
+    try {
+      assert.equal(other.window.document.querySelector('[role=alert]'), null, '其他错误不得显示冲突提示');
+    } finally { other.window.close(); }
+  }
+  const recovered = await boot({ spaces: [{ slug: 'default', title: '默认空间', desc: '', home: null, createdAt: 1, updatedAt: 1 }], pages: [page] }, 200);
+  try {
+    const d = recovered.window.document;
+    assert.equal(d.querySelector('[role=alert]'), null, '重新加载成功后不再显示冲突');
+    assert.equal((d.querySelector('#btn-new') as HTMLElement).hidden, false);
+    assert.match(d.querySelector('#article')!.textContent || '', /恢复正文/);
+  } finally { recovered.window.close(); }
+}
+
 async function main(): Promise<void> {
   try {
     window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
@@ -172,6 +222,7 @@ async function main(): Promise<void> {
     click('a.brand');
     await wait(100);
     assert.match($('a.card[href="/doclight-default"] .lock-badge').textContent || '', /永久只读/, '空间总览显示永久只读');
+    assert.match($('a.card[href="/doclight-default"] .s').textContent || '', /随应用更新/, '内置空间不应显示固定模板日期');
     const builtInRow = $('a.space-title[href="/doclight-default"]').closest('.space-row')!;
     assert.match(builtInRow.textContent || '', /永久只读/, '内置空间侧栏显示永久只读');
     assert.equal(builtInRow.querySelector('[title="空间管理"]'), null, '内置空间没有管理菜单');
@@ -183,12 +234,14 @@ async function main(): Promise<void> {
     click('a.card[data-nav]');
     await wait(100);
     assert.match($('#article .lock-badge').textContent || '', /永久只读/, '页面显示永久只读');
+    assert.match($('#article').textContent || '', /随应用更新/, '内置页面不应显示固定模板日期');
     assert.match($('#article').textContent || '', /内置正文/);
     assert.equal($('#btn-edit').hidden, true);
     assert.equal($('#btn-more').hidden, true);
     assert.equal($('#cluster-view').hidden, true, '内置页面不显示空操作栏');
     assert.equal($('#article').hidden, false, '内置页面仍可阅读');
     assert.equal(calls.filter(c => c.url.includes('/api/spaces/doclight-default/lock')).length, 0);
+    await collisionBootTests();
     console.log('space lock UI assertions passed');
   } finally { dom.window.close(); }
 }

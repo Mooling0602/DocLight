@@ -120,6 +120,9 @@ async function main(): Promise<void> {
 
     const virtualPages = tree.pages.filter((p: any) => p.space === builtIn);
     assert.deepEqual(virtualPages.map((p: any) => p.slug).sort(), sourcePages.map(p => `${builtIn}-${p.slug}`).sort());
+    const welcome = await api(`pages/${builtIn}-welcome`, 'GET', undefined, false);
+    assert.match(welcome.body.content, /\]\(\/doclight-default\/doclight-default-guide\)/, 'welcome link must use the real guide route');
+    assert.ok(virtualPages.some((p: any) => p.slug === `${builtIn}-guide` && p.parent === null), 'linked guide must exist as a top-level built-in page');
     for (const page of sourcePages) {
       const slug = `${builtIn}-${page.slug}`;
       const metadata = virtualPages.find((p: any) => p.slug === slug);

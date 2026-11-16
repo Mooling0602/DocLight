@@ -38,7 +38,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-'));
 const pageFile = (slug: string) => path.join(dir, 'pages', `${slug}.md`);
 
 try {
-  /* ---- A fresh store is seeded and read back identically ---- */
+  /* ---- A fresh store is written and read back identically ---- */
   assert.equal(storeExists(dir), false, '新目录不应被视为已有 store');
   writeStore(dir, db(page('alpha'), page('beta', { parent: 'alpha' })));
   assert.equal(storeExists(dir), true, '写入后应视为已有 store');
@@ -72,7 +72,7 @@ try {
 
   /* ---- A write that simply omits a page must NOT delete it ---- */
   // The incoming db is not an authoritative list of what should exist: a page whose file could
-  // not be read is missing from it, and seeding/migration pass only the pages they were given.
+  // not be read is missing from it, and migration passes only the pages in its snapshot.
   // Treating that absence as "delete the file" destroyed user content (see recoverStore too).
   fs.writeFileSync(pageFile('kept'), '---\ntitle: 保留\nspace: default\n---\n\n正文\n', 'utf8');
   writeStore(dir, db(page('alpha')));
@@ -88,8 +88,8 @@ try {
   assert.ok(fs.existsSync(pageFile('keepname')), '仍被使用的 slug 不应因声明删除而消失');
 
   /* ---- onlyCreate writes missing pages but never overwrites an existing one ---- */
-  // Migration and seeding pass this so a store they are establishing cannot clobber a page file
-  // that is already there (the stale re-import case). Contrast with a normal write below.
+  // Migration passes this so a stale snapshot cannot clobber a page file already on disk.
+  // Contrast with a normal write below.
   fs.writeFileSync(pageFile('live'), '---\ntitle: 用户改过的\nspace: default\n---\n\n# 用户改过的\n', 'utf8');
   writeStore(dir, db(page('live', { content: '# 来自旧快照\n' }), page('added')), [], { onlyCreate: true });
   assert.match(fs.readFileSync(pageFile('live'), 'utf8'), /用户改过的/, 'onlyCreate 不得覆盖已存在的页面');
@@ -176,9 +176,8 @@ try {
     '文件名不合法的文件不应被当成孤儿删除',
   );
 
-  /* ---- A lost spaces.json is rebuilt from the pages, never overwritten by the sample ---- */
-  // Seeding here would replace every page whose name collides with a sample page, so the
-  // pages directory is the source of truth whenever it holds anything.
+  /* ---- A lost spaces.json is rebuilt from the existing pages ---- */
+  // The pages directory is the source of truth; recovery must leave its files untouched.
   {
     const lost = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-lost-'));
     fs.mkdirSync(path.join(lost, 'pages'), { recursive: true });
@@ -202,7 +201,7 @@ try {
     assert.equal(fs.readFileSync(path.join(lost, 'pages', 'mine.md'), 'utf8'), before, '恢复不应改写页面文件');
     assert.equal(storeExists(lost), true, '恢复后应写回 spaces.json');
 
-    // An empty directory is not a recovery case — that is the normal first-run seeding path.
+    // An empty directory is not a recovery case; startup initializes an empty user store.
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-store-empty-'));
     assert.equal(recoverStore(empty), null, '没有任何页面时不应走恢复路径');
 

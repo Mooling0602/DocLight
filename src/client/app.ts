@@ -110,7 +110,7 @@ async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     const error = data as ApiError;
     if (res.status === 401 && error.needAuth) { S.authed = false; renderAuthUI(); }
-    throw new Error(error.error || `请求失败 (${res.status})`);
+    throw Object.assign(new Error(error.error || `请求失败 (${res.status})`), { status: res.status });
   }
   return data as T;
 }
@@ -263,6 +263,9 @@ async function hmacHex(keyHex, msg) {
 }
 
 /* ---------------- Global state ---------------- */
+// The server currently identifies this tree failure by its status and exact message.
+const BUILT_IN_CONFLICT = '数据目录中已有空间 doclight-default，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug';
+let builtInConflict = false;
 const S: AppState = {
   spaces: [],         // [{slug,title,desc,home,...}]
   pages: [],          // [{slug,space,parent,title,...}]
@@ -605,6 +608,10 @@ function renderSidebar(filter = '') {
   const q = filter.trim().toLowerCase();
   el.list.innerHTML = '';
 
+  if (builtInConflict) {
+    el.countHint.textContent = '';
+    return;
+  }
   if (q) {
     const items = S.pages.filter(p => p.title.toLowerCase().includes(q));
     if (!items.length) el.list.innerHTML = '<div class="list-empty">没有匹配的文档</div>';
@@ -615,7 +622,7 @@ function renderSidebar(filter = '') {
       a.className = 'page-item' + (S.page?.slug === p.slug ? ' active' : '');
       a.href = canonicalPath(p.slug);
       a.dataset.nav = '';
-      a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${esc(sp?.title || '')}${chain ? ' / ' + esc(chain) + ' · ' : ' · '}${relTime(p.updatedAt)}</span>`;
+      a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${esc(sp?.title || '')}${chain ? ' / ' + esc(chain) + ' · ' : ' · '}${sp?.builtIn ? '随应用更新' : relTime(p.updatedAt)}</span>`;
       el.list.appendChild(a);
     });
     el.countHint.textContent = `匹配 ${items.length} 页`;
@@ -704,7 +711,7 @@ function renderSidebar(filter = '') {
           a.href = canonicalPath(p.slug);
           a.dataset.nav = '';
           a.style.paddingLeft = (10 + depth * 16) + 'px';
-          a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${relTime(p.updatedAt)}${kids.length ? ' · ' + kids.length + ' 子页' : ''}</span>`;
+          a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${space.builtIn ? '随应用更新' : relTime(p.updatedAt)}${kids.length ? ' · ' + kids.length + ' 子页' : ''}</span>`;
 
           const acts = document.createElement('span');
           acts.className = 'row-actions';
@@ -891,7 +898,7 @@ function renderArticle(page) {
   el.article.innerHTML =
     `<div class="meta-row">
        <nav class="crumbs">${crumbsHtml}</nav><span class="sep">·</span>
-       <span>更新于 ${relTime(page.updatedAt)}</span><span class="sep">·</span>
+       <span>${space?.builtIn ? '随应用更新' : `更新于 ${relTime(page.updatedAt)}`}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
        ${locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
@@ -1755,6 +1762,14 @@ function renderHome() {
   el.dirtyPill.hidden = true;
   el.editor.innerHTML = '';
 
+  if (builtInConflict) {
+    el.empty.hidden = true;
+    el.article.innerHTML = `<div role="alert"><h1>内置空间名称冲突</h1><p>${esc(BUILT_IN_CONFLICT)}</p><p>处理完成后请重新加载页面。</p></div>`;
+    el.article.hidden = false;
+    renderAuthUI();
+    renderSidebar();
+    return;
+  }
   if (!S.spaces.length) {
     el.article.hidden = true;
     el.empty.hidden = false;
@@ -1769,7 +1784,7 @@ function renderHome() {
     return `<a class="card" data-nav href="/${encodeURIComponent(sp.slug)}">
               <span class="t">${esc(sp.title)}</span>
               ${sp.desc ? `<span class="d">${esc(sp.desc)}</span>` : ''}
-              <span class="s">${sp.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}更新于 ${relTime(sp.updatedAt)}</span>
+              <span class="s">${sp.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}${sp.builtIn ? '随应用更新' : `更新于 ${relTime(sp.updatedAt)}`}</span>
             </a>`;
   }).join('');
   el.article.innerHTML =
@@ -1802,7 +1817,7 @@ function renderSpace(space) {
     const n = childrenOf(p.slug).filter(k => k.space === space.slug).length;
     return `<a class="card" data-nav href="${canonicalPath(p.slug)}">
               <span class="t">${esc(p.title)}</span>
-              <span class="s">${n ? n + ' 个子页 · ' : ''}更新于 ${relTime(p.updatedAt)}</span>
+              <span class="s">${n ? n + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
             </a>`;
   }).join('');
 
@@ -1876,6 +1891,7 @@ function notFoundThenHome() {
 }
 
 async function route() {
+  if (builtInConflict) { renderHome(); return; }
   if (location.pathname === '/spaces' || location.pathname === '/spaces/') {
     renderHome();
     return;
@@ -2117,7 +2133,9 @@ function enhanceFilingBadges(): void {
     S.spaces = tree.spaces || [];
     S.pages = tree.pages || [];
   } catch (err) {
-    toast('无法连接服务器：' + err.message, 4000);
+    builtInConflict = err.status === 503 && err.message === BUILT_IN_CONFLICT;
+    if (builtInConflict) $('#btn-new').hidden = true;
+    else toast('无法连接服务器：' + err.message, 4000);
     S.spaces = []; S.pages = [];
   }
   renderSidebar();

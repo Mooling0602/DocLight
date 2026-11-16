@@ -167,8 +167,7 @@ function ensureData(): void {
   }
 
   // With no legacy file, pages on disk mean the spaces index alone was lost. It is derived data
-  // (every page carries its space in its front matter), so it is rebuilt from the pages rather
-  // than papered over with the sample, which would overwrite any page sharing a sample's name.
+  // (every page carries its space in its front matter), so it is rebuilt from the pages.
   // Only the index is written: the page files are the source of truth and are left as they are.
   const recovered = recoverStore(DATA_DIR);
   if (recovered) {
@@ -257,7 +256,7 @@ function migrateLegacyFile(): void {
   try { raw = JSON.parse(fs.readFileSync(LEGACY_DATA_FILE, 'utf8')); } catch { /* fallthrough */ }
   if (!raw || (raw.version !== 3 && raw.version !== 4)) {
     // An unreadable legacy file is not proof the site is empty: pages already in `pages/` are the
-    // user's data and seeding over them would replace every one sharing a sample's name.
+    // user's data and should be recovered before initializing an empty store.
     const salvage = recoverStore(DATA_DIR);
     retireLegacyFile();
     if (salvage) {
