@@ -21,6 +21,11 @@
   --accent-ink: #ffffff;
   --accent-line: rgba(84, 87, 207, .38);
   --accent-soft-u: rgba(84, 87, 207, .55);
+  --callout-note: #0969da;      --callout-note-line: #0969da;
+  --callout-tip: #1a7f37;       --callout-tip-line: #1a7f37;
+  --callout-important: #8250df; --callout-important-line: #8250df;
+  --callout-warning: #9a6700;   --callout-warning-line: #9a6700;
+  --callout-caution: #d1242f;   --callout-caution-line: #cf222e;
   --danger: #d5484c;
   --danger-soft: rgba(213, 72, 76, .1);
   --code-bg: #eceef4;
@@ -51,6 +56,11 @@
   --accent-ink: #101120;
   --accent-line: rgba(131, 134, 255, .4);
   --accent-soft-u: rgba(131, 134, 255, .6);
+  --callout-note: #4493f8;      --callout-note-line: #1f6feb;
+  --callout-tip: #3fb950;       --callout-tip-line: #238636;
+  --callout-important: #ab7df8; --callout-important-line: #8957e5;
+  --callout-warning: #d29922;   --callout-warning-line: #9e6a03;
+  --callout-caution: #f85149;   --callout-caution-line: #da3633;
   --danger: #ff7074;
   --danger-soft: rgba(255, 112, 116, .13);
   --code-bg: #22252f;
@@ -417,6 +427,32 @@ blockquote {
 }
 blockquote p { margin: .25em 0; }
 
+/* ---------- GitHub-style callouts (alerts)
+   Mirrors GitHub's own alert CSS (`.markdown-alert`): a 4px coloured left bar, transparent
+   background, no rounded corners, a 500-weight coloured title with an octicon, and 8px/16px
+   padding. Colours come from GitHub's Primer tokens, so the same Markdown looks the same
+   when pasted between the two. */
+.callout {
+  margin: 1.2em 0;
+  padding: 8px 16px;
+  border-left: 4px solid var(--callout-line);
+  color: inherit;
+}
+.callout-note      { --callout-accent: var(--callout-note);      --callout-line: var(--callout-note-line); }
+.callout-tip       { --callout-accent: var(--callout-tip);       --callout-line: var(--callout-tip-line); }
+.callout-important { --callout-accent: var(--callout-important); --callout-line: var(--callout-important-line); }
+.callout-warning   { --callout-accent: var(--callout-warning);   --callout-line: var(--callout-warning-line); }
+.callout-caution   { --callout-accent: var(--callout-caution);   --callout-line: var(--callout-caution-line); }
+.callout-title {
+  display: flex; align-items: center;
+  margin: 0 0 10px;
+  color: var(--callout-accent);
+  font-size: 1em; font-weight: 500; line-height: 1;
+}
+.callout-icon { flex: none; display: block; margin-right: 8px; }
+.callout p { margin: 0 0 10px; }
+.callout > :last-child { margin-bottom: 0; }
+
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "JetBrains Mono", monospace;
   font-size: .86em;
@@ -716,6 +752,7 @@ svg.sf-badge { color: var(--text-3); }
      The selector must match .article.is-reading in specificity; a bare .article would lose to it. */
   .article.is-reading { max-width: none; }
   .reading-handle { display: none !important; }
+  .callout { break-inside: avoid; }
 }
 
 /* ---------- Tree sidebar / breadcrumb / space cards ---------- */

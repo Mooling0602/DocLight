@@ -3,9 +3,8 @@
    v4 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
    Page content is Markdown; the reading view renders it and the editor converts both ways.
    ============================================================ */
-import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { htmlToMarkdown } from '../markdown.js';
+import { htmlToMarkdown, markdownToHtml } from '../markdown.js';
 import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS } from '../sort.js';
 import type { SortKey } from '../sort.js';
 
@@ -150,6 +149,7 @@ function wordCount(markdown: unknown): number {
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')     // images contribute no text
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')   // links keep their label, drop the target
     .replace(/<[^>]*>/g, ' ')                  // preserved inline HTML
+    .replace(/^\s{0,3}>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/gim, '') // callout marker line
     .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
     .replace(/[*_]{1,3}/g, '')
     .replace(/~{1,2}/g, '')
@@ -180,10 +180,8 @@ DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
 /** Render Markdown to safe HTML. Raw HTML in the source passes through `marked` and is then
     sanitised with DOMPurify, so inline preservation cannot become an XSS vector. */
 function renderMarkdown(markdown: unknown): string {
-  const source = String(markdown ?? '');
-  if (!source.trim()) return '';
   let html = '';
-  try { html = marked.parse(source, { async: false }) as string; } catch { return ''; }
+  try { html = markdownToHtml(markdown); } catch { return ''; }
   return DOMPurify.sanitize(html, PURIFY_OPTIONS);
 }
 
