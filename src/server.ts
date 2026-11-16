@@ -47,9 +47,10 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
-import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug } from './store.js';
+import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug, editTemplatePage, editTemplateSpace, createTemplatePage, renameTemplatePage, deleteTemplateSubtree, deleteTemplateSpace, moveTemplatePageToSpace, moveDataPageToTemplate } from './store.js';
+import { recoverTemplateTransaction } from './template-transaction.js';
 import type { AppConfig } from './config.js';
-import type { Database, Page, Space, WriteOptions, SortKey } from './store.js';
+import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -99,6 +100,18 @@ const LEGACY_DATA_FILE = path.join(DATA_DIR, 'pages.json');
 // would let a stale snapshot be re-migrated. See `legacyFileIsResidue`.
 const MIGRATION_MARKER = path.join(DATA_DIR, 'pages.json.migrated');
 const TEMPLATE_DIR = path.join(ROOT, 'template');
+// Developer-mode structural edits are journaled in one private directory. Every DocLight process
+// that may edit the same template must use this exact directory; see src/template-transaction.ts.
+const TEMPLATE_STATE_DIR = path.join(ROOT, '.doclight');
+function templateDirs(): TemplateDirs {
+  fs.mkdirSync(TEMPLATE_STATE_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(TEMPLATE_STATE_DIR, 0o700);
+  return { templateDir: TEMPLATE_DIR, dataDir: DATA_DIR, stateDir: TEMPLATE_STATE_DIR };
+}
+function templateErrorStatus(error: unknown): number {
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'number' && code >= 400 && code < 600 ? code : 500;
+}
 const BODY_LIMIT = 1024 * 1024; // 1MB
 
 /* ---------------------------------------------------------------- Data layer */
@@ -297,6 +310,7 @@ function migrateLegacyFile(): void {
 // Cache parsed template contents while detecting changes to the index or any Markdown file.
 let templateCache: { signature: string; db: Database } | null = null;
 let templateUnavailable = false;
+let templateVirtualSlug = BUILT_IN_SLUG;
 function readBuiltInTemplate(): Database | null {
   try {
     const dir = path.join(TEMPLATE_DIR, 'pages');
@@ -306,6 +320,14 @@ function readBuiltInTemplate(): Database | null {
       const stat = fs.statSync(file, { bigint: true });
       return [file, stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString()];
     }));
+    const index = JSON.parse(fs.readFileSync(path.join(TEMPLATE_DIR, 'spaces.json'), 'utf8'));
+    if (!index || !Array.isArray(index.spaces) || index.spaces.some((s: unknown) => !s || typeof s !== 'object' || typeof (s as Space).slug !== 'string')) throw new Error('invalid template index');
+    // A deliberate deletion in developer mode is not a broken template: show no built-in space.
+    if (index.doclightBuiltInDeleted === true) { templateCache = null; templateUnavailable = false; return null; }
+    const mapped = index.doclightVirtualSlug === undefined ? BUILT_IN_SLUG : index.doclightVirtualSlug;
+    if (mapped !== BUILT_IN_SLUG && (typeof mapped !== 'string' || !/^[a-z0-9_]{1,80}$/.test(mapped) || mapped === 'spaces' || mapped === 'api')) throw new Error('invalid template virtual slug');
+    templateVirtualSlug = mapped;
+    if (!index.spaces.some((s: Space) => s.slug === 'default')) throw new Error('invalid template index');
     if (templateCache?.signature !== signature) templateCache = { signature, db: readStore(TEMPLATE_DIR) };
     if (!templateCache.db.spaces.some(s => s.slug === 'default')) throw new Error('invalid template index');
     templateUnavailable = false;
@@ -327,7 +349,7 @@ function readDb(): Database {
   if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
   const db = readStore(DATA_DIR);
   // The built-in marker is trusted only when constructed here, not when read from disk.
-  for (const space of db.spaces) delete space.builtIn;
+  for (const space of db.spaces) { delete space.builtIn; delete space.devEditable; }
   const template = readBuiltInTemplate();
   const source = template?.spaces.find(s => s.slug === 'default');
   if (!template || !source) return db;
@@ -335,16 +357,20 @@ function readDb(): Database {
   const slugs = new Set(sourcePages.map(p => p.slug));
   const virtualSlug = (slug: string) => `${BUILT_IN_SLUG}-${slug}`;
   const virtual: Space = {
-    ...source, slug: BUILT_IN_SLUG, builtIn: true, locked: true,
+    ...source, slug: templateVirtualSlug, builtIn: true, locked: true,
+    ...(CONFIG.devMode ? { devEditable: true } : {}),
     home: source.home && slugs.has(source.home) ? virtualSlug(source.home) : null,
   };
   const pages = sourcePages.map(p => ({
-    ...p, slug: virtualSlug(p.slug), space: BUILT_IN_SLUG,
+    ...p, slug: virtualSlug(p.slug), space: templateVirtualSlug,
     parent: p.parent && slugs.has(p.parent) ? virtualSlug(p.parent) : null,
   }));
   // Never shadow a pre-existing hand-edited or migrated space with the reserved identity.
-  if (db.spaces.some(s => s.slug === BUILT_IN_SLUG)) {
-    throw Object.assign(new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`), { code: 503, errorCode: 'BUILT_IN_SLUG_CONFLICT' });
+  if (db.spaces.some(s => s.slug === templateVirtualSlug) || db.pages.some(p => p.slug === templateVirtualSlug)) {
+    const message = templateVirtualSlug === BUILT_IN_SLUG
+      ? `数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`
+      : `数据目录中已有空间或页面 ${templateVirtualSlug}，请先备份并将它改为其他 slug`;
+    throw Object.assign(new Error(message), { code: 503, errorCode: 'BUILT_IN_SLUG_CONFLICT' });
   }
   db.spaces.push(virtual);
   db.pages.push(...pages);
@@ -353,12 +379,28 @@ function readDb(): Database {
 /** Persist `db`. `removed` must list the slugs this request deleted or renamed away; the store
  *  unlinks only those files, never every file the new db fails to mention (see writeStore). */
 function writeDb(db: Database, removed: Iterable<string> = [], options: WriteOptions = {}): void {
+  const builtInSpaces = new Set(db.spaces.filter(s => s.builtIn).map(s => s.slug));
   const ordinary = options.onlyCreate ? db : {
     ...db,
     spaces: db.spaces.filter(s => !s.builtIn),
-    pages: db.pages.filter(p => p.space !== BUILT_IN_SLUG || !isBuiltInPageSlug(p.slug)),
+    pages: db.pages.filter(p => !builtInSpaces.has(p.space) || !isBuiltInPageSlug(p.slug)),
   };
   writeStore(DATA_DIR, ordinary, removed, { preserveLocked: !options.onlyCreate, ...options });
+}
+
+/** Refuse source edits when the resolved template and user-data trees overlap. */
+function requireSeparateTemplate(): void {
+  let template: string;
+  let data: string;
+  try { template = fs.realpathSync(TEMPLATE_DIR); data = fs.realpathSync(DATA_DIR); }
+  catch { throw Object.assign(new Error('无法确认模板与数据目录互相独立'), { code: 409 }); }
+  const contains = (a: string, b: string) => {
+    const relative = path.relative(a, b);
+    return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
+  };
+  if (contains(template, data) || contains(data, template)) {
+    throw Object.assign(new Error('模板与数据目录重叠，禁止开发模式模板写入'), { code: 409 });
+  }
 }
 
 function descendantsOf(list: Page[], slug: string): Set<string> {
@@ -443,21 +485,22 @@ const MIME: Record<string, string> = {
  */
 let indexHtmlCache: string | null = null;
 
-function indexHtml(): string {
-  if (indexHtmlCache !== null) return indexHtmlCache;
-  let html = '';
-  try {
-    html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
-  } catch {
-    return ''; // let the caller fall back to streaming the file
+function indexHtml(basePath: string): string {
+  if (indexHtmlCache === null) {
+    try {
+      indexHtmlCache = injectFooter(fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8'), readFooterOptions(CONFIG));
+    } catch {
+      return '';
+    }
   }
-  // injectFooter also consumes the marker when no filing is configured, so the
-  // served HTML never ships an HTML comment describing an internal hook.
-  indexHtmlCache = injectFooter(html, readFooterOptions(CONFIG));
-  return indexHtmlCache;
+  // Cache only the invariant shell: the public prefix belongs to this request.
+  let html = indexHtmlCache.replace(/<head>/i, `<head>\n<meta name="doclight-base-path" content="${basePath}">`);
+  html = html.replace(/(<(?:link|script)\b[^>]*\b(?:href|src)=["'])\/(?!\/)/gi, `$1${basePath}/`);
+  html = html.replace(/(<a\b[^>]*\bclass=["'][^"']*\bbrand\b[^"']*["'][^>]*\bhref=["'])\/(?!\/)/gi, `$1${basePath}/`);
+  return html;
 }
 
-function serveStatic(res: ServerResponse, urlPath: string): void {
+function serveStatic(res: ServerResponse, urlPath: string, basePath: string): void {
   // A malformed escape such as `/%` makes `decodeURIComponent` throw `URIError`. This runs outside
   // the request promise chain (it is called directly by `handler`), so the throw had nowhere to be
   // caught and killed the process — one request to any such path took the whole site down.
@@ -479,7 +522,7 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
 
   // Every route resolves to the same shell, so serve the injected copy for it.
   if (file === path.join(PUBLIC_DIR, 'index.html')) {
-    const html = indexHtml();
+    const html = indexHtml(basePath);
     if (html) {
       res.writeHead(200, { ...headers, 'Content-Length': Buffer.byteLength(html) });
       res.end(html);
@@ -551,10 +594,10 @@ function getSession(req: IncomingMessage): { user: string; token: string } | nul
   s.exp = Date.now() + SESSION_TTL; // slide the expiry forward
   return { user: s.user, token };
 }
-function issueSession(res: ServerResponse, user: string): void {
+function issueSession(res: ServerResponse, user: string, basePath: string): void {
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, { user, exp: Date.now() + SESSION_TTL });
-  res.setHeader('Set-Cookie', `dl_sess=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${7 * 86400}`);
+  res.setHeader('Set-Cookie', `dl_sess=${token}; HttpOnly; SameSite=Strict; Path=${basePath || '/'}; Max-Age=${7 * 86400}`);
   return json(res, 200, { ok: true, user });
 }
 function purgeExpired(): void {
@@ -563,7 +606,7 @@ function purgeExpired(): void {
   for (const [k, v] of sessions) if (v.exp < now) sessions.delete(k);
 }
 
-async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: string[]): Promise<void> {
+async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: string[], basePath: string): Promise<void> {
   const action = parts[2] || '';
   const a = ensureAuthRecord();
 
@@ -595,7 +638,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     a.user = user; a.stored = ks;
     writeAuth(a);
     console.log(`· 站长账号已初始化：${user}`);
-    return issueSession(res, user);
+    return issueSession(res, user, basePath);
   }
 
   if (req.method === 'POST' && action === 'login') {
@@ -613,13 +656,13 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
       crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
     if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
     failLog.delete(ipOf(req));
-    return issueSession(res, a.user);
+    return issueSession(res, a.user, basePath);
   }
 
   if (req.method === 'POST' && action === 'logout') {
     const sess = getSession(req);
     if (sess) sessions.delete(sess.token);
-    res.setHeader('Set-Cookie', 'dl_sess=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+    res.setHeader('Set-Cookie', `dl_sess=; HttpOnly; SameSite=Strict; Path=${basePath || '/'}; Max-Age=0`);
     return json(res, 200, { ok: true });
   }
 
@@ -628,12 +671,12 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
 
 /* --------------------------------------------------------------- Routing */
 
-async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
+async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: string, basePath: string): Promise<void> {
   const parts = pathname.split('/').filter(Boolean); // ['api','pages',':slug?']
   const key = parts[1] || '';
 
   /* Auth endpoints */
-  if (key === 'auth') return handleAuth(req, res, parts);
+  if (key === 'auth') return handleAuth(req, res, parts, basePath);
 
   /* Document writes require a session (reads stay public) */
   if ((key === 'pages' || key === 'spaces') && req.method !== 'GET') {
@@ -649,7 +692,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     return json(res, 401, { error: '请先登录后再修改', needAuth: true });
   }
   const db = readDb();
-  const isLocked = (slug: string) => slug === BUILT_IN_SLUG || db.spaces.some(s => s.slug === slug && s.locked === true);
+  const builtInSpace = db.spaces.find(s => s.builtIn)?.slug;
+  const isLocked = (slug: string) => slug === builtInSpace || slug === BUILT_IN_SLUG || db.spaces.some(s => s.slug === slug && s.locked === true);
   const locked = () => json(res, 423, { error: '空间已锁定' });
 
   /* Full tree: spaces + page metadata */
@@ -679,7 +723,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       const slug = decodeURIComponent(parts[2]);
       const space = db.spaces.find(s => s.slug === slug);
       if (!space) return json(res, 404, { error: '空间不存在' });
-      if (slug === BUILT_IN_SLUG) return locked();
+      if (slug === builtInSpace || slug === BUILT_IN_SLUG) return locked();
       if (typeof body.locked !== 'boolean') return json(res, 400, { error: 'locked 参数必须为布尔值' });
       if (!body.locked) {
         if (rateLimited(req)) return json(res, 429, { error: '尝试过于频繁，请两分钟后再试' });
@@ -709,6 +753,37 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       const idx = db.spaces.findIndex(s => s.slug === slug);
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
+        if (slug === builtInSpace && CONFIG.devMode) {
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['title', 'desc', 'sort', 'slug'].includes(k))) return locked();
+          const changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string } = {};
+          if (body.slug !== undefined) {
+            if (Object.keys(body).length !== 1 || typeof body.slug !== 'string' || (body.slug !== BUILT_IN_SLUG && (!SLUG_RE.test(body.slug) || body.slug === 'spaces' || body.slug === 'api'))) return json(res, 400, { error: '空间 slug 无效或不能与其他修改同时提交' });
+            if (body.slug !== slug && (db.pages.some(p => p.slug === body.slug) || db.spaces.some(s => s.slug === body.slug))) return json(res, 409, { error: '该 slug 已被占用' });
+            if (body.slug !== slug && SLUG_RE.test(body.slug)) {
+              try { fs.lstatSync(path.join(DATA_DIR, 'pages', `${body.slug}.md`)); return json(res, 409, { error: '该 slug 已被占用' }); }
+              catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+            }
+            changes.virtualSlug = body.slug;
+          }
+          if (body.title !== undefined) {
+            if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return json(res, 400, { error: '空间名称须为 1–120 个字符' });
+            changes.title = body.title.trim();
+          }
+          if (body.desc !== undefined) {
+            if (typeof body.desc !== 'string' || body.desc.trim().length > 200) return json(res, 400, { error: '空间描述须为不超过 200 个字符' });
+            changes.desc = body.desc.trim();
+          }
+          if (body.sort !== undefined) {
+            if (body.sort !== null && !isSortKey(body.sort)) return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
+            changes.sort = body.sort as SortKey | null;
+          }
+          requireSeparateTemplate();
+          editTemplateSpace(TEMPLATE_DIR, changes);
+          templateCache = null;
+          const updated = readDb().spaces.find(s => s.builtIn);
+          if (!updated) throw new Error('updated template space is unavailable');
+          return json(res, 200, updated);
+        }
         if (isLocked(slug)) return locked();
         // Validate all fields before applying anything: an early return must not leave a
         // partially updated tree behind (a slug rename also re-points every page, so it
@@ -755,6 +830,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       }
       if (req.method === 'DELETE') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
+        if (slug === builtInSpace && CONFIG.devMode) {
+          let removedSources: string[];
+          try { removedSources = deleteTemplateSpace(templateDirs()); }
+          catch (error) { return json(res, templateErrorStatus(error), { error: (error as Error).message }); }
+          templateCache = null;
+          return json(res, 200, { ok: true, removedSpace: slug, removedPages: removedSources.map(source => `${BUILT_IN_SLUG}-${source}`) });
+        }
         if (isLocked(slug)) return locked();
         const spaceSlug = db.spaces[idx].slug;
         const removedPages = db.pages.filter(p => p.space === spaceSlug).map(p => p.slug);
@@ -782,6 +864,89 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     }
     if (req.method === 'PUT') {
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
+      if (isBuiltInPageSlug(slug) && db.pages[idx].space === builtInSpace) {
+        if (!CONFIG.devMode) return locked();
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'title' && k !== 'content' && k !== 'parent' && k !== 'slug' && k !== 'space')) return locked();
+        // Moving a built-in page subtree into an ordinary space rewrites every moved file.
+        if (body.space !== undefined) {
+          if (Object.keys(body).some(k => k !== 'space' && k !== 'parent')) return locked();
+          if (typeof body.space !== 'string' || body.space === builtInSpace || body.space === BUILT_IN_SLUG) {
+            return json(res, 400, { error: '目标空间无效' });
+          }
+          const targetSpace = db.spaces.find(s => s.slug === body.space && !s.builtIn);
+          if (!targetSpace) return json(res, 404, { error: '目标空间不存在' });
+          const parent = body.parent === undefined || body.parent === null ? null : body.parent;
+          if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
+          let movedSlugs: string[];
+          try { movedSlugs = moveTemplatePageToSpace(templateDirs(), slug.slice(BUILT_IN_SLUG.length + 1), body.space, parent); }
+          catch (error) { return json(res, templateErrorStatus(error), { error: (error as Error).message }); }
+          templateCache = null;
+          const movedTree = readDb();
+          const moved = movedTree.pages.find(p => p.slug === movedSlugs[0] && p.space === body.space);
+          if (!moved) throw new Error('moved page is unavailable');
+          return json(res, 200, moved);
+        }
+        // A source slug rename rewrites the file name, every direct child and the space home.
+        if (body.slug !== undefined) {
+          if (Object.keys(body).length !== 1 || typeof body.slug !== 'string') return json(res, 400, { error: '页面 slug 只能单独提交' });
+          const nextSlug = body.slug.trim();
+          if (!SLUG_RE.test(nextSlug)) return json(res, 400, { error: 'slug 只能含小写字母、数字、下划线（1–80 位）' });
+          if (RESERVED_SLUGS.has(nextSlug)) return json(res, 400, { error: '该 slug 为系统保留字' });
+          const target = `${BUILT_IN_SLUG}-${nextSlug}`;
+          if (target !== slug && (db.pages.some(p => p.slug === target) || db.spaces.some(s => s.slug === nextSlug || s.slug === target))) {
+            return json(res, 409, { error: '该 slug 已被占用' });
+          }
+          let removed: string[];
+          try { removed = renameTemplatePage(templateDirs(), slug.slice(BUILT_IN_SLUG.length + 1), nextSlug); }
+          catch (error) { return json(res, templateErrorStatus(error), { error: (error as Error).message }); }
+          templateCache = null;
+          const renamed = readDb().pages.find(p => p.slug === target && p.space === builtInSpace);
+          if (!renamed) return json(res, 409, { error: `页面已改名为 ${removed.length ? target : slug}，请刷新后重试` });
+          return json(res, 200, renamed);
+        }
+        const changes: { title?: string; content?: string; parent?: string | null } = {};
+        if (body.parent !== undefined) {
+          const parent = body.parent;
+          if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
+          if (parent === slug) return json(res, 400, { error: '不能移动到自身之下' });
+          if (parent) {
+            const target = db.pages.find(p => p.slug === parent && p.space === builtInSpace);
+            if (!target || !isBuiltInPageSlug(parent)) return json(res, 400, { error: '父级必须位于同一空间' });
+            if (descendantsOf(db.pages, slug).has(parent)) return json(res, 400, { error: '不能移动到自己的子页面之下' });
+            // Confirm ownership from the target's raw YAML, not readStore's fallback mapping.
+            editTemplatePage(TEMPLATE_DIR, parent.slice(BUILT_IN_SLUG.length + 1), {});
+          }
+          changes.parent = parent ? parent.slice(BUILT_IN_SLUG.length + 1) : null;
+        }
+        if (body.title !== undefined) {
+          if (typeof body.title !== 'string') return json(res, 400, { error: '标题必须为字符串' });
+          changes.title = body.title.trim();
+          if (!changes.title) return json(res, 400, { error: '标题不能为空' });
+          if (changes.title.length > 120) return json(res, 400, { error: '标题不能超过 120 字符' });
+        }
+        if (body.content !== undefined) {
+          if (typeof body.content !== 'string') return json(res, 400, { error: '内容必须为字符串' });
+          if (body.content.replace(/\r\n/g, '\n').length > 500 * 1024) return json(res, 400, { error: '内容超过 500 KiB 限制' });
+          changes.content = sanitizeMarkdown(body.content);
+        }
+        requireSeparateTemplate();
+        editTemplatePage(TEMPLATE_DIR, slug.slice(BUILT_IN_SLUG.length + 1), changes);
+        templateCache = null;
+        const updated = readDb().pages.find(p => p.slug === slug && p.space === builtInSpace);
+        if (!updated) throw new Error('updated template page is unavailable');
+        return json(res, 200, updated);
+      }
+      if (CONFIG.devMode && builtInSpace && body.space === builtInSpace) {
+        if (Object.keys(body).some(k => k !== 'space' && k !== 'parent')) return locked();
+        if (body.parent !== undefined && body.parent !== null) return json(res, 400, { error: '移入内置空间时只能移动到顶层' });
+        let movedSlugs: string[];
+        try { movedSlugs = moveDataPageToTemplate(templateDirs(), slug); }
+        catch (error) { return json(res, templateErrorStatus(error), { error: (error as Error).message }); }
+        templateCache = null;
+        const moved = readDb().pages.find(p => p.slug === `${BUILT_IN_SLUG}-${movedSlugs[0]}` && p.space === builtInSpace);
+        if (!moved) throw new Error('moved template page is unavailable');
+        return json(res, 200, moved);
+      }
       if (isBuiltInPageSlug(slug) || isLocked(db.pages[idx].space)) return locked();
       if (typeof body.space === 'string' && isLocked(body.space)) return locked();
       if (typeof body.space === 'string' && body.space !== db.pages[idx].space &&
@@ -842,6 +1007,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     }
     if (req.method === 'DELETE') {
       if (idx < 0) return json(res, 404, { error: '页面不存在' });
+      if (db.pages[idx].space === builtInSpace && isBuiltInPageSlug(slug)) {
+        if (!CONFIG.devMode) return locked();
+        let removedSources: string[];
+        try { removedSources = deleteTemplateSubtree(templateDirs(), slug.slice(BUILT_IN_SLUG.length + 1)); }
+        catch (error) { return json(res, templateErrorStatus(error), { error: (error as Error).message }); }
+        templateCache = null;
+        return json(res, 200, { ok: true, removed: removedSources.map(source => `${BUILT_IN_SLUG}-${source}`) });
+      }
       const doomed = [slug, ...descendantsOf(db.pages, slug)];
       if (db.pages.some(p => doomed.includes(p.slug) && isLocked(p.space)) ||
           db.spaces.some(s => isLocked(s.slug) && s.home && doomed.includes(s.home))) return locked();
@@ -859,13 +1032,32 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
     if (!title) return json(res, 400, { error: '请提供页面标题' });
     const space = String(body.space || '');
     if (!db.spaces.some(s => s.slug === space)) return json(res, 404, { error: '目标空间不存在' });
-    if (isLocked(space)) return locked();
+    if (isLocked(space) && !(space === builtInSpace && CONFIG.devMode)) return locked();
     const parent = body.parent === undefined ? null : body.parent;
     if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
     if (parent) {
       const pp = db.pages.find(p => p.slug === parent);
       if (!pp) return json(res, 404, { error: '目标父级不存在' });
       if (pp.space !== space) return json(res, 400, { error: '父级必须位于同一空间' });
+    }
+    if (space === builtInSpace) {
+      if (parent) editTemplatePage(TEMPLATE_DIR, parent.slice(BUILT_IN_SLUG.length + 1), {});
+      const base = slugify(title).slice(0, 70);
+      let sourceSlug = base;
+      const taken = (s: string) => db.pages.some(p => p.slug === `${BUILT_IN_SLUG}-${s}`) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
+      while (taken(sourceSlug)) sourceSlug = base + '_' + randomToken(4);
+      const now = Date.now();
+      const page: Page = { slug: sourceSlug, space: 'default', parent: parent ? parent.slice(BUILT_IN_SLUG.length + 1) : null, title, content: '', createdAt: now, updatedAt: now };
+      requireSeparateTemplate();
+      try { createTemplatePage(TEMPLATE_DIR, page); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return json(res, 409, { error: '模板页面目标已存在' });
+        throw err;
+      }
+      templateCache = null;
+      const created = readDb().pages.find(p => p.slug === `${BUILT_IN_SLUG}-${sourceSlug}` && p.space === builtInSpace);
+      if (!created) throw new Error('created template page is unavailable');
+      return json(res, 201, created);
     }
     const taken = (s: string) => db.pages.some(p => p.slug === s) || db.spaces.some(x => x.slug === s) || RESERVED_SLUGS.has(s);
     let slug = slugify(title);
@@ -880,6 +1072,53 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
   return json(res, 404, { error: 'Not Found' });
 }
 
+/** Infer only from the request target, never from proxy-controlled headers. Ambiguous
+ * routes fall back to root; operators can pin basePath when that is insufficient. */
+function discoverBasePath(pathname: string): string {
+  const segments = pathname.split('/').slice(1);
+  const isAsset = (suffix: string) => {
+    if (!/^\/[A-Za-z0-9._~/-]+$/.test(suffix) || suffix.split('/').some(s => s === '.' || s === '..')) return false;
+    const file = path.resolve(PUBLIC_DIR, '.' + suffix);
+    try { return file.startsWith(PUBLIC_DIR + path.sep) && fs.statSync(file).isFile(); } catch { return false; }
+  };
+  const isApi = (suffix: string) => suffix === '/api' || suffix.startsWith('/api/');
+  if (isApi(pathname) || isAsset(pathname) || pathname === '/spaces' || pathname === '/spaces/') return '';
+
+  let db: Database;
+  try { db = readDb(); } catch { return ''; }
+  const space = (s: string) => db.spaces.some(x => x.slug === s);
+  const page = (s: string) => db.pages.some(x => x.slug === s);
+  // A known root slug always wins, even if a later segment resembles an API or asset.
+  if (space(segments[0]) || page(segments[0])) return '';
+  const safePrefix = (parts: string[]) => parts.length > 0 && parts.every(s => /^[A-Za-z0-9._~-]+$/.test(s) && s !== '.' && s !== '..');
+  const candidates: string[] = [];
+  for (let i = 1; i < segments.length; i++) {
+    const prefix = segments.slice(0, i);
+    if (!safePrefix(prefix)) continue;
+    const suffix = '/' + segments.slice(i).join('/');
+    if (isApi(suffix) || isAsset(suffix)) candidates.push('/' + prefix.join('/'));
+  }
+  if (candidates.length) return candidates.length === 1 ? candidates[0] : '';
+  // Prefer a space route over its final page slug; the latter is not an independent
+  // candidate when it is part of that same known space route.
+  const routeCandidates: string[] = [];
+  for (let i = 1; i < segments.length; i++) {
+    const prefix = segments.slice(0, i);
+    if (!safePrefix(prefix)) continue;
+    const rest = segments.slice(i).filter(Boolean);
+    if (rest.length && (space(rest[0]) && rest.slice(1).every(s => db.pages.some(p => p.slug === s && p.space === rest[0])) ||
+        rest.length === 1 && (page(rest[0]) || rest[0] === 'spaces'))) {
+      routeCandidates.push('/' + prefix.join('/'));
+      if (space(rest[0])) break;
+    }
+  }
+  if (routeCandidates.length === 1) return routeCandidates[0];
+  // A single unknown segment may be a mount root, with or without a trailing slash.
+  // Known slugs win above; explicit basePath resolves inherently ambiguous cases.
+  if ((segments.length === 1 || (segments.length === 2 && segments[1] === '')) && safePrefix([segments[0]])) return '/' + segments[0];
+  return '';
+}
+
 function handler(req: IncomingMessage, res: ServerResponse): void {
   // Parsing the request target can itself throw: an absolute-form target such as
   // `GET http://[ HTTP/1.1` (sendable by any raw socket, `curl --request-target` or a scanner)
@@ -889,12 +1128,17 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   let pathname: string;
   try { pathname = new URL(req.url || '/', 'http://x').pathname; }
   catch { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Bad Request'); return; }
+  const basePath = CONFIG.basePathExplicit ? CONFIG.basePath : discoverBasePath(pathname);
+  // Explicit configuration also supports a proxy that has already stripped the prefix.
+  if (basePath && (pathname === basePath || pathname.startsWith(basePath + '/'))) {
+    pathname = pathname.slice(basePath.length) || '/';
+  }
   const started = Date.now();
   res.on('finish', () => {
     console.log(`${req.method} ${pathname} → ${res.statusCode} (${Date.now() - started}ms)`);
   });
 
-  Promise.resolve(pathname.startsWith('/api/') ? handleApi(req, res, pathname) : null)
+  Promise.resolve(pathname.startsWith('/api/') ? handleApi(req, res, pathname, basePath) : null)
     .catch((err: unknown) => {
       // Deliberate failures carry a numeric `code` (413 body too large, 400 invalid JSON) and a
       // message written for the caller. Everything else is an unexpected fault: `fs` and most Node
@@ -920,7 +1164,7 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
       json(res, status, conflict ? { error: message, errorCode: 'BUILT_IN_SLUG_CONFLICT' } : { error: message });
     });
 
-  if (!pathname.startsWith('/api/')) serveStatic(res, pathname);
+  if (!pathname.startsWith('/api/')) serveStatic(res, pathname, basePath);
 }
 
 /* ------------------------------------------------- Free-port startup scan */
@@ -937,7 +1181,13 @@ function listen(server: Server, port: number, retriesLeft: number, host?: string
 }
 
 async function main(): Promise<void> {
+  if (CONFIG.devMode) console.warn('· 警告：DOCLIGHT_DEV_MODE 已启用，已登录用户可直接修改内置模板源文件；公开监听存在风险');
   ensureData();
+  // Finish a structural edit that was interrupted by a crash before serving any request.
+  if (CONFIG.devMode) {
+    try { recoverTemplateTransaction(templateDirs()); }
+    catch (error) { console.warn(`· 未完成的内置模板结构事务无法自动恢复：${(error as Error).message}`); }
+  }
   const startPort = CONFIG.port;
   const host = CONFIG.host; // undefined = all interfaces
   // Port scanning suits interactive local use, but a service manager must fail

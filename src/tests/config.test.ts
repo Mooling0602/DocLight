@@ -43,6 +43,8 @@ assert.equal(defaults.host, undefined, '默认应绑定全部网卡');
 assert.equal(defaults.strictPort, false, '默认不进入严格端口模式');
 assert.equal(defaults.dataDir, path.join(tmpRoot, 'data'), '默认数据目录应位于项目根下');
 assert.equal(defaults.icp, '', '默认备案号应为空');
+assert.equal(defaults.basePath, '', '默认路径前缀应为空');
+assert.equal(defaults.basePathExplicit, false);
 
 /* ---------- 2. TOML values are read ---------- */
 
@@ -181,6 +183,29 @@ assert.equal(roResult, null, '根目录不可写时应静默跳过而非抛错')
 
 fs.rmSync(seedRoot, { recursive: true, force: true });
 fs.rmSync(roRoot, { recursive: true, force: true });
+
+/* ---------- 10. Base path validation and precedence ---------- */
+write('basePath = "/editor/docs/"\n');
+assert.equal(load().basePath, '/editor/docs');
+assert.equal(load().basePathExplicit, true);
+assert.equal(load({ DOCLIGHT_BASE_PATH: '' }).basePathExplicit, true);
+write('basePath = ""\n');
+assert.equal(load().basePathExplicit, true);
+assert.equal(load().basePath, '');
+write('basePath = "/"\n');
+assert.equal(load().basePathExplicit, true);
+assert.equal(load().basePath, '');
+write('basePath = "/editor/docs/"\n');
+assert.equal(load({ DOCLIGHT_BASE_PATH: '/other/' }).basePath, '/other');
+assert.equal(load({ DOCLIGHT_BASE_PATH: '' }).basePath, '');
+assert.equal(load({ DOCLIGHT_BASE_PATH: '/' }).basePath, '');
+for (const value of ['editor', '//evil', '/a//b', '/a/../b', '/./a', '/a%2fb', '/%2e%2e', '/a?x', '/a#x', '/a\\b', '/a; Path=/', '/a" onload="x', '/a\r\nSet-Cookie:x', '/a//']) {
+  assert.throws(() => load({ DOCLIGHT_BASE_PATH: value }), /basePath/, value);
+}
+write('basePath = 42\n');
+assert.throws(() => load(), /basePath/);
+write('basePath = "/../secret"\n');
+assert.throws(() => load(), /basePath/);
 
 fs.rmSync(tmpRoot, { recursive: true, force: true });
 console.log('config assertions passed');

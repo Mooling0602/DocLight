@@ -13,7 +13,10 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import * as YAML from 'yaml';
+import { runTemplateTransaction } from './template-transaction.js';
+import type { TemplateTransaction } from './template-transaction.js';
 import { DEFAULT_SORT, isSortKey } from './sort.js';
 import type { SortKey } from './sort.js';
 
@@ -31,6 +34,8 @@ export interface Space {
   locked?: boolean;
   /** Source-owned virtual space, never persisted. */
   builtIn?: boolean;
+  /** Source-owned pages can be edited in developer mode. */
+  devEditable?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -246,7 +251,464 @@ export function readStore(dataDir: string): Database {
   return { version: 4, spaces, pages: ordered };
 }
 
+/* ------------------------------------------------------------ structure */
+
+/** Directories one developer-mode structural change may touch. */
+export interface TemplateDirs {
+  templateDir: string;
+  dataDir: string;
+  stateDir: string;
+}
+
+interface SourcePage {
+  slug: string;
+  raw: string;
+  title: string;
+  space: string;
+  parent: string | null;
+}
+
+const SOURCE_FENCE = /^(\uFEFF?---\r?\n)([\s\S]*?)(^---[ \t]*\r?\n)/m;
+
+function sourceError(message: string, code = 409): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/** Parse a source page strictly: structural edits must never guess at a broken file. */
+function parseSourcePage(slug: string, raw: string): SourcePage {
+  const match = SOURCE_FENCE.exec(raw);
+  if (!match || match.index !== 0) throw sourceError('内置页面缺少有效的 front matter');
+  const doc = YAML.parseDocument(match[2], { uniqueKeys: true });
+  if (doc.errors.length || !YAML.isMap(doc.contents)) throw sourceError('内置页面的 front matter 无效');
+  const title = doc.get('title');
+  const space = doc.get('space');
+  const parentNode = doc.get('parent', true);
+  if (typeof title !== 'string' || typeof space !== 'string') throw sourceError('内置页面缺少 title 或 space');
+  // A YAML `null` scalar reads back as `undefined` from `get`, so inspect the node itself.
+  const parent = parentNode === undefined ? null : YAML.isScalar(parentNode) ? parentNode.value : undefined;
+  if (!(parent === null || typeof parent === 'string')) throw sourceError('内置页面的 parent 无效');
+  return { slug, raw, title, space, parent: parent as string | null };
+}
+
+/**
+ * Replace only the requested front-matter scalars, leaving comments, ordering, unknown keys and
+ * the body byte-for-byte intact. Anchors, aliases and block scalars are refused: rewriting them
+ * in place can silently change another key or swallow the following line.
+ */
+function patchSourceFrontMatter(raw: string, changes: { title?: string; parent?: string | null; space?: string }): string {
+  const match = SOURCE_FENCE.exec(raw);
+  if (!match || match.index !== 0) throw sourceError('内置页面缺少有效的 front matter');
+  const yamlText = match[2];
+  const doc = YAML.parseDocument(yamlText, { uniqueKeys: true });
+  if (doc.errors.length || !YAML.isMap(doc.contents)) throw sourceError('内置页面的 front matter 无效');
+  let hasReferences = false;
+  YAML.visit(doc, (_key, node) => {
+    if (YAML.isAlias(node) || (YAML.isNode(node) && 'anchor' in node && node.anchor)) hasReferences = true;
+  });
+  if (hasReferences) throw sourceError('内置页面的 front matter 使用了锚点或别名，无法安全修改');
+  const edits: Array<{ start: number; end: number; value: string }> = [];
+  const edit = (key: 'title' | 'parent' | 'space', value: unknown) => {
+    const node = doc.get(key, true);
+    if (!YAML.isScalar(node) || (typeof node.value !== 'string' && node.value !== null) || !node.range ||
+        node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') {
+      throw sourceError(`内置页面的 ${key} 无法安全修改`);
+    }
+    edits.push({ start: node.range[0], end: node.range[1], value: JSON.stringify(value) });
+  };
+  if (changes.title !== undefined) edit('title', changes.title);
+  if (changes.parent !== undefined) edit('parent', changes.parent);
+  if (changes.space !== undefined) edit('space', changes.space);
+  let nextYaml = yamlText;
+  for (const item of edits.sort((a, b) => b.start - a.start)) {
+    nextYaml = nextYaml.slice(0, item.start) + item.value + nextYaml.slice(item.end);
+  }
+  const verified = YAML.parseDocument(nextYaml, { uniqueKeys: true });
+  if (verified.errors.length || !YAML.isMap(verified.contents)) throw sourceError('修改后的 front matter 无效');
+  const expected = doc.toJS() as Record<string, unknown>;
+  if (changes.title !== undefined) expected.title = changes.title;
+  if (changes.parent !== undefined) expected.parent = changes.parent;
+  if (changes.space !== undefined) expected.space = changes.space;
+  if (!isDeepStrictEqual(expected, verified.toJS())) throw sourceError('修改 front matter 会改变其他字段，已拒绝');
+  return match[1] + nextYaml + match[3] + raw.slice(match[0].length);
+}
+
+interface TemplateIndex {
+  spaces: Space[];
+  [key: string]: unknown;
+}
+
+function readTemplateIndex(tx: TemplateTransaction): TemplateIndex {
+  let parsed: unknown;
+  try { parsed = JSON.parse(tx.read('template', 'spaces.json').toString('utf8')); }
+  catch { throw sourceError('内置空间索引无效'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw sourceError('内置空间索引无效');
+  const index = parsed as TemplateIndex;
+  if (!Array.isArray(index.spaces)) throw sourceError('内置空间索引无效');
+  const defaults = index.spaces.filter(space => space && typeof space === 'object' && space.slug === 'default');
+  if (defaults.length !== 1) throw sourceError('内置空间索引无效');
+  return index;
+}
+
+function writeTemplateIndex(tx: TemplateTransaction, index: TemplateIndex): void {
+  tx.write('template', 'spaces.json', JSON.stringify(index, null, 2) + '\n');
+}
+
+function readTemplatePages(tx: TemplateTransaction): Map<string, SourcePage> {
+  const pages = new Map<string, SourcePage>();
+  for (const name of tx.list('template', 'pages')) {
+    if (!name.endsWith('.md')) continue;
+    const slug = name.slice(0, -3);
+    if (!SLUG_RE.test(slug)) throw sourceError(`模板页面文件名不合法：${name}`);
+    const page = parseSourcePage(slug, tx.read('template', `pages/${name}`).toString('utf8'));
+    if (page.space !== 'default') throw sourceError(`模板页面 ${name} 的 space 不是 default`);
+    pages.set(slug, page);
+  }
+  return pages;
+}
+
+function descendantsOfSource(pages: Map<string, SourcePage>, slug: string): Set<string> {
+  const doomed = new Set([slug]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const page of pages.values()) {
+      if (page.parent && doomed.has(page.parent) && !doomed.has(page.slug)) { doomed.add(page.slug); grew = true; }
+    }
+  }
+  return doomed;
+}
+
+/** Rename one built-in page slug, re-pointing its children and the space home in one transaction. */
+export function renameTemplatePage(dirs: TemplateDirs, fromSlug: string, toSlug: string): string[] {
+  if (!SLUG_RE.test(fromSlug) || !SLUG_RE.test(toSlug)) throw sourceError('slug 只能含小写字母、数字、下划线（1–80 位）', 400);
+  if (fromSlug === toSlug) return [];
+  return runTemplateTransaction(dirs, tx => {
+    const index = readTemplateIndex(tx);
+    const pages = readTemplatePages(tx);
+    const source = pages.get(fromSlug);
+    if (!source) throw sourceError('页面不存在', 404);
+    if (pages.has(toSlug) || tx.exists('template', `pages/${toSlug}.md`)) throw sourceError('该 slug 已被占用', 409);
+    for (const page of pages.values()) {
+      if (page.parent !== fromSlug) continue;
+      tx.write('template', `pages/${page.slug}.md`, patchSourceFrontMatter(page.raw, { parent: toSlug }));
+    }
+    const space = index.spaces.find(item => item.slug === 'default');
+    if (space && space.home === fromSlug) {
+      space.home = toSlug;
+      writeTemplateIndex(tx, index);
+    }
+    tx.write('template', `pages/${toSlug}.md`, source.raw);
+    tx.remove('template', `pages/${fromSlug}.md`);
+    return [fromSlug];
+  });
+}
+
+/** Remove one built-in page together with its descendants, clearing a home that pointed into it. */
+export function deleteTemplateSubtree(dirs: TemplateDirs, slug: string): string[] {
+  if (!SLUG_RE.test(slug)) throw sourceError('slug 只能含小写字母、数字、下划线（1–80 位）', 400);
+  return runTemplateTransaction(dirs, tx => {
+    const index = readTemplateIndex(tx);
+    const pages = readTemplatePages(tx);
+    if (!pages.has(slug)) throw sourceError('页面不存在', 404);
+    const doomed = descendantsOfSource(pages, slug);
+    for (const page of pages.values()) {
+      if (!doomed.has(page.slug) && page.parent && doomed.has(page.parent)) throw sourceError('仍有页面引用待删除的页面');
+    }
+    for (const victim of doomed) tx.remove('template', `pages/${victim}.md`);
+    const space = index.spaces.find(item => item.slug === 'default');
+    if (space && space.home && doomed.has(space.home)) {
+      space.home = null;
+      writeTemplateIndex(tx, index);
+    }
+    return [...doomed];
+  });
+}
+
+function dataSpaceSlugs(tx: TemplateTransaction): Set<string> {
+  const slugs = new Set<string>();
+  try {
+    const parsed = JSON.parse(tx.read('data', 'spaces.json').toString('utf8'));
+    if (parsed && Array.isArray(parsed.spaces)) {
+      for (const space of parsed.spaces as Array<Record<string, unknown>>) {
+        if (space && typeof space.slug === 'string') slugs.add(space.slug);
+      }
+    }
+  } catch { /* an absent or broken ordinary index is handled by the ordinary store itself */ }
+  return slugs;
+}
+
+/** Slugs of every ordinary page file, used to refuse a move that would overwrite one. */
+function dataPageSlugs(tx: TemplateTransaction): Set<string> {
+  const slugs = new Set<string>();
+  for (const name of tx.list('data', 'pages')) {
+    if (!name.endsWith('.md')) continue;
+    const slug = name.slice(0, -3);
+    if (SLUG_RE.test(slug)) slugs.add(slug);
+  }
+  return slugs;
+}
+
+interface OrdinaryPage {
+  slug: string;
+  raw: string;
+  space: string;
+  parent: string | null;
+}
+
+function readOrdinaryPages(tx: TemplateTransaction): Map<string, OrdinaryPage> {
+  const pages = new Map<string, OrdinaryPage>();
+  for (const slug of dataPageSlugs(tx)) {
+    const raw = tx.read('data', `pages/${slug}.md`).toString('utf8');
+    const { meta } = splitFrontMatter(raw);
+    if (typeof meta.space !== 'string') throw sourceError(`普通页面 ${slug}.md 的 front matter 无效`);
+    const parent = meta.parent === undefined || meta.parent === null ? null : meta.parent;
+    if (!(parent === null || typeof parent === 'string')) throw sourceError(`普通页面 ${slug}.md 的 parent 无效`);
+    pages.set(slug, { slug, raw, space: meta.space, parent });
+  }
+  return pages;
+}
+
+function ordinaryDescendants(pages: Map<string, OrdinaryPage>, slug: string): Set<string> {
+  const doomed = new Set([slug]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const page of pages.values()) {
+      if (page.parent && doomed.has(page.parent) && !doomed.has(page.slug)) { doomed.add(page.slug); grew = true; }
+    }
+  }
+  return doomed;
+}
+
+/**
+ * Move a built-in page subtree into an ordinary space: every source file becomes a normal page
+ * file in one transaction. Markdown bodies and unknown front matter are preserved verbatim.
+ */
+export function moveTemplatePageToSpace(dirs: TemplateDirs, sourceSlug: string, targetSpace: string, targetParent: string | null = null): string[] {
+  if (!SLUG_RE.test(sourceSlug)) throw sourceError('页面不存在', 404);
+  if (!SLUG_RE.test(targetSpace)) throw sourceError('目标空间不存在', 404);
+  if (targetParent !== null && !SLUG_RE.test(targetParent)) throw sourceError('目标父级不存在', 404);
+  return runTemplateTransaction(dirs, tx => {
+    const index = readTemplateIndex(tx);
+    const pages = readTemplatePages(tx);
+    if (!pages.has(sourceSlug)) throw sourceError('页面不存在', 404);
+    const doomed = descendantsOfSource(pages, sourceSlug);
+    const taken = dataPageSlugs(tx);
+    const ordinarySpaces = dataSpaceSlugs(tx);
+    for (const slug of doomed) {
+      if (taken.has(slug)) throw sourceError(`普通空间中已有页面 ${slug}，无法移动`, 409);
+      if (ordinarySpaces.has(slug)) throw sourceError(`普通空间中已有与 ${slug} 同名的空间，无法移动`, 409);
+    }
+    const ordinary = readOrdinaryPages(tx);
+    if (targetParent !== null) {
+      const target = ordinary.get(targetParent);
+      if (!target) throw sourceError('目标父级不存在', 404);
+      if (target.space !== targetSpace) throw sourceError('父级必须位于目标空间');
+      if (doomed.has(targetParent)) throw sourceError('不能移动到自己的子页面之下');
+    }
+    const emptied = new Set<string>();
+    for (const slug of doomed) {
+      const page = pages.get(slug)!;
+      const parent = slug === sourceSlug
+        ? targetParent
+        : page.parent && doomed.has(page.parent) ? page.parent : null;
+      const next = patchSourceFrontMatter(page.raw, { space: targetSpace, parent });
+      tx.write('data', `pages/${slug}.md`, next);
+      tx.remove('template', `pages/${slug}.md`);
+      emptied.add(slug);
+    }
+    const space = index.spaces.find(item => item.slug === 'default');
+    if (space && space.home && doomed.has(space.home)) {
+      space.home = null;
+      writeTemplateIndex(tx, index);
+    }
+    return [...emptied];
+  });
+}
+
+/**
+ * Move an ordinary page subtree into the built-in space: the files become source pages and the
+ * ordinary index loses any home pointer into the moved subtree.
+ */
+export function moveDataPageToTemplate(dirs: TemplateDirs, dataSlug: string): string[] {
+  if (!SLUG_RE.test(dataSlug)) throw sourceError('页面不存在', 404);
+  return runTemplateTransaction(dirs, tx => {
+    const templatePages = readTemplatePages(tx);
+    const ordinary = readOrdinaryPages(tx);
+    const source = ordinary.get(dataSlug);
+    if (!source) throw sourceError('页面不存在', 404);
+    const doomed = ordinaryDescendants(ordinary, dataSlug);
+    const ordinarySpaces = dataSpaceSlugs(tx);
+    for (const slug of doomed) {
+      if (templatePages.has(slug) || tx.exists('template', `pages/${slug}.md`)) {
+        throw sourceError(`内置空间中已有页面 ${slug}，无法移动`, 409);
+      }
+      // The page becomes `doclight-default-<slug>` on the public side, which must stay unique.
+      const virtual = `${BUILT_IN_SLUG}-${slug}`;
+      if (ordinary.has(virtual) || ordinarySpaces.has(virtual)) {
+        throw sourceError(`普通空间中已有与内置页面 ${virtual} 同名的条目，无法移动`, 409);
+      }
+    }
+    let dataIndex: { spaces?: unknown } | null = null;
+    try { dataIndex = JSON.parse(tx.read('data', 'spaces.json').toString('utf8')); } catch { dataIndex = null; }
+    for (const slug of doomed) {
+      const page = ordinary.get(slug)!;
+      // The root leaves its old space; children keep the subtree shape.
+      const parent = page.parent && doomed.has(page.parent) ? page.parent : null;
+      tx.write('template', `pages/${slug}.md`, patchSourceFrontMatter(page.raw, { space: 'default', parent }));
+      tx.remove('data', `pages/${slug}.md`);
+    }
+    if (dataIndex && Array.isArray(dataIndex.spaces)) {
+      let changed = false;
+      for (const space of dataIndex.spaces as Array<Record<string, unknown>>) {
+        if (typeof space.home === 'string' && doomed.has(space.home)) { space.home = null; changed = true; }
+      }
+      if (changed) tx.write('data', 'spaces.json', JSON.stringify(dataIndex, null, 2) + '\n');
+    }
+    return [...doomed];
+  });
+}
+
+/**
+ * Delete the source-backed built-in space: every template page goes away and the index keeps a
+ * tombstone so the space is not recreated (or reported as corrupt) on the next start.
+ */
+export function deleteTemplateSpace(dirs: TemplateDirs): string[] {
+  return runTemplateTransaction(dirs, tx => {
+    const index = readTemplateIndex(tx);
+    const pages = readTemplatePages(tx);
+    for (const slug of pages.keys()) tx.remove('template', `pages/${slug}.md`);
+    index.doclightBuiltInDeleted = true;
+    writeTemplateIndex(tx, index);
+    return [...pages.keys()];
+  });
+}
+
 /* ------------------------------------------------------------ write */
+
+/** Edit exactly one existing source file without normalising its other YAML metadata. */
+export function editTemplatePage(templateDir: string, slug: string, changes: { title?: string; content?: string; parent?: string | null }): void {
+  const invalid = () => Object.assign(new Error('内置页面模板无效或不安全'), { code: 400 });
+  if (!SLUG_RE.test(slug)) throw invalid();
+  const dir = path.join(templateDir, 'pages');
+  const file = path.join(dir, `${slug}.md`);
+  let stat: fs.Stats;
+  let raw: string;
+  try {
+    if (!fs.lstatSync(templateDir).isDirectory() || !fs.lstatSync(dir).isDirectory()) throw invalid();
+    stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.nlink !== 1) throw invalid();
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const opened = fs.fstatSync(fd);
+      if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw invalid();
+      raw = fs.readFileSync(fd, 'utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { throw invalid(); }
+  // The single-file editor reports every malformed source as 400; structural helpers below use
+  // 409 for conflicts, so normalise this path to the documented status.
+  let patched = raw;
+  try {
+    if (parseSourcePage(slug, raw).space !== 'default') throw invalid();
+    if (changes.title !== undefined || changes.parent !== undefined) {
+      patched = patchSourceFrontMatter(raw, { title: changes.title, parent: changes.parent });
+    }
+  } catch { throw invalid(); }
+  let next = patched;
+  if (changes.content !== undefined) {
+    const before = SOURCE_FENCE.exec(raw);
+    const after = SOURCE_FENCE.exec(patched);
+    if (!before || !after) throw invalid();
+    const oldBody = raw.slice(before[0].length);
+    const separator = oldBody.startsWith('\r\n') ? '\r\n' : oldBody.startsWith('\n') ? '\n' : '';
+    next = patched.slice(0, after[0].length) + separator + changes.content + '\n';
+  }
+  if (next === raw) return;
+  const tmp = path.join(dir, `.${slug}.${process.pid}.${require('node:crypto').randomBytes(12).toString('hex')}.tmp`);
+  let created = false;
+  try {
+    const fd = fs.openSync(tmp, 'wx', stat.mode & 0o777);
+    created = true;
+    try { fs.writeFileSync(fd, next, 'utf8'); } finally { fs.closeSync(fd); }
+    const current = fs.lstatSync(file);
+    if (!current.isFile() || current.dev !== stat.dev || current.ino !== stat.ino || current.nlink !== 1 ||
+        current.size !== stat.size || current.mtimeMs !== stat.mtimeMs || current.ctimeMs !== stat.ctimeMs) {
+      throw Object.assign(new Error('模板文件已变化，请重新加载后重试'), { code: 409 });
+    }
+    fs.renameSync(tmp, file);
+    created = false;
+  } finally {
+    if (created) fs.unlinkSync(tmp);
+  }
+}
+
+/** Create one source page exclusively; never replace an existing file or symlink. */
+export function createTemplatePage(templateDir: string, page: Page): void {
+  const invalid = () => Object.assign(new Error('内置页面模板无效或不安全'), { code: 400 });
+  if (!SLUG_RE.test(page.slug) || page.space !== 'default') throw invalid();
+  const dir = path.join(templateDir, 'pages');
+  if (!fs.lstatSync(templateDir).isDirectory() || !fs.lstatSync(dir).isDirectory()) throw invalid();
+  const file = path.join(dir, `${page.slug}.md`);
+  const tmp = path.join(dir, `.new.${process.pid}.${require('node:crypto').randomBytes(12).toString('hex')}.tmp`);
+  const fd = fs.openSync(tmp, 'wx', 0o644);
+  try {
+    try { fs.writeFileSync(fd, joinFrontMatter(page), 'utf8'); } finally { fs.closeSync(fd); }
+    fs.linkSync(tmp, file);
+  } finally { fs.unlinkSync(tmp); }
+}
+
+/** Update source-space metadata without serialising pages or discarding unknown index fields. */
+export function editTemplateSpace(templateDir: string, changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string }): void {
+  const invalid = () => Object.assign(new Error('内置空间模板无效或不安全'), { code: 400 });
+  const file = path.join(templateDir, 'spaces.json');
+  let stat: fs.Stats;
+  let raw: string;
+  try {
+    if (!fs.lstatSync(templateDir).isDirectory()) throw invalid();
+    stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.nlink !== 1) throw invalid();
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const opened = fs.fstatSync(fd);
+      if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw invalid();
+      raw = fs.readFileSync(fd, 'utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { throw invalid(); }
+  let index: { spaces?: unknown; doclightVirtualSlug?: unknown };
+  try { index = JSON.parse(raw); } catch { throw invalid(); }
+  if (!index || !Array.isArray(index.spaces)) throw invalid();
+  const validVirtualSlug = (value: unknown) => value === BUILT_IN_SLUG || (typeof value === 'string' && SLUG_RE.test(value) && value !== 'spaces' && value !== 'api');
+  if (index.doclightVirtualSlug !== undefined && !validVirtualSlug(index.doclightVirtualSlug)) throw invalid();
+  if (changes.virtualSlug !== undefined) {
+    if (!validVirtualSlug(changes.virtualSlug)) throw invalid();
+    index.doclightVirtualSlug = changes.virtualSlug;
+  }
+  const matches = index.spaces.filter((s: unknown) => s && typeof s === 'object' && (s as Space).slug === 'default');
+  if (matches.length !== 1) throw invalid();
+  const space = matches[0] as Space;
+  if (changes.title !== undefined) space.title = changes.title;
+  if (changes.desc !== undefined) space.desc = changes.desc;
+  if (changes.sort !== undefined) {
+    if (changes.sort === null) delete space.sort;
+    else space.sort = changes.sort;
+  }
+  space.updatedAt = Date.now();
+  const next = JSON.stringify(index, null, 2) + '\n';
+  const tmp = path.join(templateDir, `.spaces.${process.pid}.${require('node:crypto').randomBytes(12).toString('hex')}.tmp`);
+  let created = false;
+  try {
+    const fd = fs.openSync(tmp, 'wx', stat.mode & 0o777);
+    created = true;
+    try { fs.writeFileSync(fd, next, 'utf8'); } finally { fs.closeSync(fd); }
+    const current = fs.lstatSync(file);
+    if (!current.isFile() || current.dev !== stat.dev || current.ino !== stat.ino || current.nlink !== 1 ||
+        current.size !== stat.size || current.mtimeMs !== stat.mtimeMs || current.ctimeMs !== stat.ctimeMs) {
+      throw Object.assign(new Error('模板文件已变化，请重新加载后重试'), { code: 409 });
+    }
+    fs.renameSync(tmp, file);
+    created = false;
+  } finally { if (created) fs.unlinkSync(tmp); }
+}
 
 function sameContent(file: string, next: string): boolean {
   try { return fs.readFileSync(file, 'utf8') === next; } catch { return false; }

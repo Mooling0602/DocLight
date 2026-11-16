@@ -17,6 +17,7 @@ interface Space {
   sort?: SortKey;
   locked?: boolean;
   builtIn?: boolean;
+  devEditable?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -96,13 +97,25 @@ interface AppState {
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
+// The server supplies the public mount point; paths elsewhere in the app are site-relative.
+const baseValue = document.querySelector('meta[name="doclight-base-path"]')?.getAttribute('content')?.trim() || '';
+const BASE_PATH = baseValue && baseValue !== '/' ? '/' + baseValue.replace(/^\/+|\/+$/g, '') : '';
+function withBase(path: string): string {
+  return BASE_PATH + (path.startsWith('/') ? path : '/' + path);
+}
+function withoutBase(path: string): string | null {
+  if (!BASE_PATH) return path;
+  if (path === BASE_PATH) return '/';
+  return path.startsWith(BASE_PATH + '/') ? path.slice(BASE_PATH.length) : null;
+}
+
 function esc(str: unknown): string {
   return String(str ?? '').replace(/[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch('/api/' + path, {
+  const res = await fetch(withBase('/api/' + path), {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   });
@@ -419,24 +432,24 @@ function closeMenus(except) {
 }
 
 function openRowMenu(btn, kind, obj) {
-  if (kind === 'space' && obj.builtIn) return;
+  if (kind === 'space' && obj.builtIn && !devSourceEditable(obj)) return;
   const r = btn.getBoundingClientRect();
   rowMenu.dataset.kind = kind;
   rowMenu.dataset.slug = obj.slug;
   rowMenu.innerHTML = kind === 'space'
     ? `
-      <button class="menu-item" data-act="lock"><span>${obj.locked ? '解锁空间…' : '锁定空间…'}</span></button>
-      ${obj.locked ? '' : `<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
+      ${obj.builtIn ? '' : `<button class="menu-item" data-act="lock"><span>${obj.locked ? '解锁空间…' : '锁定空间…'}</span></button>`}
+      ${pageContentLocked(obj) ? '' : `<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
       <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
       <button class="menu-item" data-act="settings"><span>空间设置…</span></button>
-      <button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>`}`
+      ${obj.builtIn && !devSourceEditable(obj) ? '' : '<button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>'}`}`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
       <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
-  const mw = 176, mh = kind === 'space' ? (obj.locked ? 50 : 245) : 190;
+  const mw = 176, mh = kind === 'space' ? (pageContentLocked(obj) ? 50 : 245) : 190;
   rowMenu.style.left = Math.max(8, Math.min(r.left - mw + 12, innerWidth - mw - 8)) + 'px';
   rowMenu.style.top = Math.min(r.bottom + 4, innerHeight - mh - 8) + 'px';
 }
@@ -577,6 +590,13 @@ function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () =
    Hierarchy (space → page tree)
    ============================================================ */
 function spaceBySlug(slug) { return S.spaces.find(s => s.slug === slug) || null; }
+// Development mode permits editing the built-in virtual space despite its lock.
+function devSourceEditable(space: Space | null | undefined): boolean {
+  return !!(space?.builtIn && space.locked && space.devEditable);
+}
+function pageContentLocked(space: Space | null | undefined): boolean {
+  return !!space?.locked && !devSourceEditable(space);
+}
 function pageBySlug(slug) { return S.pages.find(p => p.slug === slug) || null; }
 function spacePages(spaceSlug, parent = null) {
   return S.pages.filter(p => p.space === spaceSlug && (p.parent || null) === parent);
@@ -592,8 +612,8 @@ function chainOf(pageSlug) {
   return space ? [space, ...chain] : chain;
 }
 function canonicalPath(slug) {
-  if (spaceBySlug(slug)) return '/' + encodeURIComponent(slug);
-  return '/' + chainOf(slug).map(n => encodeURIComponent(n.slug)).join('/');
+  if (spaceBySlug(slug)) return withBase('/' + encodeURIComponent(slug));
+  return withBase('/' + chainOf(slug).map(n => encodeURIComponent(n.slug)).join('/'));
 }
 function descendantSlugsOf(slug) {
   const out = new Set();
@@ -677,9 +697,9 @@ function renderSidebar(filter = '') {
 
     const t = document.createElement('a');
     t.className = 'space-title';
-    t.href = '/' + encodeURIComponent(space.slug);
+    t.href = canonicalPath(space.slug);
     t.dataset.nav = '';
-    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${space.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : space.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${tops.length} 页</span>`;
+    t.innerHTML = `<span class="t">${esc(space.title)}</span><span class="s">${space.builtIn ? `<span class="lock-badge">${devSourceEditable(space) ? '开发者模式：可编辑模板源码' : '🔒 永久只读'}</span> · ` : space.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${tops.length} 页</span>`;
 
     const actions = document.createElement('span');
     actions.className = 'row-actions';
@@ -699,8 +719,8 @@ function renderSidebar(filter = '') {
       if (toggleShut) rowMenu.hidden = true;
       else openRowMenu(moreBtn, 'space', space);
     });
-    if (!space.locked) actions.append(addBtn);
-    if (!space.builtIn) actions.append(moreBtn);
+    if (!pageContentLocked(space)) actions.append(addBtn);
+    if (!space.builtIn || devSourceEditable(space)) actions.append(moreBtn);
 
     head.append(caret, t, actions);
     el.list.appendChild(head);
@@ -751,7 +771,7 @@ function renderSidebar(filter = '') {
             if (toggleShut) rowMenu.hidden = true;
             else openRowMenu(pm, 'page', p);
           });
-          if (!space.locked) acts.append(pa, pm);
+          if (!pageContentLocked(space)) acts.append(pa, pm);
 
           row.append(pc, a, acts);
           if (S.page?.slug === p.slug) row.classList.add('is-active');
@@ -879,6 +899,18 @@ function decorate(container) {
   container.querySelectorAll('a').forEach(a => {
     const href = a.getAttribute('href') || '';
     if (/^https?:\/\//i.test(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+    // Only treat root-relative Markdown links as app routes when the tree confirms them.
+    // Leave assets, other applications, protocol-relative and fragment links untouched.
+    if (href.startsWith('/') && !href.startsWith('//')) {
+      const url = new URL(href, location.origin);
+      const knownPaths = [...S.spaces, ...S.pages].map(item => withoutBase(canonicalPath(item.slug)));
+      const stripped = withoutBase(url.pathname);
+      const candidate = stripped !== null && knownPaths.includes(stripped) ? stripped : url.pathname;
+      if (knownPaths.includes(candidate)) {
+        a.setAttribute('href', withBase(candidate) + url.search + url.hash);
+        a.setAttribute('data-nav', '');
+      }
+    }
   });
   container.querySelectorAll('img').forEach(img => img.loading = 'lazy');
   // h2/h3 reveal a label-style anchor on hover; clicking copies a clean section link (/path#h-x)
@@ -907,12 +939,12 @@ function decorate(container) {
 
 function renderArticle(page) {
   const space = spaceBySlug(page.space);
-  const locked = !!space?.locked;
+  const locked = pageContentLocked(space);
   const chain = chainOf(page.slug);
   const crumbsHtml = chain.map((n, i) =>
     n === chain[chain.length - 1]
       ? `<span class="cur">${esc(n.title)}</span>`
-      : `<a href="${canonicalPath(n.slug)}" data-nav>${esc(n.title)}</a>`
+      : `<a href="${esc(canonicalPath(n.slug))}" data-nav>${esc(n.title)}</a>`
   ).join('<span class="sep">/</span>');
 
   el.article.innerHTML =
@@ -921,7 +953,7 @@ function renderArticle(page) {
        <span>${space?.builtIn ? '随应用更新' : `更新于 ${relTime(page.updatedAt)}`}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
-       ${locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
+       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
      </div>` + renderMarkdown(page.content);
 
   decorate(el.article);
@@ -931,8 +963,9 @@ function renderArticle(page) {
       .catch(() => toast('复制失败'));
   });
   $('#slug-edit')?.addEventListener('click', () => slugFlow(S.page));
-  $('#btn-edit').hidden = locked;
-  $('#btn-more').hidden = locked;
+  $('#btn-edit').hidden = pageContentLocked(space);
+  $('#btn-more').hidden = locked && !devSourceEditable(space);
+  $('#menu-page [data-act="slug"]').hidden = false;
 
   // The width cap applies to the reading view only: overview, space index and editor all go full width
   el.article.classList.add('is-reading');
@@ -948,7 +981,7 @@ function renderArticle(page) {
   el.empty.hidden = true;
   el.article.hidden = false;
   el.clusterEdit.hidden = true;
-  el.clusterView.hidden = locked;
+  el.clusterView.hidden = pageContentLocked(space);
   el.dirtyPill.hidden = true;
   el.editor.innerHTML = '';
 
@@ -1030,12 +1063,12 @@ function renderEditorLockStatus() {
   }
   const space = S.page && spaceBySlug(S.page.space);
   badge.hidden = !space?.locked;
-  badge.textContent = space?.builtIn ? '🔒 内置空间，永久只读' : '🔒 空间已锁定，只读；草稿保留，解锁后可保存';
+  badge.textContent = devSourceEditable(space) ? '开发者模式' : space?.builtIn ? '🔒 内置空间，永久只读' : '🔒 空间已锁定，只读；草稿保留，解锁后可保存';
 }
 
 function enterEdit(focus = true) {
   if (!S.page) return;
-  if (spaceBySlug(S.page.space)?.locked) { toast('空间已锁定，请先解锁'); return; }
+  if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
   // The editor always goes full width, unaffected by the reading-view cap
   el.article.classList.remove('is-reading');
@@ -1071,7 +1104,7 @@ async function exitEdit(reloadFromPage) {
 
 async function saveDoc() {
   if (!S.page) return;
-  if (spaceBySlug(S.page.space)?.locked) { toast('空间已锁定，请先解锁；编辑内容仍保留', 4000); return; }
+  if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁；编辑内容仍保留', 4000); return; }
   if (!S.dirty) { await exitEdit(false); return; }
   const title = el.titleInput.value.trim() || '无标题页面';
   // Storage is Markdown regardless of the active surface: the visual editor is serialised,
@@ -1419,7 +1452,7 @@ async function createSpaceFlow() {
     const space = await api<Space>('spaces', { method: 'POST', body: JSON.stringify({ title }) });
     S.spaces.push(space);
     toast('空间已创建 ✓');
-    navigate('/' + encodeURIComponent(space.slug));
+    navigate(canonicalPath(space.slug));
   } catch (err) { toast(err.message, 3000); }
 }
 
@@ -1539,7 +1572,9 @@ async function slugSpaceFlow(space) {
   if (!space) return;
   const value = await promptModal({
     title: '编辑空间 slug',
-    label: '仅限小写字母、数字、下划线。slug 是空间的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+    label: devSourceEditable(space)
+      ? '仅限小写字母、数字、下划线。修改后旧空间链接及 Markdown 中硬编码的旧链接将失效。'
+      : '仅限小写字母、数字、下划线。slug 是空间的永久地址，修改后旧链接将失效（免费随便改 🙂）',
     value: space.slug,
     placeholder: 'my_space',
     ok: '保存',
@@ -1553,8 +1588,9 @@ async function slugSpaceFlow(space) {
       method: 'PUT', body: JSON.stringify({ slug: ns }),
     });
     // Pages reference their space by slug, so the whole tree has to follow the rename.
-    S.pages.forEach(p => { if (p.space === old) p.space = ns; });
-    if (S.page?.space === old) S.page.space = ns;
+    const newSlug = updated.slug;
+    S.pages.forEach(p => { if (p.space === old) p.space = newSlug; });
+    if (S.page?.space === old) S.page.space = newSlug;
     const i = S.spaces.findIndex(s => s.slug === old);
     if (i >= 0) S.spaces[i] = updated;
     const wasCurrent = S.space?.slug === old;
@@ -1562,11 +1598,11 @@ async function slugSpaceFlow(space) {
     toast('slug 已更新 ✓');
     // Update the address bar without re-routing: pages keep their own slug, so only
     // the leading space segment changes.
-    if (S.page?.space === ns) {
+    if (S.page?.space === newSlug) {
       history.replaceState(null, '', canonicalPath(S.page.slug));
       renderArticle(S.page);
     } else if (wasCurrent) {
-      history.replaceState(null, '', canonicalPath(ns));
+      history.replaceState(null, '', canonicalPath(newSlug));
       renderSpace(updated);
     } else {
       renderSidebar(el.search.value);
@@ -1579,7 +1615,9 @@ async function deleteSpaceFlow(space) {
   const count = S.pages.filter(p => p.space === space.slug).length;
   const go = await confirmModal({
     title: `删除空间「${space.title}」？`,
-    desc: count ? `空间内 ${count} 个页面将一并删除，且无法恢复。` : '删除后无法恢复。',
+    desc: devSourceEditable(space)
+      ? `将删除内置空间的模板源码及全部 ${count} 个页面，此操作不可撤销。`
+      : count ? `空间内 ${count} 个页面将一并删除，且无法恢复。` : '删除后无法恢复。',
     ok: '删除空间',
     danger: true,
   });
@@ -1650,14 +1688,19 @@ function normalizeSlugInput(value: string): string {
 
 async function slugFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
+  const dev = devSourceEditable(spaceBySlug(pg.space));
+  const prefix = 'doclight-default-';
+  const initial = dev && pg.slug.startsWith(prefix) ? pg.slug.slice(prefix.length) : pg.slug;
   const value = await promptModal({
     title: '编辑链接 slug',
-    label: '仅限小写字母、数字、下划线。slug 是页面的永久地址，修改后旧链接将失效（免费随便改 🙂）',
-    value: pg.slug,
+    label: dev
+      ? '仅限小写字母、数字、下划线，对应模板源文件名；修改后旧链接将失效。'
+      : '仅限小写字母、数字、下划线。slug 是页面的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+    value: initial,
     placeholder: 'my_page_1',
     ok: '保存',
   });
-  if (value === null || value === pg.slug) return;
+  if (value === null || value === initial) return;
   const ns = normalizeSlugInput(value);
   if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
   try {
@@ -1665,12 +1708,13 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     const updated = await api<Page>('pages/' + encodeURIComponent(old), {
       method: 'PUT', body: JSON.stringify({ slug: ns }),
     });
-    S.pages.forEach(p => { if (p.parent === old) p.parent = ns; });
+    const newSlug = updated.slug;
+    S.pages.forEach(p => { if (p.parent === old) p.parent = newSlug; });
     const i = S.pages.findIndex(p => p.slug === old);
-    if (i >= 0) { S.pages[i].slug = ns; S.pages[i].updatedAt = updated.updatedAt; }
+    if (i >= 0) { S.pages[i].slug = newSlug; S.pages[i].updatedAt = updated.updatedAt; }
     await refreshTree();          // slug is the order's tie-break, so the rank can move
     toast('slug 已更新 ✓');
-    if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(ns)); }
+    if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(newSlug)); }
     else if (S.space) renderSpace(S.space);
     else renderSidebar(el.search.value);
   } catch (err) { toast(err.message, 3000); }
@@ -1679,10 +1723,15 @@ async function slugFlow(pg: PageMeta | null = S.page) {
 async function moveFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const banned = new Set([pg.slug, ...descendantSlugsOf(pg.slug)]);
+  const sourceBuiltIn = !!spaceBySlug(pg.space)?.builtIn;
   const options = [];
   S.spaces.forEach(sp => {
-    if (sp.locked) return;
+    const targetBuiltIn = !!sp.builtIn;
+    if (pageContentLocked(sp) && !devSourceEditable(sp)) return;
     options.push({ v: 's:' + sp.slug, label: '📁 ' + sp.title + '（顶层）' });
+    // Ordinary pages can only enter the built-in space at the top level: source page slugs are
+    // their own file names, so a nested target would need a second slug namespace.
+    if (!sourceBuiltIn && targetBuiltIn) return;
     const walk = (parent, depth) => {
       spacePages(sp.slug, parent).forEach(p => {
         if (banned.has(p.slug)) return;
@@ -1695,7 +1744,7 @@ async function moveFlow(pg: PageMeta | null = S.page) {
   const current = pg.parent ? 'p:' + pg.parent : 's:' + pg.space;
   const m = openModal(`
     <h3>移动「${esc(pg.title)}」</h3>
-    <p class="desc">可选择目标空间（顶层）或空间内的某个页面（其子页面）。URL 会随新位置变化，旧链接自动规范化跳转。</p>
+    <p class="desc">可选择目标空间（顶层）或空间内的某个页面（其子页面）。普通页面移入内置空间时只能放在顶层。URL 会随新位置变化，旧链接自动规范化跳转。</p>
     <select id="move-select">${options.map(o =>
       `<option value="${esc(o.v)}"${o.v === current ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
     </select>
@@ -1716,7 +1765,11 @@ async function moveFlow(pg: PageMeta | null = S.page) {
     if (toSpace === pg.space && toParent === (pg.parent || null)) { toast('位置未变化'); return; }
     try {
       const updated = await api<Page>('pages/' + encodeURIComponent(pg.slug), {
-        method: 'PUT', body: JSON.stringify({ space: toSpace, parent: toParent }),
+        method: 'PUT',
+        // Staying inside the same space only needs the parent; moving across spaces sends both.
+        body: JSON.stringify(toSpace === pg.space
+          ? { parent: toParent }
+          : { space: toSpace, parent: toParent }),
       });
       const i = S.pages.findIndex(p => p.slug === pg.slug);
       if (i >= 0) { S.pages[i].space = updated.space; S.pages[i].parent = updated.parent; }
@@ -1724,7 +1777,7 @@ async function moveFlow(pg: PageMeta | null = S.page) {
       // the server puts it in the right place among its new siblings.
       await refreshTree();
       toast('已移动 ✓');
-      if (S.page?.slug === pg.slug) { S.page = updated; navigate(canonicalPath(pg.slug)); }
+      if (S.page?.slug === pg.slug) { S.page = updated; navigate(canonicalPath(updated.slug)); }
       else { renderSidebar(el.search.value); if (S.space) renderSpace(S.space); }
     } catch (err) { toast(err.message, 3000); }
   };
@@ -1736,9 +1789,13 @@ async function moveFlow(pg: PageMeta | null = S.page) {
 async function deleteFlow(pg: PageMeta | null = S.page) {
   if (!pg) return;
   const kidCount = descendantSlugsOf(pg.slug).size;
+  const dev = devSourceEditable(spaceBySlug(pg.space));
+  if (dev && S.spaces.some(space => space.home === pg.slug)) {
+    toast('此页面是空间主页，删除后会同时清除主页设置', 4000);
+  }
   const go = await confirmModal({
     title: `删除「${pg.title}」？`,
-    desc: kidCount ? `将连带删除其下 ${kidCount} 个子页面，删除后无法恢复。` : '删除后无法恢复。',
+    desc: `${kidCount ? `将连带删除其下 ${kidCount} 个子页面` : ''}${dev ? `${kidCount ? '，' : ''}并同步删除模板源码` : ''}，删除后无法恢复。`,
     ok: '删除',
     danger: true,
   });
@@ -1759,7 +1816,7 @@ async function deleteFlow(pg: PageMeta | null = S.page) {
 
 function dispatchPageAction(action: string, page: PageMeta | null = S.page): void {
   if (!page) return;
-  if (spaceBySlug(page.space)?.locked) { toast('空间已锁定，请先解锁'); return; }
+  if (pageContentLocked(spaceBySlug(page.space))) { toast('空间已锁定，请先解锁'); return; }
   switch (action) {
     case 'child': createPageFlow(page.space, page.slug); break;
     case 'rename': renameFlow(page); break;
@@ -1804,10 +1861,10 @@ function renderHome() {
 
   const cards = S.spaces.map(sp => {
     const n = S.pages.filter(p => p.space === sp.slug).length;
-    return `<a class="card" data-nav href="/${encodeURIComponent(sp.slug)}">
+    return `<a class="card" data-nav href="${esc(canonicalPath(sp.slug))}">
               <span class="t">${esc(sp.title)}</span>
               ${sp.desc ? `<span class="d">${esc(sp.desc)}</span>` : ''}
-              <span class="s">${sp.builtIn ? '<span class="lock-badge">🔒 永久只读</span> · ' : sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}${sp.builtIn ? '随应用更新' : `更新于 ${relTime(sp.updatedAt)}`}</span>
+              <span class="s">${sp.builtIn ? `<span class="lock-badge">${devSourceEditable(sp) ? '开发者模式：可编辑模板源码' : '🔒 永久只读'}</span> · ` : sp.locked ? '<span class="lock-badge">🔒 已锁定</span> · ' : ''}${n ? n + ' 个页面 · ' : ''}${sp.builtIn ? '随应用更新' : `更新于 ${relTime(sp.updatedAt)}`}</span>
             </a>`;
   }).join('');
   el.article.innerHTML =
@@ -1838,7 +1895,7 @@ function renderSpace(space) {
   const tops = spacePages(space.slug, null);
   const cards = tops.map(p => {
     const n = childrenOf(p.slug).filter(k => k.space === space.slug).length;
-    return `<a class="card" data-nav href="${canonicalPath(p.slug)}">
+    return `<a class="card" data-nav href="${esc(canonicalPath(p.slug))}">
               <span class="t">${esc(p.title)}</span>
               <span class="s">${n ? n + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
             </a>`;
@@ -1846,14 +1903,14 @@ function renderSpace(space) {
 
   el.article.innerHTML =
     `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
-       ${space.locked ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
+       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a><span class="lock-badge">开发者模式：可编辑模板源码</span>` : pageContentLocked(space) ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
      </div>
      <div class="space-head">
        <div>
          <h1>${esc(space.title)}</h1>
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
-       <div class="space-acts"${space.locked ? ' hidden' : ''}>
+       <div class="space-acts"${pageContentLocked(space) && !devSourceEditable(space) ? ' hidden' : ''}>
          <label class="sort-pick">
            <span>排序</span>
            <select id="sp-sort" title="侧栏与总览的页面顺序">
@@ -1862,11 +1919,11 @@ function renderSpace(space) {
          </label>
          <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
          <button class="btn btn-ghost" id="sp-rename">重命名</button>
-         <button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>'}
        </div>
      </div>
      <div class="cards">${cards || ''}</div>
-     ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${space.locked ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
+     ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
 
   el.article.hidden = false;
   decorate(el.article);
@@ -1874,7 +1931,7 @@ function renderSpace(space) {
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-slug-edit')?.addEventListener('click', () => slugSpaceFlow(space));
-  $('#sp-delete').addEventListener('click', () => deleteSpaceFlow(space));
+  $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
   renderAuthUI();
   renderSidebar(el.search.value);
 }
@@ -1910,17 +1967,21 @@ async function openPage(slug: string): Promise<void> {
    ============================================================ */
 function notFoundThenHome() {
   toast('路径不存在，已返回空间总览');
-  history.replaceState(null, '', '/');
+  history.replaceState(null, '', withBase('/'));
   renderHome();
 }
 
 async function route() {
   if (builtInConflict) { renderHome(); return; }
-  if (location.pathname === '/spaces' || location.pathname === '/spaces/') {
+  const pathname = withoutBase(location.pathname);
+  if (pathname === null) { notFoundThenHome(); return; }
+  if (pathname === '/spaces' || pathname === '/spaces/') {
     renderHome();
     return;
   }
-  const segs = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  let segs: string[];
+  try { segs = pathname.split('/').filter(Boolean).map(decodeURIComponent); }
+  catch { notFoundThenHome(); return; }
   if (!segs.length) { renderHome(); return; }
 
   const space = spaceBySlug(segs[0]);
@@ -1936,7 +1997,7 @@ async function route() {
     return;
   }
   if (segs.length === 1) {
-    if (space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
+    if (!devSourceEditable(space) && space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
     renderSpace(space);
     return;
   }
@@ -1957,16 +2018,20 @@ async function route() {
 }
 
 function navigate(path) {
-  if (location.pathname === path) { route(); return; }
+  if (path === '/') path = withBase('/');
+  if (location.pathname + location.search + location.hash === path) { route(); return; }
   history.pushState(null, '', path);
   route();
 }
 window.addEventListener('popstate', route);
 
+// The shell is shared with root deployments, so fix its home link at runtime.
+$('.brand')?.setAttribute('href', withBase('/'));
+
 // Intercept in-site links
 document.addEventListener('click', e => {
   const a = e.target instanceof Element ? e.target.closest('a[data-nav]') : null;
-  if (!a || e.metaKey || e.ctrlKey) return;
+  if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || a.hasAttribute('download') || (a.getAttribute('target') && a.getAttribute('target') !== '_self')) return;
   e.preventDefault();
   const go = () => navigate(a.getAttribute('href') || '/');
   if (S.dirty && !el.editWrap.hidden) {
@@ -2015,7 +2080,7 @@ rowMenu.addEventListener('click', e => {
     const sp = spaceBySlug(slug);
     if (!sp) return;
     if (act === 'lock') lockSpaceFlow(sp);
-    if (sp.locked) return;
+    if (pageContentLocked(sp)) return;
     if (act === 'rename') renameSpaceFlow(sp);
     if (act === 'slug') slugSpaceFlow(sp);
     if (act === 'settings') spaceSettingsFlow(sp);

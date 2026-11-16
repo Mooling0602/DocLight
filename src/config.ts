@@ -26,7 +26,7 @@ import { parse } from 'smol-toml';
 const DEFAULT_ROOT = path.resolve(__dirname, '..');
 
 /** Keys accepted in the TOML file, mapped to their environment overrides. */
-const STRING_KEYS = ['host', 'dataDir', 'icp', 'icpUrl', 'police', 'policeUrl', 'copyright'] as const;
+const STRING_KEYS = ['host', 'dataDir', 'basePath', 'icp', 'icpUrl', 'police', 'policeUrl', 'copyright'] as const;
 type StringKey = (typeof STRING_KEYS)[number];
 
 const ENV_KEYS: Record<string, string> = {
@@ -34,6 +34,7 @@ const ENV_KEYS: Record<string, string> = {
   host: 'DOCLIGHT_HOST',
   strictPort: 'DOCLIGHT_STRICT_PORT',
   dataDir: 'DOCLIGHT_DATA_DIR',
+  basePath: 'DOCLIGHT_BASE_PATH',
   icp: 'DOCLIGHT_ICP',
   icpUrl: 'DOCLIGHT_ICP_URL',
   police: 'DOCLIGHT_POLICE',
@@ -51,8 +52,14 @@ export interface AppConfig {
   /** Bind address; undefined means every interface. */
   host: string | undefined;
   strictPort: boolean;
+  /** Enables authenticated edits to built-in template page title and content only. */
+  devMode: boolean;
   /** Absolute path to the writable data directory. */
   dataDir: string;
+  /** Public URL prefix without a trailing slash, or empty for the root. */
+  basePath: string;
+  /** False only when neither configuration layer specified basePath. */
+  basePathExplicit: boolean;
   icp: string;
   icpUrl: string;
   police: string;
@@ -163,6 +170,14 @@ export const CONFIG_TEMPLATE = `# DocLight 配置文件
 # 需持久化或受保护时改为绝对路径，例如 "/var/lib/doclight"。
 #dataDir = "/var/lib/doclight"
 
+# 反向代理下的 URL 前缀；未设置时按请求路径尽力自动识别。
+# 单段未知路径可能被识别为挂载点；与空间或页面同名等歧义请显式设置。
+# 显式设置空串或 "/" 固定为网站根路径；代理剥离前缀时也须显式设置。
+#basePath = "/editor"
+
+# 仅开发时可设置环境变量 DOCLIGHT_DEV_MODE=true；登录后允许修改内置文档源码。
+# 不要在生产环境启用；它不会限制网络监听地址。
+
 # 网站备案号，悬挂在页面底部；留空（默认）则不显示。
 #icp = "浙ICP备12345678号-1"
 
@@ -212,6 +227,16 @@ function validateTomlValue(key: string, value: unknown): string | number | boole
   throw new Error(`未知配置项 ${key}`);
 }
 
+/** Restrict the prefix to unescaped URL-safe segments, safe in HTML and cookie headers. */
+function normalizeBasePath(value: string): string {
+  if (value === '' || value === '/') return '';
+  if (!/^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*\/?$/.test(value) ||
+      value.split('/').some(segment => segment === '.' || segment === '..')) {
+    throw new Error('basePath 必须是由安全路径段组成的绝对 URL 路径');
+  }
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+}
+
 /**
  * Load the effective configuration. Exported for tests, which pass an explicit `env`,
  * `root` and `configPath` so a stray doclight.toml in the repository cannot leak in.
@@ -247,7 +272,10 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     port: typeof merged.port === 'number' ? merged.port : 4173,
     host: str('host') || undefined,
     strictPort: merged.strictPort === true,
+    devMode: env.DOCLIGHT_DEV_MODE === 'true' || env.DOCLIGHT_DEV_MODE === '1',
     dataDir: dataDirValue ? path.resolve(dataDirValue) : path.join(root, 'data'),
+    basePath: normalizeBasePath(str('basePath')),
+    basePathExplicit: Object.prototype.hasOwnProperty.call(merged, 'basePath'),
     icp: str('icp'),
     icpUrl: str('icpUrl'),
     police: str('police'),
