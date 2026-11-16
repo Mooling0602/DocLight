@@ -225,12 +225,18 @@ async function main(): Promise<void> {
     assert.ok(afterDelete.spaces.some((s: any) => s.slug === builtIn));
     assert.equal((await api(`pages/${builtIn}-${changed.slug}`)).status, 200);
     // A manually introduced reserved space must never be silently hidden or overwritten.
+    const indexBeforeConflict = fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8');
     const conflictingIndex = JSON.stringify({ version: 4, spaces: [{ slug: builtIn, title: 'User data', desc: '', home: null, createdAt: 1, updatedAt: 1 }] }, null, 2) + '\n';
     fs.writeFileSync(path.join(dataDir, 'spaces.json'), conflictingIndex);
     const conflict = await api('tree');
     assert.equal(conflict.status, 503);
+    assert.equal(conflict.body.errorCode, 'BUILT_IN_SLUG_CONFLICT', 'conflict exposes a stable machine-readable identifier');
     assert.match(conflict.body.error, /请先备份/);
     assert.equal(fs.readFileSync(path.join(dataDir, 'spaces.json'), 'utf8'), conflictingIndex);
+    fs.writeFileSync(path.join(dataDir, 'spaces.json'), indexBeforeConflict);
+    const recovered = await api('tree');
+    assert.equal(recovered.status, 200, 'tree recovers once the conflict is resolved on disk');
+    assert.ok(recovered.body.spaces.some((s: any) => s.slug === builtIn));
     console.log('built-in space integration assertions passed');
   } finally {
     await stop();

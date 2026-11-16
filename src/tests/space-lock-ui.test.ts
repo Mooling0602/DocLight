@@ -94,12 +94,12 @@ async function collisionBootTests(): Promise<void> {
     await wait(100);
     return instance;
   };
-  const conflict = await boot({ error: message }, 503);
+  const conflict = await boot({ error: '服务器的提示文案可以改变', errorCode: 'BUILT_IN_SLUG_CONFLICT' }, 503);
   try {
     const d = conflict.window.document;
     const notice = d.querySelector('[role=alert]');
     assert.ok(notice, '冲突时显示可访问的持久提示');
-    assert.match(notice.textContent || '', /请先备份.*spaces\.json.*front matter/);
+    assert.match(notice.textContent || '', /服务器的提示文案可以改变/, '应安全显示服务端返回的最新指引');
     assert.match(notice.textContent || '', /重新加载/);
     assert.equal((d.querySelector('#btn-new') as HTMLElement).hidden, true);
     assert.equal((d.querySelector('#empty-state') as HTMLElement).hidden, true);
@@ -110,7 +110,7 @@ async function collisionBootTests(): Promise<void> {
     await wait(4400);
     assert.ok(d.querySelector('[role=alert]'), '提示应持续存在，不能随 toast 消失');
   } finally { conflict.window.close(); }
-  for (const [body, status] of [[{ error: 'unrelated private error' }, 503], [{ error: message }, 500]] as const) {
+  for (const [body, status] of [[{ error: 'unrelated private error' }, 503], [{ error: message }, 503], [{ error: message, errorCode: 'BUILT_IN_SLUG_CONFLICT' }, 500]] as const) {
     const other = await boot(body, status);
     try {
       assert.equal(other.window.document.querySelector('[role=alert]'), null, '其他错误不得显示冲突提示');
@@ -123,6 +123,79 @@ async function collisionBootTests(): Promise<void> {
     assert.equal((d.querySelector('#btn-new') as HTMLElement).hidden, false);
     assert.match(d.querySelector('#article')!.textContent || '', /恢复正文/);
   } finally { recovered.window.close(); }
+}
+
+async function runtimeConflictTests(): Promise<void> {
+  for (const mode of ['other', 'refresh', 'write'] as const) {
+    const instance = new JSDOM(html, { url: 'http://localhost:4173/default/readable', pretendToBeVisual: true, runScripts: 'outside-only' });
+    const w = instance.window as any;
+    const d = w.document as Document;
+    w.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+    w.scrollTo = () => {};
+    w.Element.prototype.scrollTo = function () {};
+    w.Element.prototype.scrollIntoView = function () {};
+    let trees = 0;
+    let mutations = 0;
+    const space = { slug: 'default', title: '默认空间', desc: '', home: null, createdAt: 1, updatedAt: 1 };
+    w.fetch = async (input: string, opts: any = {}) => {
+      const url = String(input);
+      if (url.includes('/api/tree')) {
+        if (++trees > 1) return result(mode === 'refresh'
+          ? { error: '变化后的提示', errorCode: 'BUILT_IN_SLUG_CONFLICT' }
+          : { error: '其他错误' }, 503);
+        return result({ spaces: [space], pages: [page] });
+      }
+      if (url.includes('/api/auth/state')) return result({ mode: 'ready', authed: true, user: 'tester', salt, iters });
+      if (url.includes('/api/spaces/default') && opts.method === 'PUT') { mutations++; return result({ ...space, sort: 'title_asc' }); }
+      if (url.includes('/api/pages/readable') && opts.method === 'PUT' && mode === 'write') {
+        mutations++;
+        return result({ error: '写入时发生冲突', errorCode: 'BUILT_IN_SLUG_CONFLICT' }, 503);
+      }
+      return result({ ...page, content: '原文' });
+    };
+    const clickIn = (selector: string) => {
+      const element = d.querySelector(selector);
+      assert.ok(element, `未找到 ${selector}`);
+      element.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    };
+    try {
+      w.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
+      await wait(100);
+      clickIn('#btn-edit');
+      clickIn('#mode-toggle [data-mode=markdown]');
+      const title = d.querySelector('#title-input') as HTMLInputElement;
+      const source = d.querySelector('#source-editor') as HTMLTextAreaElement;
+      title.value = '草稿标题'; title.dispatchEvent(new w.Event('input', { bubbles: true }));
+      source.value = '# 草稿正文'; source.dispatchEvent(new w.Event('input', { bubbles: true }));
+      if (mode === 'write') {
+        clickIn('#btn-save');
+      } else {
+        clickIn('.space-row .row-actions [title="空间管理"]');
+        clickIn('#menu-row [data-act=settings]');
+        (d.querySelector('#ss-sort') as HTMLSelectElement).value = 'title_asc';
+        clickIn('#modal-root [data-x=ok]');
+      }
+      await wait(120);
+      assert.equal(mutations, 1);
+      assert.equal(trees, mode === 'write' ? 1 : 2);
+      assert.equal(title.value, '草稿标题');
+      assert.equal(source.value, '# 草稿正文');
+      assert.equal(source.hidden, false);
+      assert.equal((d.querySelector('#dirty-pill') as HTMLElement).hidden, false);
+      assert.equal((d.querySelector('#edit-wrap') as HTMLElement).hidden, false);
+      if (mode !== 'write') assert.match(d.querySelector('#toasts')?.textContent || '', /排序已更新/, '已成功的操作不能误报失败');
+      const notice = d.querySelector('#runtime-conflict');
+      assert.equal(!!notice, mode !== 'other', '仅特定冲突显示持久提示');
+      if (notice) {
+        assert.equal(notice.getAttribute('role'), 'alert');
+        assert.match(notice.textContent || '', mode === 'write' ? /写入时发生冲突/ : /变化后的提示/);
+        assert.match(notice.textContent || '', /重新加载.*草稿.*备份/);
+        await wait(4400);
+        assert.ok(d.querySelector('#runtime-conflict'), '提示不能随 toast 消失');
+        assert.equal(source.value, '# 草稿正文');
+      }
+    } finally { instance.window.close(); }
+  }
 }
 
 async function main(): Promise<void> {
@@ -242,6 +315,7 @@ async function main(): Promise<void> {
     assert.equal($('#article').hidden, false, '内置页面仍可阅读');
     assert.equal(calls.filter(c => c.url.includes('/api/spaces/doclight-default/lock')).length, 0);
     await collisionBootTests();
+    await runtimeConflictTests();
     console.log('space lock UI assertions passed');
   } finally { dom.window.close(); }
 }

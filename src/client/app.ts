@@ -62,6 +62,7 @@ interface DeleteSpaceResponse {
 
 interface ApiError {
   error?: string;
+  errorCode?: string;
   needAuth?: boolean;
 }
 
@@ -110,7 +111,9 @@ async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     const error = data as ApiError;
     if (res.status === 401 && error.needAuth) { S.authed = false; renderAuthUI(); }
-    throw Object.assign(new Error(error.error || `请求失败 (${res.status})`), { status: res.status });
+    const failure = Object.assign(new Error(error.error || `请求失败 (${res.status})`), { status: res.status, errorCode: error.errorCode });
+    if (appBooted && isBuiltInConflict(failure)) showRuntimeConflict(failure.message);
+    throw failure;
   }
   return data as T;
 }
@@ -263,9 +266,26 @@ async function hmacHex(keyHex, msg) {
 }
 
 /* ---------------- Global state ---------------- */
-// The server currently identifies this tree failure by its status and exact message.
+// Human-readable recovery guidance; detection uses the server's structured error code.
 const BUILT_IN_CONFLICT = '数据目录中已有空间 doclight-default，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug';
 let builtInConflict = false;
+let builtInConflictMessage = BUILT_IN_CONFLICT;
+let appBooted = false;
+
+function isBuiltInConflict(err: any): boolean {
+  return err?.status === 503 && err.errorCode === 'BUILT_IN_SLUG_CONFLICT';
+}
+
+// Runtime failures must not replace the current view: it may contain an unsaved draft.
+function showRuntimeConflict(message = BUILT_IN_CONFLICT): void {
+  if (document.getElementById('runtime-conflict')) return;
+  const notice = document.createElement('div');
+  notice.id = 'runtime-conflict';
+  notice.setAttribute('role', 'alert');
+  notice.style.cssText = 'position:sticky;top:0;z-index:45;padding:12px 20px;background:#fff3cd;color:#4d3500;border-bottom:1px solid #d6ad43';
+  notice.textContent = `内置空间名称冲突：${message}。处理完成后请重新加载页面；未保存的草稿请先备份。`;
+  document.body.prepend(notice);
+}
 const S: AppState = {
   spaces: [],         // [{slug,title,desc,home,...}]
   pages: [],          // [{slug,space,parent,title,...}]
@@ -1439,7 +1459,10 @@ async function refreshTree() {
     S.pages = tree.pages || S.pages;
     // The space index renders `sort`, so it has to point at the refetched record, not the old one.
     if (S.space) S.space = S.spaces.find(s => s.slug === S.space.slug) || S.space;
-  } catch { /* keep the local state; order is corrected on the next fetch */ }
+  } catch (err) {
+    if (isBuiltInConflict(err)) showRuntimeConflict();
+    // Keep local state; the mutation succeeded even if its order refresh failed.
+  }
 }
 
 async function setSpaceSort(space, key) {
@@ -1764,7 +1787,7 @@ function renderHome() {
 
   if (builtInConflict) {
     el.empty.hidden = true;
-    el.article.innerHTML = `<div role="alert"><h1>内置空间名称冲突</h1><p>${esc(BUILT_IN_CONFLICT)}</p><p>处理完成后请重新加载页面。</p></div>`;
+    el.article.innerHTML = `<div role="alert"><h1>内置空间名称冲突</h1><p>${esc(builtInConflictMessage)}</p><p>处理完成后请重新加载页面。</p></div>`;
     el.article.hidden = false;
     renderAuthUI();
     renderSidebar();
@@ -1860,7 +1883,8 @@ async function openPage(slug: string): Promise<void> {
   let page: Page;
   try {
     page = await api<Page>('pages/' + encodeURIComponent(slug));
-  } catch {
+  } catch (err) {
+    if (isBuiltInConflict(err)) return;
     toast('页面不存在，已返回空间总览');
     navigate('/');
     return;
@@ -2133,12 +2157,16 @@ function enhanceFilingBadges(): void {
     S.spaces = tree.spaces || [];
     S.pages = tree.pages || [];
   } catch (err) {
-    builtInConflict = err.status === 503 && err.message === BUILT_IN_CONFLICT;
-    if (builtInConflict) $('#btn-new').hidden = true;
+    builtInConflict = isBuiltInConflict(err);
+    if (builtInConflict) {
+      builtInConflictMessage = err.message || BUILT_IN_CONFLICT;
+      $('#btn-new').hidden = true;
+    }
     else toast('无法连接服务器：' + err.message, 4000);
     S.spaces = []; S.pages = [];
   }
   renderSidebar();
   await refreshAuthState();
+  appBooted = true;
   await route();
 })();

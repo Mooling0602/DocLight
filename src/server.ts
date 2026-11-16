@@ -344,7 +344,7 @@ function readDb(): Database {
   }));
   // Never shadow a pre-existing hand-edited or migrated space with the reserved identity.
   if (db.spaces.some(s => s.slug === BUILT_IN_SLUG)) {
-    throw Object.assign(new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`), { code: 503 });
+    throw Object.assign(new Error(`数据目录中已有空间 ${BUILT_IN_SLUG}，请先备份并在 spaces.json 和页面 front matter 中将它改为其他 slug`), { code: 503, errorCode: 'BUILT_IN_SLUG_CONFLICT' });
   }
   db.spaces.push(virtual);
   db.pages.push(...pages);
@@ -902,20 +902,21 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
       // `writeHead` throws `ERR_HTTP_INVALID_STATUS_CODE` — which, thrown from inside a `.catch`,
       // escaped as an unhandled rejection and killed the process. Any failed write (a read-only
       // mount, a full disk) took the whole site down instead of returning an error.
-      const error = err as { code?: unknown; message?: string };
+      const error = err as { code?: unknown; message?: string; errorCode?: unknown };
       const status = typeof error.code === 'number' && error.code >= 400 && error.code <= 599
         ? error.code
         : 500;
-      if (status === 500) {
+      const conflict = status === 503 && error.errorCode === 'BUILT_IN_SLUG_CONFLICT';
+      if (status >= 500 && !conflict) {
         console.error(`· ${req.method} ${pathname} 处理失败：`, err);
       }
-      // A 500's text is not the caller's business: `fs` messages embed absolute paths. The
-      // deliberate 4xx messages above are written for the caller and pass through unchanged.
-      const message = status === 500 ? '服务器内部错误' : (error.message || '请求失败');
+      // Only deliberate client errors and the explicitly identified conflict are safe to expose.
+      // Other server errors can contain filesystem paths or other implementation details.
+      const message = status >= 500 && !conflict ? '服务器内部错误' : (error.message || '请求失败');
       // A handler that already responded and then threw must not be answered twice; `writeHead`
       // would throw ERR_HTTP_HEADERS_SENT and we would be back to a crashed process.
       if (res.headersSent) { res.end(); return; }
-      json(res, status, { error: message });
+      json(res, status, conflict ? { error: message, errorCode: 'BUILT_IN_SLUG_CONFLICT' } : { error: message });
     });
 
   if (!pathname.startsWith('/api/')) serveStatic(res, pathname);
