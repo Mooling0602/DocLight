@@ -24,13 +24,6 @@
           version = "1.1.0";
           src = self;
 
-          # Pin the Node that builds the native dependencies *and* runs them. Building
-          # better-sqlite3 against Node 24 headers makes the addon import
-          # RemoveEnvironmentCleanupHook, which aborts during environment teardown on
-          # Node 24.20; Node 22 headers do not emit that reference, and it matches the
-          # devShell and CI. Do not drop this pin without re-checking `nix flake check`.
-          nodejs = pkgs.nodejs_22;
-
           # Hashes are taken straight from the `integrity` fields of package-lock.json,
           # so adding or updating a dependency no longer requires recomputing a
           # fixed-output hash (the old npmDepsHash drifted on every manifest change).
@@ -72,7 +65,7 @@
           # under `nix run` must therefore set it (or DOCLIGHT_DATA_DIR explicitly).
           postInstall = ''
             mkdir -p $out/bin
-            makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/doclight \
+            makeWrapper ${pkgs.nodejs}/bin/node $out/bin/doclight \
               --add-flags $out/lib/node_modules/doclight/dist/server.js \
               --run 'if [ -z "''${DOCLIGHT_CONFIG:-}" ] && [ -z "''${DOCLIGHT_DATA_DIR:-}" ]; then export DOCLIGHT_DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/doclight"; fi'
           '';

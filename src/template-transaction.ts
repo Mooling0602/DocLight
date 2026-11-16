@@ -15,7 +15,7 @@
  *   - NFS, multi-host mounts and programs editing the roots at the same time are unsupported: the
  *     journal guarantees recovery, not isolation from uncooperative writers.
  */
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -236,7 +236,7 @@ function validateJournal(value: unknown, roots: { template: string; data: string
   return { version: 1, roots: { template: roots.template, data: roots.data }, operations };
 }
 
-function recover(journal: Database.Database, roots: { template: string; data: string }): void {
+function recover(journal: DatabaseSync, roots: { template: string; data: string }): void {
   const row = journal.prepare('SELECT payload FROM redo WHERE id = 1').get() as { payload: string } | undefined;
   if (!row) return;
   if (typeof row.payload !== 'string' || row.payload.length > MAX_TOTAL_BYTES * 2) fail('事务日志过大');
@@ -280,15 +280,17 @@ export function runTemplateTransaction<T>(
       if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o077)) fail('状态数据库不安全');
     } finally { fs.closeSync(handle); }
   }
-  const lock = new Database(path.join(state, LOCK_FILE), { timeout: LOCK_TIMEOUT_MS });
-  const journal = new Database(path.join(state, JOURNAL_FILE), { timeout: LOCK_TIMEOUT_MS });
+  const lock = new DatabaseSync(path.join(state, LOCK_FILE));
+  const journal = new DatabaseSync(path.join(state, JOURNAL_FILE));
   let locked = false;
   running = true;
   try {
-    lock.pragma('busy_timeout = ' + LOCK_TIMEOUT_MS);
+    // `busy_timeout` makes BEGIN IMMEDIATE wait for another process instead of failing at
+    // once; both pragmas are plain SQL here because the built-in module exposes no pragma().
+    lock.exec('PRAGMA busy_timeout = ' + LOCK_TIMEOUT_MS);
     lock.exec('BEGIN IMMEDIATE');
     locked = true;
-    journal.pragma('synchronous = FULL');
+    journal.exec('PRAGMA synchronous = FULL');
     journal.exec('CREATE TABLE IF NOT EXISTS redo (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)');
     recover(journal, roots);
     const staged = new Map<string, StagedEntry>();

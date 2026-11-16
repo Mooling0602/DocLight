@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { runTemplateTransaction, recoverTemplateTransaction } from '../template-transaction';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-tx-'));
@@ -23,7 +23,7 @@ function setup(): void {
 }
 
 function writeJournal(file: string, payload: unknown): void {
-  const journal = new Database(file);
+  const journal = new DatabaseSync(file);
   try {
     journal.exec('CREATE TABLE IF NOT EXISTS redo (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)');
     journal.prepare('INSERT OR REPLACE INTO redo (id, payload) VALUES (1, ?)').run(JSON.stringify(payload));
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
       operations: [],
     });
     assert.throws(() => recoverTemplateTransaction(options), /其他目录配置/);
-    const journal = new Database(journalFile);
+    const journal = new DatabaseSync(journalFile);
     journal.prepare('DELETE FROM redo WHERE id = 1').run();
     journal.close();
     // Simulate a crash between two file replacements: the journal survives and is replayed.
@@ -107,8 +107,8 @@ async function main(): Promise<void> {
     assert.equal(fs.readFileSync(at(data, 'c.md'), 'utf8'), 'c-crash');
     // Another process holding the SQLite lock excludes this one.
     const holder = spawn(process.execPath, ['-e', `
-      const Database = require(${JSON.stringify(require.resolve('better-sqlite3'))});
-      const db = new Database(${JSON.stringify(at(state, 'lock.sqlite'))});
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(${JSON.stringify(at(state, 'lock.sqlite'))});
       db.exec('BEGIN IMMEDIATE');
       console.log('held');
       setTimeout(() => process.exit(0), 60_000);

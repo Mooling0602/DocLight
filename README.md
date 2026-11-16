@@ -2,7 +2,7 @@
 
 简洁优雅、现代感的自托管文档站：**浏览器里直接所见即所得排版**，深浅色主题自动跟随系统。
 
-![TypeScript](https://img.shields.io/badge/TypeScript-ES2022-3178C6) ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+![TypeScript](https://img.shields.io/badge/TypeScript-ES2022-3178C6) ![node](https://img.shields.io/badge/node-%E2%89%A522.13-339933)
 
 ## 启动
 
