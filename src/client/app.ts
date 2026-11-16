@@ -5,7 +5,7 @@
    ============================================================ */
 import DOMPurify from 'dompurify';
 import { htmlToMarkdown, markdownToHtml } from '../markdown.js';
-import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS } from '../sort.js';
+import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS, pageNeighbors } from '../sort.js';
 import type { SortKey } from '../sort.js';
 
 interface Space {
@@ -14,6 +14,8 @@ interface Space {
   desc: string;
   home: string | null;
   sort?: SortKey;
+  order?: string[];
+  recommend?: boolean;
   locked?: boolean;
   builtIn?: boolean;
   devEditable?: boolean;
@@ -516,7 +518,7 @@ async function refreshAuthState() {
 
 function renderAuthUI() {
   const b = $('#btn-auth');
-  b.hidden = !!S.page || !!S.space;   // 文章页/编辑态不显示
+  b.hidden = !!S.page;   // 文章页（含编辑态）不显示；空间总览与首页保留登录入口
   if (b.hidden) return;
   b.textContent = S.authed ? '退出' : (S.authSetup ? '初始化账号' : '登录');
   b.title = S.authed ? `${S.user} · 退出登录`
@@ -732,6 +734,10 @@ function renderSidebar(filter = '') {
 
           const row = document.createElement('div');
           row.className = 'tree-row';
+          row.dataset.slug = p.slug;
+          row.dataset.parent = p.parent || '';
+          row.dataset.space = space.slug;
+          row.dataset.depth = String(depth);
 
           const pc = document.createElement('button');
           pc.className = 'caret' + (pOpen ? ' open' : '');
@@ -749,6 +755,7 @@ function renderSidebar(filter = '') {
           a.href = canonicalPath(p.slug);
           a.dataset.nav = '';
           a.style.paddingLeft = (10 + depth * 16) + 'px';
+          a.draggable = false;
           a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${space.builtIn ? '随应用更新' : relTime(p.updatedAt)}${kids.length ? ' · ' + kids.length + ' 子页' : ''}</span>`;
 
           const acts = document.createElement('span');
@@ -935,6 +942,27 @@ function decorate(container) {
   }
 }
 
+/**
+ * "Recommend other articles" footer, rendered only when the space enables it.
+ *
+ * Order follows the sidebar (depth-first over the space tree), so previous/next read in the same
+ * sequence the tree navigates. The first and last page get a single card, and a space holding one
+ * page shows none.
+ */
+function recommendFooter(space, page) {
+  if (!space?.recommend) return '';
+  const { prev, next } = pageNeighbors(S.pages, page.slug);
+  if (!prev && !next) return '';
+  const card = (target, dir, kind) => `<a class="page-nav-card ${kind}" data-nav href="${esc(canonicalPath(target.slug))}">
+      <span class="dir">${dir}</span>
+      <span class="t">${esc(target.title)}</span>
+    </a>`;
+  return `<nav class="page-nav" aria-label="上一篇 / 下一篇">
+      ${prev ? card(prev, '← 上一篇', 'prev') : ''}
+      ${next ? card(next, '下一篇 →', 'next') : ''}
+    </nav>`;
+}
+
 function renderArticle(page) {
   const space = spaceBySlug(page.space);
   const locked = pageContentLocked(space);
@@ -952,7 +980,7 @@ function renderArticle(page) {
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
        ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
-     </div>` + renderMarkdown(page.content);
+     </div>` + renderMarkdown(page.content) + recommendFooter(space, page);
 
   decorate(el.article);
   $('#copy-link').addEventListener('click', () => {
@@ -1496,38 +1524,45 @@ async function refreshTree() {
   }
 }
 
-async function setSpaceSort(space, key) {
-  if (!space) return;
-  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
-  // `sort` key and a future change of the default still reaches the files that never set one.
-  const body = { sort: key === DEFAULT_SORT ? null : key };
+/**
+ * Persist one space-settings change and refresh whatever depends on it.
+ *
+ * Order is computed server-side from the page fields, so the tree is refetched rather than patched
+ * locally — that keeps one definition of the order instead of two that can drift. The failure
+ * branch must never navigate: the settings entry is reachable from every route, and rendering the
+ * index clears `S.page`, hides the editor and empties `#editor`, which used to discard unsaved
+ * work with no confirmation.
+ */
+async function saveSpaceSettings(space, changes: { sort?: SortKey | null; recommend?: boolean }, note = '空间设置已更新 ✓') {
+  if (!space || !Object.keys(changes).length) return;
   try {
     const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
-      method: 'PUT', body: JSON.stringify(body),
+      method: 'PUT', body: JSON.stringify(changes),
     });
     const i = S.spaces.findIndex(s => s.slug === space.slug);
     if (i >= 0) S.spaces[i] = updated;
     // Keep `S.space` in step even if the refetch below fails, so the index renders the value the
     // server just stored rather than the one it replaced.
     if (S.space?.slug === space.slug) S.space = updated;
-    // Order is computed server-side from the page files, so the tree has to be refetched rather
-    // than re-sorted here — that keeps one definition of the order instead of two that can drift.
     await refreshTree();
-    // Only the space index owns a picker to re-render; anywhere else the sidebar is enough. The
-    // entry point is reachable from every route, so rendering the index unconditionally would
-    // navigate the reader away from the article they are on.
     if (S.space?.slug === space.slug) renderSpace(S.space);
+    // The reading view only needs a re-render when the recommendation footer itself changed, and
+    // never while the editor is open: re-rendering the article would discard unsaved content.
+    else if (changes.recommend !== undefined && S.page?.space === space.slug && el.editWrap.hidden) renderArticle(S.page);
     else renderSidebar(el.search.value);
-    toast('排序已更新 ✓');
+    toast(note);
   } catch (err) {
     toast(err.message, 3000);
-    // The stored value is unchanged, so only the index's own picker needs putting back. Rendering
-    // the index from here used to be unconditional, which from an article — or from the editor —
-    // replaced the view: `renderSpace` clears `S.page`, hides the editor and empties `#editor`,
-    // silently discarding unsaved work with no confirmation.
+    // The stored value is unchanged, so only the index's own controls need putting back.
     if (S.space?.slug === space.slug) renderSpace(S.space);
     else renderSidebar(el.search.value);
   }
+}
+
+async function setSpaceSort(space, key) {
+  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
+  // `sort` key and a future change of the default still reaches the files that never set one.
+  await saveSpaceSettings(space, { sort: key === DEFAULT_SORT ? null : key }, '排序已更新 ✓');
 }
 
 /**
@@ -1548,18 +1583,34 @@ async function spaceSettingsFlow(space) {
         ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
       </select>
     </label>
+    <label class="switch-row" for="ss-recommend">
+      <span class="switch-copy">
+        <span>自动按顺序推荐其他文章</span>
+        <small>在文章底部显示上一篇 / 下一篇卡片</small>
+      </span>
+      <input type="checkbox" id="ss-recommend"${space.recommend ? ' checked' : ''}>
+      <span class="switch-ui" aria-hidden="true"></span>
+    </label>
     <div class="modal-actions">
       <button class="btn btn-ghost" data-x="no">关闭</button>
       <button class="btn btn-primary" data-x="ok">保存</button>
     </div>`);
   const sel = $('#ss-sort', m) as HTMLSelectElement;
+  const rec = $('#ss-recommend', m) as HTMLInputElement;
   let settled = false;
   const finish = async save => {
     if (settled) return;
     settled = true;
     const pick = sel.value;
+    // Send only what changed: an untouched field must not be rewritten (the default sort is
+    // stored as `null`, not as the current default value), and an empty change skips the request.
+    const changes: { sort?: SortKey | null; recommend?: boolean } = {};
+    if (pick !== (space.sort ?? DEFAULT_SORT)) changes.sort = pick === DEFAULT_SORT ? null : (pick as SortKey);
+    if (rec.checked !== !!space.recommend) changes.recommend = rec.checked;
     closeModal();
-    if (save && pick !== (space.sort ?? DEFAULT_SORT)) await setSpaceSort(space, pick);
+    // Keep the sort-only message other suites and the toast copy rely on; the switch gets the
+    // broader wording because the same save may have touched two fields.
+    if (save) await saveSpaceSettings(space, changes, changes.recommend === undefined ? '排序已更新 ✓' : '空间设置已更新 ✓');
   };
   $('[data-x=no]', m).onclick = () => finish(false);
   $('[data-x=ok]', m).onclick = () => finish(true);
@@ -1891,9 +1942,12 @@ function renderSpace(space) {
   el.editor.innerHTML = '';
 
   const tops = spacePages(space.slug, null);
+  // Manual ordering is a write: locked spaces and the read-only built-in template get no grips.
+  const canSort = !pageContentLocked(space) || devSourceEditable(space);
   const cards = tops.map(p => {
     const n = childrenOf(p.slug).filter(k => k.space === space.slug).length;
-    return `<a class="card" data-nav href="${esc(canonicalPath(p.slug))}">
+    return `<a class="card" data-slug="${esc(p.slug)}" draggable="false" data-nav href="${esc(canonicalPath(p.slug))}">
+              ${canSort ? `<span class="card-grip" role="button" aria-label="拖动排序" title="拖动排序"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/></g></svg></span>` : ''}
               <span class="t">${esc(p.title)}</span>
               <span class="s">${n ? n + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
             </a>`;
@@ -1915,6 +1969,11 @@ function renderSpace(space) {
              ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
            </select>
          </label>
+         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇">
+           <span>启用推荐</span>
+           <input type="checkbox" id="sp-recommend"${space.recommend ? ' checked' : ''}>
+           <span class="switch-ui" aria-hidden="true"></span>
+         </label>
          <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
          <button class="btn btn-ghost" id="sp-rename">重命名</button>
          ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>'}
@@ -1926,12 +1985,394 @@ function renderSpace(space) {
   el.article.hidden = false;
   decorate(el.article);
   $('#sp-sort').addEventListener('change', (e) => setSpaceSort(space, (e.target as HTMLSelectElement).value));
+  // Same setting as the modal switch, offered where the sort picker already lives.
+  $('#sp-recommend').addEventListener('change', (e) =>
+    saveSpaceSettings(space, { recommend: (e.target as HTMLInputElement).checked }));
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-slug-edit')?.addEventListener('click', () => slugSpaceFlow(space));
   $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
+  if (canSort && tops.length > 1) setupCardDrag(space);
   renderAuthUI();
   renderSidebar(el.search.value);
+}
+
+/* ============================================================
+   Manual card ordering (drag)
+   ============================================================ */
+const CARD_DRAG_THRESHOLD = 4;
+
+/**
+ * Pointer-driven reordering for the space index cards, in the spirit of Yuque's card lists: the
+ * card lifts under the pointer, a dashed placeholder marks the drop slot and the other cards slide
+ * aside. Mouse users can drag anywhere on the card; touch and pen start from the grip, because a
+ * finger dragging the card body would fight page scrolling.
+ *
+ * Nothing is persisted until the pointer is released: the DOM is the preview, and the drop sends
+ * the new slug order to the space API (switching the space to manual sort on the first drag).
+ */
+function setupCardDrag(space) {
+  const container = $('#article .cards');
+  if (!container) return;
+  const cardsIn = () => [...container.querySelectorAll('.card[data-slug]')];
+  let swallowClick = false;
+
+  // A drag ends with a click on the link under the pointer; swallow exactly that one, and never let
+  // a tap on the grip navigate.
+  container.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest?.('.card-grip')) { e.preventDefault(); e.stopPropagation(); return; }
+    if (!swallowClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowClick = false;
+  }, true);
+
+  container.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    const card = target.closest?.('.card[data-slug]');
+    if (!card) return;
+    const grip = target.closest?.('.card-grip');
+    if (!grip && e.pointerType && e.pointerType !== 'mouse') return;
+    if (grip) e.preventDefault();
+    startDrag(e, card, grip);
+  });
+
+  function startDrag(e, card, grip) {
+    const startX = e.clientX, startY = e.clientY;
+    let active = false;
+    let placeholder = null;
+    let offsetX = 0, offsetY = 0;
+
+    const cleanup = (restore) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      if (placeholder) {
+        if (restore) placeholder.replaceWith(card);
+        else placeholder.remove();
+        placeholder = null;
+      }
+      card.classList.remove('is-dragging');
+      card.style.cssText = '';
+      container.classList.remove('is-sorting');
+      document.body.classList.remove('is-card-dragging');
+      // If no click follows the drop, do not swallow the reader's next tap.
+      window.setTimeout(() => { swallowClick = false; }, 400);
+    };
+
+    const animate = (mutate) => {
+      const others = cardsIn().filter(el => el !== card);
+      const before = others.map(el => el.getBoundingClientRect());
+      mutate();
+      others.forEach((el, i) => {
+        const rect = el.getBoundingClientRect();
+        const dx = before[i].left - rect.left;
+        const dy = before[i].top - rect.top;
+        if (!dx && !dy) return;
+        el.style.transition = 'none';
+        el.style.transform = `translate(${dx}px, ${dy}px)`;
+        void el.offsetWidth;
+        requestAnimationFrame(() => {
+          el.style.transition = 'transform .18s cubic-bezier(.2, .7, .3, 1)';
+          el.style.transform = '';
+          window.setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 220);
+        });
+      });
+    };
+
+    const placePlaceholder = (x, y) => {
+      if (!placeholder) return;
+      let before = null;
+      for (const el of cardsIn()) {
+        if (el === card) continue;
+        const rect = el.getBoundingClientRect();
+        // Grid cards are laid out row-wise: inside a row compare x, otherwise compare y.
+        const sameRow = y >= rect.top && y <= rect.bottom;
+        const goesBefore = sameRow ? x < rect.left + rect.width / 2 : y < rect.top + rect.height / 2;
+        if (goesBefore) { before = el; break; }
+      }
+      if (before) {
+        if (placeholder.nextElementSibling !== before) animate(() => container.insertBefore(placeholder, before));
+      } else if (placeholder !== container.lastElementChild) {
+        animate(() => container.appendChild(placeholder));
+      }
+    };
+
+    const onMove = (ev) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < CARD_DRAG_THRESHOLD) return;
+        active = true;
+        const rect = card.getBoundingClientRect();
+        offsetX = startX - rect.left;
+        offsetY = startY - rect.top;
+        placeholder = document.createElement('div');
+        placeholder.className = 'card-placeholder';
+        placeholder.style.width = rect.width + 'px';
+        placeholder.style.height = rect.height + 'px';
+        card.insertAdjacentElement('afterend', placeholder);
+        card.style.width = rect.width + 'px';
+        card.style.height = rect.height + 'px';
+        card.classList.add('is-dragging');
+        container.classList.add('is-sorting');
+        document.body.classList.add('is-card-dragging');
+        swallowClick = true;
+        try { (grip || card).setPointerCapture?.(e.pointerId); } catch { /* optional */ }
+      }
+      ev.preventDefault();
+      card.style.left = (ev.clientX - offsetX) + 'px';
+      card.style.top = (ev.clientY - offsetY) + 'px';
+      placePlaceholder(ev.clientX, ev.clientY);
+    };
+
+    const onUp = (ev) => {
+      if (!active) { cleanup(false); return; }
+      // The placeholder marks where the card lands; read the resulting slug order before restoring it.
+      const order: string[] = [];
+      for (const child of container.children) {
+        if (child === placeholder) order.push(card.dataset.slug);
+        else if (child !== card && child.classList && child.classList.contains('card')) order.push(child.dataset.slug);
+      }
+      cleanup(true);
+      if (ev.type !== 'pointercancel' && order.length) saveSpaceOrder(space, order);
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+}
+
+async function saveSpaceOrder(space, order) {
+  const changed = { order } as { sort?: SortKey; order: string[] };
+  if (space.sort !== 'manual') changed.sort = 'manual';
+  try {
+    const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
+      method: 'PUT', body: JSON.stringify(changed),
+    });
+    const i = S.spaces.findIndex(s => s.slug === space.slug);
+    if (i >= 0) S.spaces[i] = updated;
+    if (S.space?.slug === space.slug) S.space = updated;
+    await refreshTree();
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
+    toast('排序已更新 ✓');
+  } catch (err) {
+    toast(err.message, 3000);
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
+  }
+}
+
+/* ============================================================
+   Manual ordering from the sidebar
+   ============================================================ */
+const SIDEBAR_DRAG_THRESHOLD = 4;
+const SIDEBAR_LONG_PRESS_MS = 300;
+
+/** Full DFS order of a space with one sibling group reordered, so the API gets a complete list. */
+function buildSpaceOrder(spaceSlug, parentSlug, siblingSlugs) {
+  const order = [];
+  const walk = (parent) => {
+    const kids = (parent || null) === (parentSlug || null)
+      ? siblingSlugs.map(slug => pageBySlug(slug)).filter(Boolean)
+      : spacePages(spaceSlug, parent);
+    for (const kid of kids) { order.push(kid.slug); walk(kid.slug); }
+  };
+  walk(null);
+  return order;
+}
+
+/**
+ * Drag reordering in the sidebar.
+ *
+ * The sidebar is too narrow for a floating card, so the preview is a Yuque-style insertion line
+ * (`>----------`) between rows; a small ghost chip follows the pointer for context. Only siblings
+ * (same parent) are considered, so a drop never changes the tree structure — moving a page to a
+ * different parent stays in the row menu. Touch and pen require a short long-press first, because
+ * dragging a row immediately would fight the drawer's scrolling.
+ */
+function setupSidebarDrag() {
+  let swallowClick = false;
+
+  el.list.addEventListener('click', (e) => {
+    if (!swallowClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowClick = false;
+  }, true);
+
+  el.list.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if ((e.target as HTMLElement).closest?.('.row-actions, .caret')) return;
+    const anchor = (e.target as HTMLElement).closest?.('.page-item');
+    const row = anchor?.closest?.('.tree-row') as HTMLElement | null;
+    if (!row || !row.dataset.slug) return;
+    const space = spaceBySlug(row.dataset.space);
+    if (!space || (pageContentLocked(space) && !devSourceEditable(space))) return;
+    startDrag(e, row, space);
+  });
+
+  function startDrag(e, row, space) {
+    const page = pageBySlug(row.dataset.slug);
+    if (!page) return;
+    const touch = !!e.pointerType && e.pointerType !== 'mouse';
+    const startX = e.clientX, startY = e.clientY;
+    let active = false;
+    let armed = !touch;
+    let timer = 0;
+    let ghost = null;
+    let marker = null;
+    let targetRow = null;
+    let dropBefore = false;
+    let lastX = startX, lastY = startY;
+    let scrollRaf = 0;
+
+    const touchBlocker = (ev) => { if (active) ev.preventDefault(); };
+    // A long press on a link can raise the browser's context menu mid-drag; suppress it while the
+    // gesture owns the pointer.
+    const blockMenu = (ev) => { if (active) ev.preventDefault(); };
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      document.removeEventListener('touchmove', touchBlocker);
+      document.removeEventListener('contextmenu', blockMenu, true);
+      if (timer) { clearTimeout(timer); timer = 0; }
+      if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0; }
+      if (ghost) { ghost.remove(); ghost = null; }
+      if (marker) { marker.remove(); marker = null; }
+      if (highlightRow) { highlightRow.classList.remove('is-drop-target'); highlightRow = null; }
+      row.classList.remove('is-dragging');
+      document.body.classList.remove('is-row-dragging');
+      window.setTimeout(() => { swallowClick = false; }, 400);
+    };
+
+    const activate = () => {
+      active = true;
+      swallowClick = true;
+      row.classList.add('is-dragging');
+      document.body.classList.add('is-row-dragging');
+      ghost = document.createElement('div');
+      ghost.className = 'tree-drag-ghost';
+      ghost.textContent = page.title;
+      document.body.appendChild(ghost);
+      marker = document.createElement('div');
+      marker.className = 'tree-drop';
+      marker.setAttribute('aria-hidden', 'true');
+      el.list.appendChild(marker);
+
+      // Holding the pointer near an edge keeps scrolling the list, like Yuque's tree does.
+      const scrollStep = () => {
+        if (!active) return;
+        const rect = el.list.getBoundingClientRect();
+        const edge = 36;
+        let moved = false;
+        if (lastY < rect.top + edge && el.list.scrollTop > 0) { el.list.scrollTop -= 10; moved = true; }
+        else if (lastY > rect.bottom - edge) { el.list.scrollTop += 10; moved = true; }
+        if (moved) placeMarker(lastX, lastY);
+        scrollRaf = requestAnimationFrame(scrollStep);
+      };
+      scrollRaf = requestAnimationFrame(scrollStep);
+    };
+
+    let highlightRow = null;
+
+    const placeMarker = (x, y) => {
+      if (!marker) return;
+      const parent = page.parent || '';
+      const siblings = [...el.list.querySelectorAll('.tree-row')]
+        .map(node => node as HTMLElement)
+        .filter(r => r !== row && r.dataset.space === space.slug && (r.dataset.parent || '') === parent);
+      if (!siblings.length) { targetRow = null; marker.hidden = true; return; }
+      targetRow = null;
+      dropBefore = false;
+      for (const candidate of siblings) {
+        const rect = candidate.getBoundingClientRect();
+        if (y < rect.top + rect.height / 2) { targetRow = candidate; dropBefore = true; break; }
+      }
+      if (!targetRow) {
+        targetRow = siblings[siblings.length - 1];
+        dropBefore = false;
+      }
+      // After the last sibling, the line belongs after that sibling's whole open subtree.
+      let edge = targetRow;
+      if (!dropBefore) {
+        const depth = Number(targetRow.dataset.depth || 0);
+        for (;;) {
+          const next = edge.nextElementSibling as HTMLElement | null;
+          if (!next || !next.classList.contains('tree-row') || next.dataset.space !== space.slug ||
+              Number(next.dataset.depth || 0) <= depth) break;
+          edge = next;
+        }
+      }
+      if (ghost) { ghost.style.left = x + 'px'; ghost.style.top = y + 'px'; }
+      // Yuque-style overlay: the list does not reflow while dragging. The line floats on the row
+      // boundary and the row it would land against is highlighted.
+      const listRect = el.list.getBoundingClientRect();
+      const anchorEl = targetRow.querySelector('.page-item');
+      const rowRect = targetRow.getBoundingClientRect();
+      const edgeRect = dropBefore ? rowRect : (edge as HTMLElement).getBoundingClientRect();
+      const indent = anchorEl ? anchorEl.getBoundingClientRect().left - listRect.left : 24;
+      const left = Math.max(12, indent - 2);
+      marker.hidden = false;
+      marker.style.top = (dropBefore ? edgeRect.top : edgeRect.bottom) - listRect.top - 1 + 'px';
+      marker.style.left = left + 'px';
+      marker.style.width = Math.max(24, listRect.width - left - 10) + 'px';
+      if (highlightRow !== edge) {
+        if (highlightRow) highlightRow.classList.remove('is-drop-target');
+        highlightRow = edge as HTMLElement;
+        highlightRow.classList.add('is-drop-target');
+      }
+    };
+
+    const onMove = (ev) => {
+      if (!active) {
+        if (touch && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8) {
+          // The finger is scrolling, not long-pressing: let the drawer scroll.
+          if (timer) { clearTimeout(timer); timer = 0; }
+          cleanup();
+          return;
+        }
+        if (!touch) {
+          if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < SIDEBAR_DRAG_THRESHOLD) return;
+          activate();
+        }
+        if (!active) return;
+      }
+      ev.preventDefault();
+      lastX = ev.clientX;
+      lastY = ev.clientY;
+      if (ghost) { ghost.style.left = lastX + 'px'; ghost.style.top = lastY + 'px'; }
+      placeMarker(lastX, lastY);
+    };
+
+    const onUp = (ev) => {
+      if (!active) { cleanup(); return; }
+      // `spacePages`/`buildSpaceOrder` take `null` for the root level; the DOM dataset stores ''.
+      const parent = page.parent || null;
+      const siblings = spacePages(space.slug, parent).map(p => p.slug).filter(slug => slug !== page.slug);
+      let index = siblings.length;
+      const targetSlug = targetRow && targetRow.dataset.slug;
+      const at = targetSlug ? siblings.indexOf(targetSlug) : -1;
+      if (at >= 0) index = dropBefore ? at : at + 1;
+      siblings.splice(index, 0, page.slug);
+      const order = buildSpaceOrder(space.slug, parent, siblings);
+      cleanup();
+      if (ev.type !== 'pointercancel' && order.length > 1) saveSpaceOrder(space, order);
+    };
+
+    if (touch) {
+      timer = window.setTimeout(() => { timer = 0; activate(); }, SIDEBAR_LONG_PRESS_MS);
+      document.addEventListener('touchmove', touchBlocker, { passive: false });
+      document.addEventListener('contextmenu', blockMenu, true);
+    }
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
 }
 
 async function openPage(slug: string): Promise<void> {
@@ -2178,6 +2619,7 @@ window.addEventListener('resize', () => {
 el.list.addEventListener('click', e => {
   if (e.target.closest('.page-item') || e.target.closest('.space-title')) toggleDrawer(false);
 });
+setupSidebarDrag();
 
 /* ============================================================
    Boot

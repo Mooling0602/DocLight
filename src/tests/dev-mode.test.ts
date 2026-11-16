@@ -138,6 +138,28 @@ async function main(): Promise<void> {
     assert.deepEqual(updatedIndex.extra, { preserve: true });
     assert.equal(updatedIndex.spaces.find((s: any) => s.slug === 'default').extra, 'preserved');
     assert.deepEqual(snapshot(data), initialData);
+    // The recommendation switch is a source edit like the sort key: it lands in template/spaces.json
+    // and disabling it removes the key instead of pinning `false`.
+    const templateSpace = () => JSON.parse(fs.readFileSync(indexPath, 'utf8')).spaces.find((s: any) => s.slug === 'default');
+    assert.equal((await api('spaces/doclight-default', 'PUT', { recommend: true })).status, 200);
+    assert.equal(templateSpace().recommend, true, '开启推荐应写入模板索引');
+    assert.equal((await api('spaces/doclight-default', 'PUT', { recommend: 'yes' })).status, 400);
+    assert.equal(templateSpace().recommend, true, '非法值不得改动模板');
+    assert.equal((await api('spaces/doclight-default', 'PUT', { recommend: false })).status, 200);
+    assert.equal('recommend' in templateSpace(), false, '关闭推荐应删除该键');
+    // Manual ordering on the built-in space translates virtual page slugs to source file names.
+    const manualTemplate = await api('spaces/doclight-default', 'PUT', { sort: 'manual' });
+    assert.equal(manualTemplate.status, 200);
+    assert.equal(manualTemplate.body.sort, 'manual');
+    assert.ok(Array.isArray(manualTemplate.body.order) && manualTemplate.body.order.length > 0, '切换手动排序应写入种子顺序');
+    const virtualPage = (source: string) => `doclight-default-${source}`;
+    const reordered = await api('spaces/doclight-default', 'PUT', { order: [virtualPage('guide'), virtualPage('welcome')] });
+    assert.equal(reordered.status, 200);
+    assert.deepEqual(templateSpace().order, ['guide', 'welcome'], '模板索引应保存源文件 slug 顺序');
+    assert.deepEqual(reordered.body.order, [virtualPage('guide'), virtualPage('welcome')], '响应应使用虚拟页面 slug');
+    assert.equal((await api('spaces/doclight-default', 'PUT', { order: ['welcome'] })).status, 400, '非虚拟 slug 应拒绝');
+    assert.equal((await api('spaces/doclight-default', 'PUT', { order: 'nope' })).status, 400, '非数组应拒绝');
+    assert.deepEqual(templateSpace().order, ['guide', 'welcome'], '被拒绝的请求不得改动模板');
     assert.equal((await api('spaces/doclight-default', 'PUT', { slug: 'spaces' })).status, 400);
     const beforeReserved = snapshot(template);
     assert.equal((await api('spaces/doclight-default', 'PUT', { slug: 'api' })).status, 400);

@@ -29,7 +29,7 @@
  *   PUT    /api/pages/:slug  update { title?, content?, slug?, space?, parent? }
  *   DELETE /api/pages/:slug  delete
  *   POST   /api/spaces       create { title, desc? }
- *   PUT    /api/spaces/:slug update { title?, desc?, slug? }
+ *   PUT    /api/spaces/:slug update { title?, desc?, sort?, order?, recommend?, slug? }
  *   DELETE /api/spaces/:slug delete
  *
  * Filing footer (see src/beian.ts), all optional:
@@ -367,6 +367,11 @@ function readDb(): Database {
     ...source, slug: templateVirtualSlug, builtIn: true, locked: true,
     ...(CONFIG.devMode ? { devEditable: true } : {}),
     home: source.home && slugs.has(source.home) ? virtualSlug(source.home) : null,
+    // The template index names source files, but the API speaks in virtual page slugs: translate
+    // the manual order the same way the pages themselves were translated, dropping stale entries.
+    ...(source.order && source.order.length
+      ? { order: source.order.filter(slug => slugs.has(slug)).map(virtualSlug) }
+      : {}),
   };
   const pages = sourcePages.map(p => ({
     ...p, slug: virtualSlug(p.slug), space: templateVirtualSlug,
@@ -765,8 +770,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
         if (slug === builtInSpace && CONFIG.devMode) {
-          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['title', 'desc', 'sort', 'slug'].includes(k))) return locked();
-          const changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string } = {};
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['title', 'desc', 'sort', 'order', 'recommend', 'slug'].includes(k))) return locked();
+          const changes: { title?: string; desc?: string; sort?: SortKey | null; order?: string[] | null; recommend?: boolean | null; virtualSlug?: string } = {};
           if (body.slug !== undefined) {
             if (Object.keys(body).length !== 1 || typeof body.slug !== 'string' || (body.slug !== BUILT_IN_SLUG && (!SLUG_RE.test(body.slug) || body.slug === 'spaces' || body.slug === 'api'))) return json(res, 400, { error: '空间 slug 无效或不能与其他修改同时提交' });
             if (body.slug !== slug && (db.pages.some(p => p.slug === body.slug) || db.spaces.some(s => s.slug === body.slug))) return json(res, 409, { error: '该 slug 已被占用' });
@@ -787,6 +792,33 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           if (body.sort !== undefined) {
             if (body.sort !== null && !isSortKey(body.sort)) return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
             changes.sort = body.sort as SortKey | null;
+          }
+          if (body.recommend !== undefined) {
+            if (typeof body.recommend !== 'boolean') return json(res, 400, { error: 'recommend 参数必须为布尔值' });
+            // `false` is the default, so it clears the key instead of pinning it in the template.
+            changes.recommend = body.recommend ? true : null;
+          }
+          if (body.order !== undefined) {
+            if (!Array.isArray(body.order)) return json(res, 400, { error: 'order 必须是页面 slug 数组' });
+            // The browser knows the built-in pages by their virtual `doclight-default-…` names;
+            // the template index stores the source file names, so they are translated here.
+            const seen = new Set<string>();
+            const sourceOrder: string[] = [];
+            for (const item of body.order) {
+              if (typeof item !== 'string' || !isBuiltInPageSlug(item) || !db.pages.some(p => p.slug === item && p.space === builtInSpace)) {
+                return json(res, 400, { error: 'order 只能包含本空间内页面的 slug' });
+              }
+              if (seen.has(item)) return json(res, 400, { error: 'order 中不能出现重复的 slug' });
+              seen.add(item);
+              sourceOrder.push(item.slice(BUILT_IN_SLUG.length + 1));
+            }
+            changes.order = sourceOrder.length ? sourceOrder : null;
+          }
+          // Entering manual mode seeds the order from what was on screen, so the first drag starts
+          // from the current arrangement instead of an arbitrary one.
+          if (body.sort === 'manual' && changes.order === undefined) {
+            const seeded = db.pages.filter(p => p.space === slug).map(p => p.slug.slice(BUILT_IN_SLUG.length + 1));
+            changes.order = seeded.length ? seeded : null;
           }
           requireSeparateTemplate();
           editTemplateSpace(TEMPLATE_DIR, changes);
@@ -823,6 +855,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           else if (isSortKey(body.sort)) nextSort = body.sort;
           else return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
         }
+        let nextRecommend: boolean | undefined;
+        if (body.recommend !== undefined) {
+          if (typeof body.recommend !== 'boolean') return json(res, 400, { error: 'recommend 参数必须为布尔值' });
+          nextRecommend = body.recommend;
+        }
+        let nextOrder: string[] | undefined;
+        if (body.order !== undefined) {
+          if (!Array.isArray(body.order)) return json(res, 400, { error: 'order 必须是页面 slug 数组' });
+          const seen = new Set<string>();
+          for (const item of body.order) {
+            if (typeof item !== 'string' || !db.pages.some(p => p.slug === item && p.space === slug)) {
+              return json(res, 400, { error: 'order 只能包含本空间内页面的 slug' });
+            }
+            if (seen.has(item)) return json(res, 400, { error: 'order 中不能出现重复的 slug' });
+            seen.add(item);
+          }
+          nextOrder = body.order as string[];
+        }
 
         if (nextSlug !== null) {
           const ns = nextSlug;
@@ -834,6 +884,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (body.sort !== undefined) {
           if (nextSort === null) delete db.spaces[idx].sort;
           else db.spaces[idx].sort = nextSort;
+        }
+        if (nextRecommend !== undefined) {
+          // Only the enabled state is persisted: a disabled space keeps no `recommend` key.
+          if (nextRecommend) db.spaces[idx].recommend = true;
+          else delete db.spaces[idx].recommend;
+        }
+        if (nextOrder !== undefined) {
+          if (nextOrder.length) db.spaces[idx].order = nextOrder;
+          else delete db.spaces[idx].order;
+        }
+        // Entering manual mode seeds the order from the arrangement already on screen.
+        if (body.sort === 'manual' && nextOrder === undefined && !db.spaces[idx].order) {
+          db.spaces[idx].order = db.pages.filter(p => p.space === db.spaces[idx].slug).map(p => p.slug);
         }
         db.spaces[idx].updatedAt = Date.now();
         writeDb(db);

@@ -17,7 +17,7 @@ import { isDeepStrictEqual } from 'node:util';
 import * as YAML from 'yaml';
 import { runTemplateTransaction } from './template-transaction.js';
 import type { TemplateTransaction } from './template-transaction.js';
-import { DEFAULT_SORT, isSortKey } from './sort.js';
+import { DEFAULT_SORT, applyManualOrder, isSortKey } from './sort.js';
 import type { SortKey } from './sort.js';
 
 export { DEFAULT_SORT, SORT_KEYS, isSortKey } from './sort.js';
@@ -30,6 +30,10 @@ export interface Space {
   home: string | null;
   /** Absent means `DEFAULT_SORT`; omitted from `spaces.json` so untouched spaces stay clean. */
   sort?: SortKey;
+  /** Page slugs in manual reading order; only consulted while `sort` is `manual`. */
+  order?: string[];
+  /** Show previous/next page cards at the bottom of every article. False is the default. */
+  recommend?: boolean;
   /** Only the locked state is persisted. */
   locked?: boolean;
   /** Source-owned virtual space, never persisted. */
@@ -182,6 +186,9 @@ export function sortPages(pages: Page[], key: SortKey = DEFAULT_SORT): Page[] {
     case 'updated_desc': sorted.sort((a, b) => b.updatedAt - a.updatedAt || bySlug(a, b)); break;
     case 'updated_asc': sorted.sort((a, b) => a.updatedAt - b.updatedAt || bySlug(a, b)); break;
     case 'title_asc': sorted.sort((a, b) => a.title.localeCompare(b.title, 'zh') || bySlug(a, b)); break;
+    // Manual order is applied by `applyManualOrder` at read time, because it needs the space's
+    // stored slug list; leaving the incoming order untouched keeps this helper free of it.
+    case 'manual': break;
   }
   return sorted;
 }
@@ -200,6 +207,16 @@ export function readStore(dataDir: string): Database {
   for (const space of spaces) {
     if (space.sort !== undefined && !isSortKey(space.sort)) delete space.sort;
     if (space.locked !== true) delete space.locked;
+    if (space.recommend !== true) delete space.recommend;
+    // The order list is hand-editable too: keep only unique, filesystem-safe slug strings and drop
+    // the key entirely when nothing usable is left, so a broken entry cannot reorder pages by accident.
+    if (space.order !== undefined) {
+      const clean = Array.isArray(space.order)
+        ? space.order.filter((slug, index, all) => typeof slug === 'string' && SLUG_RE.test(slug) && all.indexOf(slug) === index)
+        : [];
+      if (clean.length) space.order = clean;
+      else delete space.order;
+    }
   }
 
   const pages: Page[] = [];
@@ -244,7 +261,10 @@ export function readStore(dataDir: string): Database {
   // so every page collapsed onto the synthetic fallback) are appended rather than dropped.
   const ordered: Page[] = [];
   for (const space of spaces) {
-    ordered.push(...sortPages(pages.filter((p) => p.space === space.slug), space.sort ?? DEFAULT_SORT));
+    const own = pages.filter((p) => p.space === space.slug);
+    ordered.push(...(space.sort === 'manual'
+      ? applyManualOrder(own, space.order)
+      : sortPages(own, space.sort ?? DEFAULT_SORT)));
   }
   ordered.push(...sortPages(pages.filter((p) => !knownSpaces.has(p.space))));
 
@@ -658,7 +678,7 @@ export function createTemplatePage(templateDir: string, page: Page): void {
 }
 
 /** Update source-space metadata without serialising pages or discarding unknown index fields. */
-export function editTemplateSpace(templateDir: string, changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string }): void {
+export function editTemplateSpace(templateDir: string, changes: { title?: string; desc?: string; sort?: SortKey | null; order?: string[] | null; recommend?: boolean | null; virtualSlug?: string }): void {
   const invalid = () => Object.assign(new Error('内置空间模板无效或不安全'), { code: 400 });
   const file = path.join(templateDir, 'spaces.json');
   let stat: fs.Stats;
@@ -691,6 +711,14 @@ export function editTemplateSpace(templateDir: string, changes: { title?: string
   if (changes.sort !== undefined) {
     if (changes.sort === null) delete space.sort;
     else space.sort = changes.sort;
+  }
+  if (changes.recommend !== undefined) {
+    if (changes.recommend === null) delete space.recommend;
+    else space.recommend = changes.recommend;
+  }
+  if (changes.order !== undefined) {
+    if (changes.order === null) delete space.order;
+    else space.order = changes.order;
   }
   space.updatedAt = Date.now();
   const next = JSON.stringify(index, null, 2) + '\n';
