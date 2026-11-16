@@ -54,3 +54,10 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 ## Git 同步
 
 项目以 main 为默认分支和同步基准，每轮工作完成后，在确认 PR 已成功合并并关闭的情况下，可以从 origin/main 覆盖到其他分支，以便同步 Git 历史并开展新工作。
+
+## 发布与标签
+
+- 发布提交的标题使用 `release: v<semver>`，例如 `release: v1.2.0`、`release: v0.1.0-rc.1`。
+- 发布前同步版本号：`package.json`、`package-lock.json`（文件顶部与 `packages[""]` 两处）、`flake.nix`，并在 `template/pages/changelog.md` 增加对应小节。
+- 标签名不带 `v` 前缀，使用附注标签，message 写作 `commit <发布提交短哈希>`，例如 `commit bfdd1c4`；预发布版本同理，如 `0.1.0-rc.1`。
+- 推送、强制推送或改写已推送的历史之前，必须先取得维护者确认。
