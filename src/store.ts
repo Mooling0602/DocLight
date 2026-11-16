@@ -27,6 +27,10 @@ export interface Space {
   home: string | null;
   /** Absent means `DEFAULT_SORT`; omitted from `spaces.json` so untouched spaces stay clean. */
   sort?: SortKey;
+  /** Only the locked state is persisted. */
+  locked?: boolean;
+  /** Source-owned virtual space, never persisted. */
+  builtIn?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -50,6 +54,8 @@ export interface Database {
 
 /** Slugs double as file names, so they must be filesystem-safe. Mirrors the server's rule. */
 const SLUG_RE = /^[a-z0-9_]{1,80}$/;
+export const BUILT_IN_SLUG = 'doclight-default';
+export const isBuiltInPageSlug = (slug: string): boolean => slug.startsWith(`${BUILT_IN_SLUG}-`);
 const FRONT_MATTER_FENCE = '---';
 
 const spacesFile = (dataDir: string) => path.join(dataDir, 'spaces.json');
@@ -74,7 +80,7 @@ export function storeExists(dataDir: string): boolean {
  * Whether the index parses but names no spaces. Such an index cannot classify the pages: with no
  * valid slug to fall back to, `readStore` collapses every page onto a synthetic name and the next
  * write persists that loss. It is only *inconsistent* when page files exist — a site the user
- * deliberately emptied also has an empty index and must be left alone, not re-seeded.
+ * deliberately emptied also has an empty index and must be left alone.
  */
 export function spacesIndexIsEmpty(dataDir: string): boolean {
   try {
@@ -188,6 +194,7 @@ export function readStore(dataDir: string): Database {
   // value would match no comparator and silently leave that space unordered.
   for (const space of spaces) {
     if (space.sort !== undefined && !isSortKey(space.sort)) delete space.sort;
+    if (space.locked !== true) delete space.locked;
   }
 
   const pages: Page[] = [];
@@ -254,14 +261,16 @@ function writeAtomic(file: string, data: string): void {
 /** Options for `writeStore`. */
 export interface WriteOptions {
   /**
-   * Write only page files that do not exist yet, never overwriting one. Used by the legacy
-   * migration and first-run seeding: those create the store, so an existing `<slug>.md` is
-   * newer than the source they carry and must win. Without this a legacy `pages.json` that
+   * Write only page files that do not exist yet, never overwriting one. Used by legacy migration
+   * and empty-store initialization; during migration an existing `<slug>.md` is newer than
+   * the snapshot and must win. Without this a legacy `pages.json` that
    * survives its own retirement (a crash between the store write and the move, or a failed
    * rename) would, on a later boot with the index lost, re-import its stale snapshot over the
    * user's live edits.
    */
   onlyCreate?: boolean;
+  /** Leave existing pages in locked spaces byte-for-byte unchanged during ordinary writes. */
+  preserveLocked?: boolean;
 }
 
 /**
@@ -272,7 +281,7 @@ export interface WriteOptions {
  * `removed` lists the slugs the caller itself deleted or renamed. Only those files are
  * unlinked — never "every file the incoming db happens not to mention". That distinction is
  * what keeps a write from destroying data it never saw: a page whose file could not be read
- * is absent from `db`, and a seeding or migration write carries only the pages it was given,
+ * is absent from `db`, and a migration write carries only the pages in its snapshot,
  * so neither may be treated as an authoritative statement that the other files are unwanted.
  */
 export function writeStore(
@@ -285,6 +294,7 @@ export function writeStore(
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
+  const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
   for (const page of db.pages) {
     // The slug becomes a file name, so it is validated here rather than trusted from the caller.
     // `readStore` filters such files on the way in, but a write is the only place that can put one
@@ -300,6 +310,8 @@ export function writeStore(
     const file = path.join(dir, `${page.slug}.md`);
     // A file that already exists is the live page, not something the incoming db may replace.
     if (options.onlyCreate && fs.existsSync(file)) continue;
+    // Serializing the entire tree can normalize unrelated files; a locked page must stay untouched.
+    if (lockedSpaces.has(page.space) && fs.existsSync(file)) continue;
     const next = joinFrontMatter(page);
     if (!sameContent(file, next)) writeAtomic(file, next);
   }
@@ -334,42 +346,22 @@ export function mergeSpaces(base: Space[], extra: Space[]): Space[] {
 /** Write only the spaces index, leaving every page file untouched. */
 export function writeSpaces(dataDir: string, spaces: Space[]): void {
   fs.mkdirSync(dataDir, { recursive: true });
-  const next = JSON.stringify({ version: 4, spaces }, null, 2) + '\n';
+  const normalized = spaces.map(({ locked, ...space }) => locked === true ? { ...space, locked: true } : space);
+  const next = JSON.stringify({ version: 4, spaces: normalized }, null, 2) + '\n';
   if (!sameContent(spacesFile(dataDir), next)) writeAtomic(spacesFile(dataDir), next);
 }
 
-/* ------------------------------------------------------------ seeding */
-
-/**
- * Load a shipped sample site laid out exactly like the store (`spaces.json` + `pages/*.md`).
- * Returns null when the template is absent or malformed, so the caller can start empty.
- */
-export function seedFromTemplate(templateDir: string): Database | null {
-  if (!fs.existsSync(spacesFile(templateDir))) return null;
-  const db = readStore(templateDir);
-  if (!db.spaces.length) return null;
-  // Shift every timestamp by one common delta so the sample's designed ordering survives but
-  // it does not read as "created months ago" on first run.
-  const stamps = [...db.spaces, ...db.pages]
-    .map((r) => r.updatedAt)
-    .filter((t) => Number.isFinite(t));
-  if (stamps.length) {
-    const delta = Date.now() - Math.max(...stamps);
-    for (const r of [...db.spaces, ...db.pages]) { r.createdAt += delta; r.updatedAt += delta; }
-  }
-  return db;
-}
+/* ------------------------------------------------------------ recovery */
 
 /**
  * Rebuild a lost `spaces.json` from the page files already on disk.
  *
  * The spaces index is derived data — each page carries its space in its front matter — so if
- * the index alone is lost (deleted, truncated, half-synced) the content is still intact, and
- * seeding over it would overwrite every page that shares a sample's name. Recovery therefore
- * synthesises one space per distinct slug named by the pages and leaves the files untouched.
+ * the index alone is lost (deleted, truncated, half-synced) the content is still intact.
+ * Recovery synthesises one space per distinct slug named by the pages and leaves the files untouched.
  *
- * Returns the reconstructed database, or null when there are no pages to recover from (a
- * genuinely empty directory belongs to the normal first-run seeding path).
+ * Returns the reconstructed database, or null when there are no pages to recover from; a fresh
+ * installation starts with an empty user store and serves the built-in space separately.
  */
 export function recoverStore(dataDir: string): Database | null {
   const dir = pagesDir(dataDir);

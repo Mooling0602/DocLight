@@ -48,7 +48,7 @@
           #   dist/store.js, dist/sort.js, public/, template/
           # The whitelist names the compiled files individually instead of `dist/` so the
           # compiled tests (which `require('jsdom')`, a devDependency pruned from the
-          # output) stay out. `template/` is the first-run sample site (spaces.json + pages/*.md).
+          # output) stay out. `template/` is the built-in read-only space (spaces.json + pages/*.md).
           #
           # Layout matters: server.js resolves its root as `__dirname/..`, and in the
           # packed tree `public/` and `template/` sit next to `dist/`, so

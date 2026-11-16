@@ -38,4 +38,4 @@ npm start
 // → http://localhost:4173
 ```
 
-准备好了？去看看[《可视化编辑指南》](#/guide)吧。
+准备好了？去看看[《可视化编辑指南》](/doclight-default/doclight-default-guide)吧。

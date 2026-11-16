@@ -18,6 +18,7 @@ import * as YAML from 'yaml';
 
 const root = path.resolve(__dirname, '../..');
 const serverEntry = path.join(root, 'dist', 'server.js');
+const builtInSpace = 'doclight-default';
 
 interface StartedServer {
   port: number;
@@ -161,16 +162,14 @@ async function main(): Promise<void> {
   assert.ok(fs.existsSync(path.join(dataDir, 'pages.json.bak')), '旧数据应保留为 .bak 备份');
 
   /* ---- A lost spaces.json must not cost the user their pages ---- */
-  // The spaces index is derived data, so seeding the sample over a directory that still holds
-  // pages would replace every page sharing a sample name (welcome/guide/changelog). The store
-  // is repaired from the page files instead; this is asserted end-to-end through a real boot.
+  // The spaces index is derived data. The store is repaired from the existing page files;
+  // this is asserted end-to-end through a real boot.
   //
   // The backup is removed too, so the situation is exactly "index gone, pages present" with no
   // legacy file left to fall through to.
   fs.rmSync(path.join(dataDir, 'spaces.json'), { force: true });
   fs.rmSync(path.join(dataDir, 'pages.json.bak'), { force: true });
-  // A page named after a shipped sample is planted first: without recovery the seeding path
-  // would replace it with the sample, which a plain "the legacy page still loads" check misses.
+  // A page named after a built-in source page must still be recovered as user data.
   fs.writeFileSync(
     path.join(dataDir, 'pages', 'welcome.md'),
     '---\ntitle: 用户自己的欢迎页\nspace: default\n---\n\n这是我的内容，不是示例。\n',
@@ -279,9 +278,8 @@ async function main(): Promise<void> {
     fs.rmSync(blankIdxDir, { recursive: true, force: true });
   }
 
-  /* ---- A site the user emptied on purpose is left alone, not re-seeded ---- */
-  // The inverse of the case above: an empty index with no pages is a legitimate state, so seeding
-  // the sample over it would resurrect content the user deleted.
+  /* ---- A site the user emptied on purpose remains empty ---- */
+  // An empty index with no pages is a legitimate state and must not resurrect deleted content.
   const emptiedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-migration-emptied-'));
   fs.mkdirSync(path.join(emptiedDir, 'pages'), { recursive: true });
   fs.writeFileSync(path.join(emptiedDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
@@ -318,7 +316,7 @@ async function main(): Promise<void> {
     const idx = JSON.parse(fs.readFileSync(path.join(emptyIdxDir, 'spaces.json'), 'utf8'));
     assert.deepEqual(idx.spaces.map((s: any) => s.slug), ['default'], '索引应写入迁移出的空间');
     const tree = await (await fetch(`http://127.0.0.1:${emptyIdxBoot.port}/api/tree`)).json();
-    assert.equal(tree.pages.length, 2, '站点不应显示为空');
+    assert.equal(tree.pages.filter((p: any) => p.space !== builtInSpace).length, 2, '站点不应显示为空');
   } finally {
     emptyIdxBoot.stop();
     fs.rmSync(emptyIdxDir, { recursive: true, force: true });
@@ -487,7 +485,7 @@ async function main(): Promise<void> {
     // Empty the index without restarting — the running server must notice.
     fs.writeFileSync(path.join(liveIdxDir, 'spaces.json'), '{"version":4,"spaces":[]}', 'utf8');
     const tree = await (await fetch(`http://127.0.0.1:${liveIdxBoot.port}/api/tree`)).json();
-    assert.deepEqual(tree.spaces.map((s: any) => s.slug), ['myspace'], '运行期空索引应按页面重建');
+    assert.deepEqual(tree.spaces.filter((s: any) => s.slug !== builtInSpace).map((s: any) => s.slug), ['myspace'], '运行期空索引应按页面重建');
     assert.equal(
       tree.pages.find((p: any) => p.slug === 'mine')?.space,
       'myspace',
