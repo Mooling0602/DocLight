@@ -772,6 +772,25 @@ svg.sf-badge { color: var(--text-3); }
 
 /* ---------- Tree sidebar / breadcrumb / space cards ---------- */
 .tree-row { display: flex; align-items: stretch; }
+/* Sidebar manual ordering: the grip on the left is the only drag surface, so pressing the row
+   itself stays a plain link tap and never raises the browser's own long-press menu. */
+.tree-grip {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--text-3);
+  cursor: grab;
+  opacity: 0;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  transition: opacity .14s ease, color .14s ease, background-color .14s ease;
+}
+.tree-row:hover .tree-grip, .tree-row:focus-within .tree-grip { opacity: 1; }
+.tree-grip:hover { color: var(--text); background: var(--bg-hover); }
+.tree-grip:active { cursor: grabbing; }
+/* No hover on touch screens, so the handle has to be visible up front. */
+@media (hover: none) { .tree-grip { opacity: 1; } }
 /* Sidebar manual ordering: too narrow for a floating card, so the drop target is a Yuque-style
    insertion line — `>----------` — and a small ghost chip follows the pointer for context. */
 #page-list { position: relative; }

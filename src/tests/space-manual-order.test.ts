@@ -144,6 +144,7 @@ async function main(): Promise<void> {
     assert.equal(spaces[0].sort, 'manual');
     assert.deepEqual(titles(), ['乙', '丙', '甲'], '保存后卡片应保持新顺序');
     assert.equal(document.querySelector<HTMLSelectElement>('#sp-sort')!.value, 'manual', '排序下拉框应显示手动排序');
+    assert.match(document.querySelector('#toasts')?.textContent || '', /排序已更新/, '顺序真正变化后应提示已更新');
 
     // A second drag keeps manual mode: only the order is sent.
     layoutCards(document);
@@ -155,6 +156,24 @@ async function main(): Promise<void> {
     assert.deepEqual(puts[puts.length - 1].body, { order: ['gamma', 'beta', 'alpha'] }, '手动模式下再次拖动只提交 order');
   }
 
+  /* ---- Dropping a card back into its own slot writes nothing. ---- */
+  {
+    const { window, document, spaces, puts } = await boot('http://localhost:4173/default');
+    await wait(120);
+    const before = spaces[0].updatedAt;
+    layoutCards(document);
+    const card = document.querySelectorAll<HTMLElement>('#article .card')[0];
+    pointer(window, 'pointerdown', 30, 20, card.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 40, 30, window); // past the threshold, still in the first slot
+    pointer(window, 'pointerup', 40, 30, window);
+    await wait(160);
+    assert.equal(puts.length, 0, '顺序未变时不应提交任何请求');
+    assert.equal(spaces[0].sort, undefined, '顺序未变时不应切换到手动排序');
+    assert.equal(spaces[0].updatedAt, before, '顺序未变时不应改动 updatedAt');
+    assert.match(document.querySelector('#toasts')?.textContent || '', /排序无变化/, '顺序未变时应提示排序无变化');
+    assert.deepEqual([...document.querySelectorAll('#article .card .t')].map(node => node.textContent), ['甲', '乙', '丙'], '卡片保持原顺序');
+  }
+
   /* ---- Sidebar drag: siblings reorder, and the dragged page keeps its subtree. ---- */
   {
     const { window, document, puts } = await boot('http://localhost:4173/default', false, [
@@ -164,11 +183,12 @@ async function main(): Promise<void> {
     const rows = () => [...document.querySelectorAll('#page-list .tree-row')].map(node => node as HTMLElement);
     const titles = () => rows().map(row => row.querySelector('.page-item .t')?.textContent);
     assert.deepEqual(titles(), ['甲', '乙', '丙', '丙·子'], '前置：侧栏按树顺序显示');
+    assert.equal(document.querySelectorAll('#page-list .tree-grip').length, 4, '可编辑空间的每个侧栏行都应有拖动手柄');
     rows().forEach((row, index) => {
       const rect = { left: 0, top: index * 40, right: 260, bottom: index * 40 + 36, width: 260, height: 36, x: 0, y: index * 40 };
       row.getBoundingClientRect = () => ({ ...rect, toJSON: () => rect }) as DOMRect;
     });
-    pointer(window, 'pointerdown', 40, 12, rows()[0].querySelector('.page-item')!);
+    pointer(window, 'pointerdown', 40, 12, rows()[0].querySelector('.tree-grip')!);
     pointer(window, 'pointermove', 40, 200, window);
     const drop = document.querySelector('#page-list .tree-drop');
     assert.ok(drop, '侧栏拖动时应显示虚线插入指示');
@@ -184,7 +204,26 @@ async function main(): Promise<void> {
     assert.deepEqual(titles(), ['乙', '丙', '丙·子', '甲'], '保存后侧栏应重排');
   }
 
-  /* ---- Touch drag arms after a long press, so a swipe still scrolls the drawer. ---- */
+  /* ---- A sidebar drop back into its own slot is a no-op as well. ---- */
+  {
+    const { window, document, spaces, puts } = await boot('http://localhost:4173/default');
+    await wait(120);
+    const rows = () => [...document.querySelectorAll('#page-list .tree-row')].map(node => node as HTMLElement);
+    rows().forEach((row, index) => {
+      const rect = { left: 0, top: index * 40, right: 260, bottom: index * 40 + 36, width: 260, height: 36, x: 0, y: index * 40 };
+      row.getBoundingClientRect = () => ({ ...rect, toJSON: () => rect }) as DOMRect;
+    });
+    const before = spaces[0].updatedAt;
+    pointer(window, 'pointerdown', 30, 12, rows()[0].querySelector('.tree-grip')!);
+    pointer(window, 'pointermove', 30, 20, window); // still above the first sibling's midpoint
+    pointer(window, 'pointerup', 30, 20, window);
+    await wait(160);
+    assert.equal(puts.length, 0, '侧栏顺序未变时不应提交任何请求');
+    assert.equal(spaces[0].updatedAt, before, '侧栏顺序未变时不应改动 updatedAt');
+    assert.match(document.querySelector('#toasts')?.textContent || '', /排序无变化/, '侧栏顺序未变时应提示排序无变化');
+  }
+
+  /* ---- Touch: the grip drags at once, while a press on the row itself stays a link tap. ---- */
   {
     const { window, document, puts } = await boot('http://localhost:4173/default');
     await wait(120);
@@ -193,14 +232,28 @@ async function main(): Promise<void> {
       const rect = { left: 0, top: index * 40, right: 260, bottom: index * 40 + 36, width: 260, height: 36, x: 0, y: index * 40 };
       row.getBoundingClientRect = () => ({ ...rect, toJSON: () => rect }) as DOMRect;
     });
-    const press = new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 40, clientY: 52, button: 0 });
-    Object.defineProperty(press, 'pointerType', { value: 'touch' });
-    rows[1].querySelector('.page-item')!.dispatchEvent(press);
-    await wait(340);
+    const touchPress = (target: Element, x: number, y: number) => {
+      const press = new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+      Object.defineProperty(press, 'pointerType', { value: 'touch' });
+      target.dispatchEvent(press);
+    };
+
+    // Pressing the row body must not arm a drag: on a touch screen that gesture belongs to the
+    // browser's own link menu, which is the whole reason the handle exists.
+    touchPress(rows[1].querySelector('.page-item')!, 40, 52);
     pointer(window, 'pointermove', 40, 8, window);
+    assert.equal(document.querySelector('#page-list .tree-drop'), null, '按住行本体不应进入拖动');
+    pointer(window, 'pointerup', 40, 8, window);
+    await wait(80);
+    assert.equal(puts.length, 0, '按住行本体不应提交顺序');
+
+    // The handle needs no long press: the drag starts as soon as the pointer moves.
+    touchPress(rows[1].querySelector('.tree-grip')!, 40, 52);
+    pointer(window, 'pointermove', 40, 8, window);
+    assert.ok(document.querySelector('#page-list .tree-drop'), '触摸拖动手柄应立即显示插入线');
     pointer(window, 'pointerup', 40, 8, window);
     await wait(160);
-    assert.deepEqual(puts[puts.length - 1].body, { sort: 'manual', order: ['beta', 'alpha', 'gamma'] }, '长按后拖动应重排');
+    assert.deepEqual(puts[puts.length - 1].body, { sort: 'manual', order: ['beta', 'alpha', 'gamma'] }, '触摸拖动手柄应重排');
   }
 
   /* ---- Locked spaces render cards but no drag handles. ---- */
@@ -210,6 +263,7 @@ async function main(): Promise<void> {
     await wait(120);
     assert.ok(document.querySelector('#article .card'), '锁定空间仍应显示卡片');
     assert.equal(document.querySelectorAll('#article .card-grip').length, 0, '锁定空间不应提供拖动手柄');
+    assert.equal(document.querySelectorAll('#page-list .tree-grip').length, 0, '锁定空间的侧栏行不应提供拖动手柄');
     const row = document.querySelector('#page-list .tree-row .page-item')!;
     pointer(window, 'pointerdown', 40, 12, row);
     pointer(window, 'pointermove', 40, 200, window);
@@ -236,6 +290,10 @@ async function main(): Promise<void> {
     assert.match(rule('.tree-drop::before'), /width:\s*18px/, '插入线左端应有圆形拖动标记');
     assert.match(rule('.tree-drop::before'), /border:\s*2px solid var\(--accent\)/, '圆形标记应有描边');
     assert.match(rule('.tree-row.is-drop-target'), /background:\s*var\(--bg-hover\)/, '目标行应高亮');
+    assert.match(rule('.tree-grip'), /position:\s*absolute/, '侧栏手柄应固定在行左侧');
+    assert.match(rule('.tree-grip'), /touch-action:\s*none/, '侧栏手柄应吞掉触摸滚动，避免与抽屉滚动打架');
+    assert.match(rule('.tree-row:hover .tree-grip, .tree-row:focus-within .tree-grip'), /opacity:\s*1/, '桌面端悬停时显示手柄');
+    assert.ok(css.includes('@media (hover: none) { .tree-grip { opacity: 1; } }'), '触摸屏没有 hover，手柄应常显');
     assert.match(rule('.tree-drag-ghost'), /position:\s*fixed/, '拖动时应跟随指针显示幽灵标签');
   }
 

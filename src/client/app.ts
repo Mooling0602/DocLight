@@ -644,6 +644,26 @@ function revealPath(pageSlug) {
 /* ============================================================
    Sidebar: space sections + page tree
    ============================================================ */
+const TREE_GRIP_SVG = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true"><g fill="currentColor">' +
+  '<circle cx="2.6" cy="3.2" r="1.35"/><circle cx="7.4" cy="3.2" r="1.35"/>' +
+  '<circle cx="2.6" cy="8" r="1.35"/><circle cx="7.4" cy="8" r="1.35"/>' +
+  '<circle cx="2.6" cy="12.8" r="1.35"/><circle cx="7.4" cy="12.8" r="1.35"/></g></svg>';
+
+/**
+ * Drag handle for a sidebar page row. The grip is the only drag surface, so pressing the row
+ * itself keeps behaving like a plain link — on touch, a long press there raises the browser's
+ * own link menu, which is exactly what the handle avoids.
+ */
+function sidebarGrip(depth: number): HTMLElement {
+  const grip = document.createElement('span');
+  grip.className = 'tree-grip';
+  grip.title = '拖动调整顺序';
+  grip.setAttribute('aria-hidden', 'true');
+  grip.style.left = (depth * 16 + 3) + 'px';
+  grip.innerHTML = TREE_GRIP_SVG;
+  return grip;
+}
+
 function renderSidebar(filter = '') {
   const q = filter.trim().toLowerCase();
   el.list.innerHTML = '';
@@ -750,13 +770,15 @@ function renderSidebar(filter = '') {
             renderSidebar(el.search.value);
           });
 
+          const reorderable = !pageContentLocked(space) || devSourceEditable(space);
           const a = document.createElement('a');
           a.className = 'page-item' + (S.page?.slug === p.slug ? ' active' : '');
           a.href = canonicalPath(p.slug);
           a.dataset.nav = '';
-          a.style.paddingLeft = (10 + depth * 16) + 'px';
+          a.style.paddingLeft = (10 + depth * 16 + (reorderable ? 18 : 0)) + 'px';
           a.draggable = false;
           a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${space.builtIn ? '随应用更新' : relTime(p.updatedAt)}${kids.length ? ' · ' + kids.length + ' 子页' : ''}</span>`;
+          if (reorderable) a.append(sidebarGrip(depth));
 
           const acts = document.createElement('span');
           acts.className = 'row-actions';
@@ -2135,7 +2157,9 @@ function setupCardDrag(space) {
         else if (child !== card && child.classList && child.classList.contains('card')) order.push(child.dataset.slug);
       }
       cleanup(true);
-      if (ev.type !== 'pointercancel' && order.length) saveSpaceOrder(space, order);
+      if (ev.type !== 'pointercancel' && order.length) {
+        saveSpaceOrder(space, order, spacePages(space.slug, null).map(p => p.slug));
+      }
     };
 
     window.addEventListener('pointermove', onMove, { passive: false });
@@ -2144,7 +2168,20 @@ function setupCardDrag(space) {
   }
 }
 
-async function saveSpaceOrder(space, order) {
+/** True when two orders list the same slugs in the same sequence. */
+function sameOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((slug, i) => slug === b[i]);
+}
+
+/**
+ * Persist a manual order.
+ *
+ * A drop that lands the pages where they already were is a no-op for the reader, yet writing it
+ * would still move the space's `updatedAt` and re-sort every list that keys off it — so it is
+ * skipped and only a hint is shown.
+ */
+async function saveSpaceOrder(space, order, previous?: string[]) {
+  if (previous && sameOrder(previous, order)) { toast('排序无变化'); return; }
   const changed = { order } as { sort?: SortKey; order: string[] };
   if (space.sort !== 'manual') changed.sort = 'manual';
   try {
@@ -2169,7 +2206,6 @@ async function saveSpaceOrder(space, order) {
    Manual ordering from the sidebar
    ============================================================ */
 const SIDEBAR_DRAG_THRESHOLD = 4;
-const SIDEBAR_LONG_PRESS_MS = 300;
 
 /** Full DFS order of a space with one sibling group reordered, so the API gets a complete list. */
 function buildSpaceOrder(spaceSlug, parentSlug, siblingSlugs) {
@@ -2187,11 +2223,13 @@ function buildSpaceOrder(spaceSlug, parentSlug, siblingSlugs) {
 /**
  * Drag reordering in the sidebar.
  *
- * The sidebar is too narrow for a floating card, so the preview is a Yuque-style insertion line
- * (`>----------`) between rows; a small ghost chip follows the pointer for context. Only siblings
- * (same parent) are considered, so a drop never changes the tree structure — moving a page to a
- * different parent stays in the row menu. Touch and pen require a short long-press first, because
- * dragging a row immediately would fight the drawer's scrolling.
+ * The sidebar is too narrow for a floating card, so the preview is an overlay insertion line
+ * (a two-pixel accent rule with a circular knob) plus a highlighted target row; a small ghost chip
+ * follows the pointer for context. Only siblings (same parent) are considered, so a drop never
+ * changes the tree structure — moving a page to a different parent stays in the row menu.
+ *
+ * A drag only starts from the row's grip handle. Pressing the row itself stays a normal link tap,
+ * which keeps the browser's own long-press link menu out of the gesture on touch devices.
  */
 function setupSidebarDrag() {
   let swallowClick = false;
@@ -2205,23 +2243,25 @@ function setupSidebarDrag() {
 
   el.list.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if ((e.target as HTMLElement).closest?.('.row-actions, .caret')) return;
-    const anchor = (e.target as HTMLElement).closest?.('.page-item');
-    const row = anchor?.closest?.('.tree-row') as HTMLElement | null;
+    const grip = (e.target as HTMLElement).closest?.('.tree-grip');
+    if (!grip) return;
+    const row = grip.closest('.tree-row') as HTMLElement | null;
     if (!row || !row.dataset.slug) return;
     const space = spaceBySlug(row.dataset.space);
     if (!space || (pageContentLocked(space) && !devSourceEditable(space))) return;
     startDrag(e, row, space);
   });
 
+  // The grip sits inside the row link, so keep the link callout from hijacking a slow press.
+  el.list.addEventListener('contextmenu', (e) => {
+    if ((e.target as HTMLElement).closest?.('.tree-grip')) e.preventDefault();
+  });
+
   function startDrag(e, row, space) {
     const page = pageBySlug(row.dataset.slug);
     if (!page) return;
-    const touch = !!e.pointerType && e.pointerType !== 'mouse';
     const startX = e.clientX, startY = e.clientY;
     let active = false;
-    let armed = !touch;
-    let timer = 0;
     let ghost = null;
     let marker = null;
     let targetRow = null;
@@ -2230,8 +2270,8 @@ function setupSidebarDrag() {
     let scrollRaf = 0;
 
     const touchBlocker = (ev) => { if (active) ev.preventDefault(); };
-    // A long press on a link can raise the browser's context menu mid-drag; suppress it while the
-    // gesture owns the pointer.
+    // A slow press on the handle can still raise the browser's callout mid-drag; suppress it while
+    // the gesture owns the pointer.
     const blockMenu = (ev) => { if (active) ev.preventDefault(); };
 
     const cleanup = () => {
@@ -2240,7 +2280,6 @@ function setupSidebarDrag() {
       window.removeEventListener('pointercancel', onUp);
       document.removeEventListener('touchmove', touchBlocker);
       document.removeEventListener('contextmenu', blockMenu, true);
-      if (timer) { clearTimeout(timer); timer = 0; }
       if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0; }
       if (ghost) { ghost.remove(); ghost = null; }
       if (marker) { marker.remove(); marker = null; }
@@ -2330,17 +2369,8 @@ function setupSidebarDrag() {
 
     const onMove = (ev) => {
       if (!active) {
-        if (touch && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8) {
-          // The finger is scrolling, not long-pressing: let the drawer scroll.
-          if (timer) { clearTimeout(timer); timer = 0; }
-          cleanup();
-          return;
-        }
-        if (!touch) {
-          if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < SIDEBAR_DRAG_THRESHOLD) return;
-          activate();
-        }
-        if (!active) return;
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < SIDEBAR_DRAG_THRESHOLD) return;
+        activate();
       }
       ev.preventDefault();
       lastX = ev.clientX;
@@ -2360,15 +2390,15 @@ function setupSidebarDrag() {
       if (at >= 0) index = dropBefore ? at : at + 1;
       siblings.splice(index, 0, page.slug);
       const order = buildSpaceOrder(space.slug, parent, siblings);
+      const current = buildSpaceOrder(space.slug, null, spacePages(space.slug, null).map(p => p.slug));
       cleanup();
-      if (ev.type !== 'pointercancel' && order.length > 1) saveSpaceOrder(space, order);
+      if (ev.type !== 'pointercancel' && order.length > 1) saveSpaceOrder(space, order, current);
     };
 
-    if (touch) {
-      timer = window.setTimeout(() => { timer = 0; activate(); }, SIDEBAR_LONG_PRESS_MS);
-      document.addEventListener('touchmove', touchBlocker, { passive: false });
-      document.addEventListener('contextmenu', blockMenu, true);
-    }
+    // The grip sets `touch-action: none`, so a touch drag never scrolls the drawer; the blockers
+    // stay as a second line of defence for browsers that still emit a native gesture.
+    document.addEventListener('touchmove', touchBlocker, { passive: false });
+    document.addEventListener('contextmenu', blockMenu, true);
     window.addEventListener('pointermove', onMove, { passive: false });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
