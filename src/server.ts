@@ -48,6 +48,7 @@ import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
 import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug, editTemplatePage, editTemplateSpace, createTemplatePage, renameTemplatePage, deleteTemplateSubtree, deleteTemplateSpace, moveTemplatePageToSpace, moveDataPageToTemplate } from './store.js';
+import { removeFromOrder, renameInOrder } from './sort.js';
 import { recoverTemplateTransaction } from './template-transaction.js';
 import type { AppConfig } from './config.js';
 import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs } from './store.js';
@@ -586,6 +587,28 @@ function ensureAuthRecord(): AuthRecord {
 function hmacStored(storedHex: string, nonce: string): string {
   return crypto.createHmac('sha256', Buffer.from(storedHex, 'hex')).update(nonce).digest('hex');
 }
+/**
+ * Constant-time equality against a stored hex digest.
+ *
+ * The comparison always runs, even when the submitted value is not shaped like a SHA-256 digest,
+ * so malformed proofs also go through a fixed-length comparison. The shape check only decides
+ * the result, never whether the comparison happens.
+ */
+function digestMatches(expectedHex: string, submitted: string): boolean {
+  const shaped = /^[a-f0-9]{64}$/.test(submitted);
+  const equal = crypto.timingSafeEqual(Buffer.from(shaped ? submitted : expectedHex, 'hex'), Buffer.from(expectedHex, 'hex'));
+  return equal && shaped;
+}
+/**
+ * Constant-time equality of two account names.
+ *
+ * Both sides are hashed first: `timingSafeEqual` requires equal lengths, and comparing the names
+ * directly would leak the stored name's length and prefix through the thrown error and the timing.
+ */
+function sameName(expected: string, submitted: string): boolean {
+  const digest = (text: string) => crypto.createHash('sha256').update(text, 'utf8').digest();
+  return crypto.timingSafeEqual(digest(expected), digest(submitted));
+}
 function ipOf(req: IncomingMessage): string { return req.socket.remoteAddress || 'unknown'; }
 function rateLimited(req: IncomingMessage): boolean {
   const f = failLog.get(ipOf(req));
@@ -631,7 +654,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     return json(res, 200, {
       mode: a.user ? 'ready' : 'setup',
       authed: !!sess,
-      user: sess ? sess.user : (a.user || null), // prefill the login form (the challenge endpoint exposes this name anyway)
+      user: sess ? sess.user : null, // never expose the account name to anonymous callers
       salt: a.salt, iters: a.iters,
     });
   }
@@ -641,7 +664,9 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     purgeExpired();
     const nonce = crypto.randomBytes(16).toString('hex');
     nonces.set(nonce, Date.now() + 60e3);
-    return json(res, 200, { nonce, salt: a.salt, iters: a.iters, user: a.user });
+    // The challenge is handed out before authentication, so it must carry only
+    // what the client needs to derive the proof, never the account name.
+    return json(res, 200, { nonce, salt: a.salt, iters: a.iters });
   }
 
   if (req.method === 'POST' && action === 'setup') {
@@ -666,11 +691,13 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
     nonces.delete(nonce); // one-shot to block replay
     if (!a.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
-    const expected = hmacStored(a.stored, nonce);
+    // Check both the account name and proof on every attempt without short-circuiting either
+    // comparison; wrong names and wrong passwords receive the same response.
     const proof = String(body.proof || '');
-    const ok = /^[a-f0-9]{64}$/.test(proof) &&
-      crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
-    if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
+    const name = typeof body.user === 'string' ? body.user.trim() : '';
+    const proofOk = digestMatches(hmacStored(a.stored, nonce), proof);
+    const nameOk = sameName(a.user, name);
+    if (!(proofOk && nameOk)) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
     failLog.delete(ipOf(req));
     return issueSession(res, a.user, basePath);
   }
@@ -751,9 +778,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (!auth.user) return json(res, 400, { error: '请先完成站长账号初始化，再解锁空间' });
         if (!auth.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
         const proof = String(body.proof || '');
-        const expected = hmacStored(auth.stored, nonce);
-        const ok = /^[a-f0-9]{64}$/.test(proof) &&
-          crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
+        // Same verifier as the login route, but the name is deliberately not required here: an
+        // unlock is authorized by the session plus a fresh password proof.
+        const ok = digestMatches(hmacStored(auth.stored, nonce), proof);
         if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
         failLog.delete(ipOf(req));
         delete space.locked;
@@ -1044,16 +1071,37 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           db.pages[idx].slug = ns;
           const sp = db.spaces.find(s => s.home === slug);
           if (sp) sp.home = ns;
+          // The manual order stores slugs, so a rename has to follow it. Leaving the old slug behind
+          // would drop the page out of the position the drag-and-drop editor gave it — it would
+          // sink to the end of the space — and keep a ghost entry that a later page could inherit.
+          const space = db.spaces.find(s => s.slug === db.pages[idx].space);
+          if (space) {
+            const ordered = renameInOrder(space.order, slug, ns);
+            if (ordered !== space.order) space.order = ordered;
+          }
         }
       }
       if (body.space !== undefined) {
         const ns = body.space || null;
         if (typeof ns !== 'string') return json(res, 400, { error: 'space 参数非法' });
         if (!db.spaces.some(s => s.slug === ns)) return json(res, 404, { error: '目标空间不存在' });
+        // A request may rename and move the same page; read the live slug so the order and home
+        // cleanups below match the name the page actually has by now.
+        const live = db.pages[idx].slug;
         const old = db.pages[idx].space;
         db.pages[idx].space = ns;
         const oldSp = db.spaces.find(s => s.slug === old);
-        if (oldSp && oldSp.home === slug) oldSp.home = null;
+        if (oldSp && old !== ns) {
+          if (oldSp.home === live) oldSp.home = null;
+          // Moving the page out of its space leaves its manual position behind; a stale entry would
+          // be rejected when the arrangement is re-submitted and could be inherited by a page later
+          // minted under the same slug. The target space appends it as a new, unarranged page.
+          const ordered = removeFromOrder(oldSp.order, [live]);
+          if (ordered !== oldSp.order) {
+            if (ordered) oldSp.order = ordered;
+            else delete oldSp.order;
+          }
+        }
       }
       if (body.parent !== undefined) {
         const parent = body.parent || null;
@@ -1095,7 +1143,17 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
       // Any space whose home was among the removed pages (the page itself or a descendant)
       // would otherwise keep a pointer to a slug that no longer resolves.
-      for (const sp of db.spaces) if (sp.home && doomed.includes(sp.home)) sp.home = null;
+      for (const sp of db.spaces) {
+        if (sp.home && doomed.includes(sp.home)) sp.home = null;
+        // Deleted pages also leave the manual order, for the same reason the renamed ones do: an
+        // entry naming a page that no longer exists is rejected when the arrangement is
+        // re-submitted, and a page later created under that slug would inherit the dead position.
+        const ordered = removeFromOrder(sp.order, doomed);
+        if (ordered !== sp.order) {
+          if (ordered) sp.order = ordered;
+          else delete sp.order;
+        }
+      }
       writeDb(db, doomed);
       return json(res, 200, { ok: true, removed: doomed });
     }

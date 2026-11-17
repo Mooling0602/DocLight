@@ -94,3 +94,43 @@ export function applyManualOrder<T extends { slug: string }>(pages: readonly T[]
   const unlisted = Number.MAX_SAFE_INTEGER;
   return [...pages].sort((a, b) => (rank.get(a.slug) ?? unlisted) - (rank.get(b.slug) ?? unlisted));
 }
+
+/**
+ * Point a stored manual order at a page's new slug, keeping the position it was given.
+ *
+ * Renaming a page used to leave the old slug in the list. The renamed page then matched nothing,
+ * so `applyManualOrder` ranked it with the pages the user never arranged and dropped it to the
+ * end of the space — the position the drag-and-drop editor had just established was lost, and the
+ * stale entry stayed behind as a ghost that a later page could inherit.
+ *
+ * Replacing in place (rather than appending the new slug at the end) is what preserves the
+ * position. A list that does not mention `from` is returned untouched: the page was never part of
+ * the manual arrangement, so the rename must not invent a place for it.
+ *
+ * A stale `to` entry left by an earlier rename would produce a duplicate, so the result keeps only
+ * the first occurrence — the same rule `readStore` applies to a hand-edited index.
+ */
+export function renameInOrder(order: string[] | undefined, from: string, to: string): string[] | undefined {
+  if (!order || from === to || !order.includes(from)) return order;
+  return order
+    .map((slug) => (slug === from ? to : slug))
+    .filter((slug, index, all) => all.indexOf(slug) === index);
+}
+
+/**
+ * Drop slugs from a stored manual order because they stopped being pages of the space (deleted, or
+ * moved to another space).
+ *
+ * A leftover entry is not merely untidy: it names a page the space does not contain, which the space
+ * API rejects if the arrangement is re-submitted, and a page later minted under that name inherits
+ * the dead position instead of being appended. Returns the same array when nothing matched, and
+ * `undefined` when nothing is left so the caller can drop the key entirely — the same normalisation
+ * `readStore` applies to an emptied list.
+ */
+export function removeFromOrder(order: string[] | undefined, slugs: Iterable<string>): string[] | undefined {
+  if (!order || order.length === 0) return order;
+  const gone = new Set(slugs);
+  const kept = order.filter((slug) => !gone.has(slug));
+  if (kept.length === order.length) return order;
+  return kept.length ? kept : undefined;
+}

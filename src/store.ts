@@ -17,7 +17,7 @@ import { isDeepStrictEqual } from 'node:util';
 import * as YAML from 'yaml';
 import { runTemplateTransaction } from './template-transaction.js';
 import type { TemplateTransaction } from './template-transaction.js';
-import { DEFAULT_SORT, applyManualOrder, isSortKey } from './sort.js';
+import { DEFAULT_SORT, applyManualOrder, isSortKey, removeFromOrder, renameInOrder } from './sort.js';
 import type { SortKey } from './sort.js';
 
 export { DEFAULT_SORT, SORT_KEYS, isSortKey } from './sort.js';
@@ -413,9 +413,17 @@ export function renameTemplatePage(dirs: TemplateDirs, fromSlug: string, toSlug:
       tx.write('template', `pages/${page.slug}.md`, patchSourceFrontMatter(page.raw, { parent: toSlug }));
     }
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home === fromSlug) {
-      space.home = toSlug;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // The manual order names source file slugs, so the rename has to follow it: leaving the old
+      // name behind drops the renamed page out of its stored position (and `readDb` would filter
+      // the stale entry away entirely). Both edits share one index write, and an index that
+      // mentions neither the home nor the order is left untouched rather than re-serialised.
+      const ordered = renameInOrder(space.order, fromSlug, toSlug);
+      const orderChanged = ordered !== space.order;
+      const homeChanged = space.home === fromSlug;
+      if (orderChanged) space.order = ordered;
+      if (homeChanged) space.home = toSlug;
+      if (orderChanged || homeChanged) writeTemplateIndex(tx, index);
     }
     tx.write('template', `pages/${toSlug}.md`, source.raw);
     tx.remove('template', `pages/${fromSlug}.md`);
@@ -436,9 +444,20 @@ export function deleteTemplateSubtree(dirs: TemplateDirs, slug: string): string[
     }
     for (const victim of doomed) tx.remove('template', `pages/${victim}.md`);
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home && doomed.has(space.home)) {
-      space.home = null;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // The order lists source file slugs, so deleted ones have to go with the files. A leftover
+      // entry would name a page the space no longer has — the ordinary space API would reject the
+      // arrangement if it were re-submitted, and a page later minted under that name would inherit
+      // the dead position instead of being appended.
+      const ordered = removeFromOrder(space.order, doomed);
+      const orderChanged = ordered !== space.order;
+      const homeDoomed = !!space.home && doomed.has(space.home);
+      if (orderChanged) {
+        if (ordered) space.order = ordered;
+        else delete space.order;
+      }
+      if (homeDoomed) space.home = null;
+      if (orderChanged || homeDoomed) writeTemplateIndex(tx, index);
     }
     return [...doomed];
   });
@@ -538,9 +557,17 @@ export function moveTemplatePageToSpace(dirs: TemplateDirs, sourceSlug: string, 
       emptied.add(slug);
     }
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home && doomed.has(space.home)) {
-      space.home = null;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // Moved-away pages leave the built-in space, so their entries leave its order too.
+      const ordered = removeFromOrder(space.order, emptied);
+      const orderChanged = ordered !== space.order;
+      const homeDoomed = !!space.home && doomed.has(space.home);
+      if (orderChanged) {
+        if (ordered) space.order = ordered;
+        else delete space.order;
+      }
+      if (homeDoomed) space.home = null;
+      if (orderChanged || homeDoomed) writeTemplateIndex(tx, index);
     }
     return [...emptied];
   });
@@ -582,6 +609,17 @@ export function moveDataPageToTemplate(dirs: TemplateDirs, dataSlug: string): st
       let changed = false;
       for (const space of dataIndex.spaces as Array<Record<string, unknown>>) {
         if (typeof space.home === 'string' && doomed.has(space.home)) { space.home = null; changed = true; }
+        // The moved pages are no longer part of the ordinary space, so their manual positions have
+        // to go with them — a stale entry would be rejected on the next re-submit and could later
+        // be inherited by an unrelated page minted under the same slug.
+        if (Array.isArray(space.order)) {
+          const kept = removeFromOrder(space.order as string[], doomed);
+          if (kept !== space.order) {
+            if (kept) space.order = kept;
+            else delete space.order;
+            changed = true;
+          }
+        }
       }
       if (changed) tx.write('data', 'spaces.json', JSON.stringify(dataIndex, null, 2) + '\n');
     }
