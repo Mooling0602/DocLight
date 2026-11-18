@@ -55,7 +55,7 @@ async function api(endpoint: string, method = 'GET', body?: unknown, auth = true
 async function login(): Promise<void> {
   const challenge = (await api('auth/challenge')).body;
   const proof = createHmac('sha256', Buffer.from('aa'.repeat(32), 'hex')).update(challenge.nonce).digest('hex');
-  assert.equal((await api('auth/login', 'POST', { nonce: challenge.nonce, proof })).status, 200);
+  assert.equal((await api('auth/login', 'POST', { user: 'tester', nonce: challenge.nonce, proof })).status, 200);
 }
 function snapshot(dir: string): Record<string, string> {
   const out: Record<string, string> = {};

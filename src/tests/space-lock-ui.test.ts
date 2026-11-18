@@ -214,21 +214,46 @@ async function main(): Promise<void> {
   try {
     window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
     await wait(100);
+    assert.ok($('#sp-settings').closest('.space-acts'), '未锁定时设置入口位于空间操作区域');
+    click('#sp-settings');
+    assert.match($('#modal-root h3').textContent || '', /空间设置/, '空间页面可以打开设置');
+    click('#modal-root [data-x=no]');
     await openSpaceMenu();
-    assert.match($('#menu-row [data-act=lock]').textContent || '', /锁定空间/, '侧栏菜单提供锁定入口');
-    click('#menu-row [data-act=lock]');
+    assert.equal(document.querySelector('#menu-row [data-act=lock]'), null, '侧栏菜单不再直接提供锁定入口');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /锁定空间/, '空间设置提供锁定入口');
+    ($<HTMLSelectElement>('#ss-sort')).value = 'title_asc';
+    click('#modal-root [data-x=slug]');
+    assert.match($('#toasts').textContent || '', /请先保存或放弃/, '未保存设置时不能直接编辑 slug');
+    assert.ok(document.querySelector('#ss-sort'), '未保存设置应保留');
+    click('#modal-root [data-x=lock]');
+    assert.match($('#toasts').textContent || '', /请先保存或放弃/, '未保存设置时不能直接锁定');
+    assert.equal(locked, false);
+    ($<HTMLSelectElement>('#ss-sort')).value = 'created_desc';
+    click('#modal-root [data-x=lock]');
     await wait();
     assert.equal($('#modal-root').hidden, false, '锁定应要求确认');
     submit();
     await wait(120);
     assert.equal(locked, true, '确认后应锁定空间');
     assert.ok(document.querySelector('.space-row .lock-badge'), '侧栏显示锁定状态');
+    assert.equal(document.querySelectorAll('#sp-settings').length, 1, '锁定空间只能有一个设置入口');
+    assert.equal($('#sp-settings').closest('[hidden]'), null, '设置入口应可见');
+    assert.ok($('#sp-settings').closest('.space-acts'), '锁定后设置入口仍位于空间操作区域');
+    assert.equal($('#sp-add').hidden, true, '锁定后新建入口隐藏');
+    assert.ok($('#sp-sort').closest('[hidden]'), '锁定后排序控件隐藏');
+    assert.ok($('#sp-recommend').closest('[hidden]'), '锁定后推荐控件隐藏');
+    click('#sp-settings');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间/, '锁定后空间页面仍能打开解锁设置');
+    assert.equal($<HTMLButtonElement>('#modal-root [data-x=slug]').disabled, true, '锁定时不能编辑空间 slug');
+    assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+    click('#modal-root [data-x=no]');
     assert.equal(document.querySelector('.space-row [title="在此空间新建页面"]'), null, '锁定后不能新建页面');
     assert.equal(document.querySelector('.tree-row [title="新建子页面"]'), null, '锁定后不能新建子页面');
     assert.equal(document.querySelector('.tree-row [title="更多操作"]'), null, '锁定后不能操作页面');
     await openSpaceMenu();
-    assert.match($('#menu-row [data-act=lock]').textContent || '', /解锁空间/, '菜单状态应更新为解锁');
-    assert.equal(document.querySelector('#menu-row [data-act=settings]'), null, '锁定空间不可修改设置');
+    assert.equal(document.querySelector('#menu-row [data-act=lock]'), null, '菜单不直接提供解锁入口');
+    assert.ok(document.querySelector('#menu-row [data-act=settings]'), '锁定空间仍可进入设置解锁');
     assert.equal(document.querySelector('#menu-row [data-act=delete]'), null, '锁定空间不可删除');
     click('.tree-row .page-item');
     await wait(100);
@@ -239,7 +264,14 @@ async function main(): Promise<void> {
     assert.equal($('#btn-more').hidden, true, '锁定页面不可通过页面菜单修改');
 
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     const pass = $<HTMLInputElement>('#modal-root input[type=password]');
     pass.value = 'wrong-password';
@@ -274,7 +306,14 @@ async function main(): Promise<void> {
     source.value = '# 未保存草稿';
     source.dispatchEvent(new window.Event('input', { bubbles: true }));
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     submit();
     await wait(120);
@@ -290,7 +329,14 @@ async function main(): Promise<void> {
     await wait();
     assert.equal(calls.filter(c => c.url.includes('/api/pages/readable') && c.method === 'PUT').length, 0, '锁定时不得保存');
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     $<HTMLInputElement>('#modal-root input[type=password]').value = password;
     submit();

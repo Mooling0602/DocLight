@@ -147,7 +147,7 @@ async function main(): Promise<void> {
     await start();
     assert.equal((await api('tree')).body.spaces.find((s: any) => s.slug === space).locked, true);
     const login = await proof();
-    assert.equal((await api('auth/login', 'POST', login)).status, 200);
+    assert.equal((await api('auth/login', 'POST', { user: 'tester', ...login })).status, 200);
     assert.equal((await api(`pages/${page}`, 'DELETE')).status, 423);
     const unlockProof = await proof();
     assert.equal((await api(`${spacePath}/lock`, 'POST', { locked: false, ...unlockProof })).status, 200);

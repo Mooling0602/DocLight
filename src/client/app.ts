@@ -49,11 +49,12 @@ interface AuthStateResponse {
   iters: number;
 }
 
+// The challenge carries no account name on purpose: the proof is computed from the password and
+// the nonce alone, so nothing in this exchange depends on who the visitor claims to be.
 interface AuthChallengeResponse {
   nonce: string;
   salt: string;
   iters: number;
-  user: string;
 }
 
 interface DeleteSpaceResponse {
@@ -88,7 +89,6 @@ interface AppState {
   pendingEdit: string | null;
   authed: boolean;
   authSetup: boolean;
-  accountName: string | null;
   user: string | null;
   salt: string;
   iters: number;
@@ -309,7 +309,6 @@ const S: AppState = {
   pendingEdit: null,
   authed: false,
   authSetup: false,
-  accountName: null,
   user: null,
   salt: '',
   iters: 0,
@@ -438,14 +437,12 @@ function openRowMenu(btn, kind, obj) {
   rowMenu.dataset.slug = obj.slug;
   rowMenu.innerHTML = kind === 'space'
     ? `
-      ${obj.builtIn ? '' : `<button class="menu-item" data-act="lock"><span>${obj.locked ? '解锁空间…' : '锁定空间…'}</span></button>`}
-      ${pageContentLocked(obj) ? '' : `<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
-      <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+      ${pageContentLocked(obj) ? '' : '<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>'}
       <button class="menu-item" data-act="settings"><span>空间设置…</span></button>
-      ${obj.builtIn && !devSourceEditable(obj) ? '' : '<button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>'}`}`
+      ${pageContentLocked(obj) || (obj.builtIn && !devSourceEditable(obj)) ? '' : '<button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>'}`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
-      <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+      <button class="menu-item" data-act="slug"><span>编辑路径…</span></button>
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
@@ -510,7 +507,6 @@ async function refreshAuthState() {
     S.authSetup = st.mode === 'setup';
     S.authed = !!st.authed;
     S.user = st.authed ? (st.user || null) : null;
-    S.accountName = st.user || null;
     S.salt = st.salt; S.iters = st.iters;
   } catch { /* 网络异常时保留旧状态 */ }
   renderAuthUI();
@@ -518,7 +514,7 @@ async function refreshAuthState() {
 
 function renderAuthUI() {
   const b = $('#btn-auth');
-  b.hidden = !!S.page;   // 文章页（含编辑态）不显示；空间总览与首页保留登录入口
+  b.hidden = !el.editWrap.hidden;   // Keep account actions out of the editor, including its unsaved draft.
   if (b.hidden) return;
   b.textContent = S.authed ? '退出' : (S.authSetup ? '初始化账号' : '登录');
   b.title = S.authed ? `${S.user} · 退出登录`
@@ -535,13 +531,45 @@ function renderAuthUI() {
   };
 }
 
+// The login dialog borrows the shared modal element and the caller's continuation, so a stale
+// instance must never act again once the user dismissed it. Every dialog registers its own
+// `cancel` here; opening a second one supersedes the first instead of stacking closures on the
+// same `.modal` node (a keydown listener added there outlived `innerHTML = ''` and fired once
+// more per reopening).
+let closeLoginDialog: (() => void) | null = null;
+
+/* ---------------- Remembered account name ---------------- */
+// A visitor who is not signed in cannot learn the account name from the server — the session
+// state only names whoever is logged in — so the login form remembers it locally instead. Only
+// the name is kept: the password, the derived key, nonces and proofs must never be written to
+// disk, and the browser's own autofill is free to supply everything else.
+const LOGIN_USER_KEY = 'doclight-login-user';
+
+/** Stored account name, or '' when nothing usable is available (also under privacy mode). */
+function readRememberedUser(): string {
+  try {
+    const saved = localStorage.getItem(LOGIN_USER_KEY);
+    if (typeof saved !== 'string') return '';
+    const name = saved.trim();
+    return name && name.length <= 40 ? name : '';
+  } catch { return ''; }   // disabled storage: leave the field to the browser's autofill
+}
+
+/** Remember a name that the server just accepted; failures never block the sign-in. */
+function rememberUser(name: string): void {
+  const saved = name.trim();
+  if (!saved) return;
+  try { localStorage.setItem(LOGIN_USER_KEY, saved.slice(0, 40)); } catch { /* ignore */ }
+}
+
 function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () => void } = {}) {
+  closeLoginDialog?.();
   const m = openModal(`
     <h3>${setup ? '初始化站长账号' : '登录 DocLight'}</h3>
     <p class="desc">${setup
       ? '首次使用，设置用户名与密码。密码经 PBKDF2 派生，明文不落盘、不上网。用户名仅限字母、数字、_ 或 -。'
       : '修改内容前需要登录（阅读始终公开）。'}</p>
-    <input id="lg-user" type="text" placeholder="${setup ? '请设置用户名' : '请输入用户名'}" maxlength="40" autocomplete="username" value="${setup ? '' : esc(S.accountName || S.user || '')}">
+    <input id="lg-user" type="text" placeholder="${setup ? '请设置用户名' : '请输入用户名'}" maxlength="40" autocomplete="username" value="${setup ? '' : esc(readRememberedUser())}">
     <input id="lg-pass" type="password" placeholder="密码" autocomplete="${setup ? 'new-password' : 'current-password'}">
     ${setup ? '<input id="lg-pass2" type="password" placeholder="确认密码" autocomplete="new-password">' : ''}
     <p class="desc" id="lg-err" style="color:var(--danger)" hidden></p>
@@ -550,40 +578,84 @@ function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () =
       <button class="btn btn-primary" data-x="ok">${setup ? '创建并登录' : '登录'}</button>
     </div>`);
   const $lg = s => $(s, m);
-  const err = t => { const e = $lg('#lg-err'); e.textContent = t; e.hidden = !t; };
+  // Capture the nodes once: after `closeModal()` empties `.modal` they are detached, which is
+  // exactly how a finishing request tells that its dialog is gone.
+  const userInput = $lg('#lg-user');
+  const passInput = $lg('#lg-pass');
+  const pass2Input = $lg('#lg-pass2');
+  const errBox = $lg('#lg-err');
   const okBtn = $lg('[data-x=ok]');
+  const idleLabel = setup ? '创建并登录' : '登录';
+  const err = t => { errBox.textContent = t; errBox.hidden = !t; };
+  let busy = false;   // one request at a time: Enter, click and the re-enabled button all funnel here
+  let cancelled = false;
+  // Cancelled, or replaced by another modal: either way there is nothing left to paint, and a
+  // caller's flow must not resume. `isConnected` is the exact test — every route that takes the
+  // dialog away (`closeModal`, another `openModal`) replaces `.modal`'s children.
+  const alive = () => !cancelled && userInput.isConnected;
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (closeLoginDialog === cancel) closeLoginDialog = null;
+    passInput.value = '';
+    if (pass2Input) pass2Input.value = '';
+    if (userInput.isConnected) closeModal();   // another modal may already own the slot
+  };
   const submit = async () => {
-    const user = $lg('#lg-user').value.trim();
-    const pass = $lg('#lg-pass').value;
-    if (setup && !/^[A-Za-z0-9_-]{1,40}$/.test(user)) { err('用户名仅限字母、数字、下划线、连字符（≤40 位）'); return; }
+    if (busy || cancelled) return;
+    const user = userInput.value.trim();
+    const pass = passInput.value;
+    // Both setup and login require an account name; validate its format before making a request.
+    if (!user) { err('请输入用户名'); return; }
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(user)) { err('用户名仅限字母、数字、下划线、连字符（≤40 位）'); return; }
     if (!/^[\x20-\x7E]+$/.test(pass)) { err('密码仅支持英文、数字与半角符号，不能包含中文或全角字符'); return; }
     if (pass.length < 6) { err('密码长度至少 6 位'); return; }
-    if (setup && pass !== $lg('#lg-pass2').value) { err('两次输入的密码不一致'); return; }
+    if (setup && pass !== pass2Input.value) { err('两次输入的密码不一致'); return; }
+    busy = true;
     okBtn.disabled = true; okBtn.textContent = '验证中…'; err('');
     try {
       if (setup) {
         const ks = await deriveKeyHex(pass, S.salt, S.iters);
+        if (!alive()) return;   // nothing was sent yet, so there is no session change to sync
         await api('auth/setup', { method: 'POST', body: JSON.stringify({ user, ks }) });
       } else {
         const ch = await api<AuthChallengeResponse>('auth/challenge');
         const k = await deriveKeyHex(pass, ch.salt, ch.iters);
         const proof = await hmacHex(k, ch.nonce);
-        await api('auth/login', { method: 'POST', body: JSON.stringify({ nonce: ch.nonce, proof }) });
+        if (!alive()) return;
+        // The server checks the submitted name and password proof before creating a session.
+        await api('auth/login', { method: 'POST', body: JSON.stringify({ user, nonce: ch.nonce, proof }) });
       }
+      // The credentials were already sent: a dialog cancelled mid-flight still has to resync the
+      // session, because the server may have accepted the login before the user dismissed it.
       await refreshAuthState();
+      if (!alive()) return;   // dismissed ⇢ sync the state, but never remember or resume
+      // Remember only a sign-in the user actually completed, and only the name the session
+      // confirms. A failed attempt or a cancel never writes, so the memory cannot go stale.
+      if (S.authed) rememberUser(S.user || user);
       closeModal();
+      if (closeLoginDialog === cancel) closeLoginDialog = null;
       toast(setup ? '账号已创建 ✓' : `欢迎回来，${S.user}`);
       then?.();
     } catch (e2) {
+      if (!alive()) return;
+      busy = false;
+      okBtn.disabled = false; okBtn.textContent = idleLabel;
       err(e2.message || '操作失败');
-      okBtn.disabled = false; okBtn.textContent = setup ? '创建并登录' : '登录';
     }
   };
-  $('[data-x=no]', m).onclick = () => closeModal();
+  // Enter is bound to the freshly created inputs rather than to `.modal`: those nodes die with
+  // the dialog, so a reopening cannot inherit an extra handler, and `preventDefault` keeps a
+  // second activation from reaching the same round trip.
+  const onEnter = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+  userInput.addEventListener('keydown', onEnter);
+  passInput.addEventListener('keydown', onEnter);
+  pass2Input?.addEventListener('keydown', onEnter);
+  $('[data-x=no]', m).onclick = cancel;
   okBtn.onclick = submit;
-  activeModalDone = () => closeModal();
-  m.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
-  $lg('#lg-user').focus();
+  closeLoginDialog = cancel;
+  activeModalDone = cancel;
+  userInput.focus();
 }
 
 /* ============================================================
@@ -607,8 +679,13 @@ function chainOf(pageSlug) {
   if (!page) return [];
   const space = spaceBySlug(page.space);
   const chain = [];
+  const seen = new Set<string>();
   let cur = page;
-  while (cur) { chain.unshift(cur); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  while (cur && !seen.has(cur.slug)) {
+    seen.add(cur.slug);
+    chain.unshift(cur);
+    cur = cur.parent ? pageBySlug(cur.parent) : null;
+  }
   return space ? [space, ...chain] : chain;
 }
 function canonicalPath(slug) {
@@ -637,8 +714,7 @@ function revealPath(pageSlug) {
   const page = pageBySlug(pageSlug);
   if (!page) return;
   collapsedSet.delete('s:' + page.space);
-  let cur = page;
-  while (cur) { collapsedSet.delete('p:' + cur.slug); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  for (const node of chainOf(pageSlug)) collapsedSet.delete('p:' + node.slug);
 }
 
 /* ============================================================
@@ -1001,7 +1077,7 @@ function renderArticle(page) {
        <span>${space?.builtIn ? '随应用更新' : `更新于 ${relTime(page.updatedAt)}`}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
-       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
+       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑页面路径">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑页面路径">#${esc(page.slug)}</a>`}
      </div>` + renderMarkdown(page.content) + recommendFooter(space, page);
 
   decorate(el.article);
@@ -1126,6 +1202,7 @@ function enterEdit(focus = true) {
   el.clusterEdit.hidden = false;
   renderEditorLockStatus();
   el.editWrap.hidden = false;
+  renderAuthUI();
   el.titleInput.value = S.page.title;
 
   // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
@@ -1454,7 +1531,7 @@ async function lockSpaceFlow(space: Space) {
   }
   const m = openModal(`
     <h3>解锁空间「${esc(space.title)}」</h3>
-    <p class="desc">请输入当前登录账号的密码。密码仅在本地用于验证，不会发送明文。</p>
+    <p class="desc">请输入当前登录账号的密码。密码会在浏览器中用于生成验证信息，密码明文不会发送。远程访问请使用 HTTPS。</p>
     <input type="password" autocomplete="current-password" placeholder="登录密码">
     <p class="desc" data-x="error" style="color:var(--danger)" hidden></p>
     <div class="modal-actions"><button class="btn btn-ghost" data-x="no">取消</button><button class="btn btn-primary" data-x="ok">解锁</button></div>`);
@@ -1596,12 +1673,17 @@ async function setSpaceSort(space, key) {
  */
 async function spaceSettingsFlow(space) {
   if (!space) return;
+  const locked = pageContentLocked(space);
   const m = openModal(`
     <h3>空间设置</h3>
     <p class="desc">${esc(space.title)}</p>
+    <div class="switch-row">
+      <span class="switch-copy"><span>空间路径</span><small>${esc(space.slug)}</small></span>
+      <button type="button" class="btn btn-ghost" data-x="slug"${locked ? ' disabled' : ''}>编辑路径…</button>
+    </div>
     <label class="sort-pick" for="ss-sort">
       <span>排序</span>
-      <select id="ss-sort" title="侧栏与总览的页面顺序">
+      <select id="ss-sort" title="侧栏与总览的页面顺序"${locked ? ' disabled' : ''}>
         ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
       </select>
     </label>
@@ -1610,12 +1692,16 @@ async function spaceSettingsFlow(space) {
         <span>自动按顺序推荐其他文章</span>
         <small>在文章底部显示上一篇 / 下一篇卡片</small>
       </span>
-      <input type="checkbox" id="ss-recommend"${space.recommend ? ' checked' : ''}>
+      <input type="checkbox" id="ss-recommend"${space.recommend ? ' checked' : ''}${locked ? ' disabled' : ''}>
       <span class="switch-ui" aria-hidden="true"></span>
     </label>
+    ${space.builtIn ? '' : `<div class="switch-row">
+      <span class="switch-copy"><span>空间锁定</span><small>锁定后内容仍可阅读，修改需先解锁</small></span>
+      <button type="button" class="btn btn-ghost" data-x="lock">${space.locked ? '解锁空间…' : '锁定空间…'}</button>
+    </div>`}
     <div class="modal-actions">
       <button class="btn btn-ghost" data-x="no">关闭</button>
-      <button class="btn btn-primary" data-x="ok">保存</button>
+      <button class="btn btn-primary" data-x="ok"${locked ? ' disabled' : ''}>保存</button>
     </div>`);
   const sel = $('#ss-sort', m) as HTMLSelectElement;
   const rec = $('#ss-recommend', m) as HTMLInputElement;
@@ -1636,23 +1722,41 @@ async function spaceSettingsFlow(space) {
   };
   $('[data-x=no]', m).onclick = () => finish(false);
   $('[data-x=ok]', m).onclick = () => finish(true);
+  const openSubflow = (flow: () => void) => {
+    if (sel.value !== (space.sort ?? DEFAULT_SORT) || rec.checked !== !!space.recommend) {
+      toast('请先保存或放弃空间设置的更改');
+      return;
+    }
+    finish(false);
+    flow();
+  };
+  const lockButton = m.querySelector('[data-x=lock]') as HTMLButtonElement | null;
+  if (lockButton) lockButton.onclick = () => openSubflow(() => lockSpaceFlow(space));
+  $('[data-x=slug]', m).onclick = () => openSubflow(() => slugSpaceFlow(space));
   activeModalDone = () => finish(false);
 }
 
 async function slugSpaceFlow(space) {
-  if (!space) return;
+  if (!space || pageContentLocked(space)) return;
+  if (!S.authed) {
+    showLoginDialog({ setup: S.authSetup, then: () => {
+      const current = spaceBySlug(space.slug);
+      if (current) slugSpaceFlow(current);
+    } });
+    return;
+  }
   const value = await promptModal({
-    title: '编辑空间 slug',
+    title: '编辑空间路径',
     label: devSourceEditable(space)
       ? '仅限小写字母、数字、下划线。修改后旧空间链接及 Markdown 中硬编码的旧链接将失效。'
-      : '仅限小写字母、数字、下划线。slug 是空间的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+      : '仅限小写字母、数字、下划线。修改空间路径后，旧链接将失效。',
     value: space.slug,
     placeholder: 'my_space',
     ok: '保存',
   });
   if (value === null || value === space.slug) return;
   const ns = normalizeSlugInput(value);
-  if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
+  if (!ns) { toast('空间路径只能含小写字母、数字、下划线'); return; }
   try {
     const old = space.slug;
     const updated = await api<Space>('spaces/' + encodeURIComponent(old), {
@@ -1666,7 +1770,7 @@ async function slugSpaceFlow(space) {
     if (i >= 0) S.spaces[i] = updated;
     const wasCurrent = S.space?.slug === old;
     if (wasCurrent) S.space = updated;
-    toast('slug 已更新 ✓');
+    toast('空间路径已更新 ✓');
     // Update the address bar without re-routing: pages keep their own slug, so only
     // the leading space segment changes.
     if (S.page?.space === newSlug) {
@@ -1758,22 +1862,29 @@ function normalizeSlugInput(value: string): string {
 }
 
 async function slugFlow(pg: PageMeta | null = S.page) {
-  if (!pg) return;
+  if (!pg || pageContentLocked(spaceBySlug(pg.space))) return;
+  if (!S.authed) {
+    showLoginDialog({ setup: S.authSetup, then: () => {
+      const current = pageBySlug(pg.slug);
+      if (current) slugFlow(current);
+    } });
+    return;
+  }
   const dev = devSourceEditable(spaceBySlug(pg.space));
   const prefix = 'doclight-default-';
   const initial = dev && pg.slug.startsWith(prefix) ? pg.slug.slice(prefix.length) : pg.slug;
   const value = await promptModal({
-    title: '编辑链接 slug',
+    title: '编辑页面路径',
     label: dev
       ? '仅限小写字母、数字、下划线，对应模板源文件名；修改后旧链接将失效。'
-      : '仅限小写字母、数字、下划线。slug 是页面的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+      : '仅限小写字母、数字、下划线。修改页面路径后，旧链接将失效。',
     value: initial,
     placeholder: 'my_page_1',
     ok: '保存',
   });
   if (value === null || value === initial) return;
   const ns = normalizeSlugInput(value);
-  if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
+  if (!ns) { toast('页面路径只能含小写字母、数字、下划线'); return; }
   try {
     const old = pg.slug;
     const updated = await api<Page>('pages/' + encodeURIComponent(old), {
@@ -1784,7 +1895,7 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     const i = S.pages.findIndex(p => p.slug === old);
     if (i >= 0) { S.pages[i].slug = newSlug; S.pages[i].updatedAt = updated.updatedAt; }
     await refreshTree();          // slug is the order's tie-break, so the rank can move
-    toast('slug 已更新 ✓');
+    toast('页面路径已更新 ✓');
     if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(newSlug)); }
     else if (S.space) renderSpace(S.space);
     else renderSidebar(el.search.value);
@@ -1977,28 +2088,29 @@ function renderSpace(space) {
 
   el.article.innerHTML =
     `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
-       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a><span class="lock-badge">开发者模式：可编辑模板源码</span>` : pageContentLocked(space) ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
+       <span id="sp-slug" class="slug-chip">#${esc(space.slug)}</span>${devSourceEditable(space) ? '<span class="lock-badge">开发者模式：可编辑模板源码</span>' : pageContentLocked(space) ? `<span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : ''}
      </div>
      <div class="space-head">
        <div>
          <h1>${esc(space.title)}</h1>
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
-       <div class="space-acts"${pageContentLocked(space) && !devSourceEditable(space) ? ' hidden' : ''}>
-         <label class="sort-pick">
+       <div class="space-acts"${space.builtIn && !devSourceEditable(space) ? ' hidden' : ''}>
+         <label class="sort-pick"${!canSort ? ' hidden' : ''}>
            <span>排序</span>
            <select id="sp-sort" title="侧栏与总览的页面顺序">
              ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
            </select>
          </label>
-         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇">
+         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇"${!canSort ? ' hidden' : ''}>
            <span>启用推荐</span>
            <input type="checkbox" id="sp-recommend"${space.recommend ? ' checked' : ''}>
            <span class="switch-ui" aria-hidden="true"></span>
          </label>
-         <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
-         <button class="btn btn-ghost" id="sp-rename">重命名</button>
-         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>'}
+         <button class="btn btn-new" id="sp-add"${!canSort ? ' hidden' : ''}>＋ 新建页面</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost" id="sp-settings">空间设置</button>'}
+         <button class="btn btn-ghost" id="sp-rename"${!canSort ? ' hidden' : ''}>重命名</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : `<button class="btn btn-ghost danger-text" id="sp-delete"${!canSort ? ' hidden' : ''}>删除空间</button>`}
        </div>
      </div>
      <div class="cards">${cards || ''}</div>
@@ -2010,9 +2122,9 @@ function renderSpace(space) {
   // Same setting as the modal switch, offered where the sort picker already lives.
   $('#sp-recommend').addEventListener('change', (e) =>
     saveSpaceSettings(space, { recommend: (e.target as HTMLInputElement).checked }));
+  $('#sp-settings')?.addEventListener('click', () => spaceSettingsFlow(space));
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
-  $('#sp-slug-edit')?.addEventListener('click', () => slugSpaceFlow(space));
   $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
   if (canSort && tops.length > 1) setupCardDrag(space);
   renderAuthUI();
@@ -2548,10 +2660,8 @@ rowMenu.addEventListener('click', e => {
   if (kind === 'space') {
     const sp = spaceBySlug(slug);
     if (!sp) return;
-    if (act === 'lock') lockSpaceFlow(sp);
-    if (pageContentLocked(sp)) return;
+    if (pageContentLocked(sp) && act !== 'settings') return;
     if (act === 'rename') renameSpaceFlow(sp);
-    if (act === 'slug') slugSpaceFlow(sp);
     if (act === 'settings') spaceSettingsFlow(sp);
     if (act === 'delete') deleteSpaceFlow(sp);
   } else {
