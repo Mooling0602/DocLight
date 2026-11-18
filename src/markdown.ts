@@ -150,20 +150,31 @@ function createTurndown(): TurndownService {
   // those still win where they overlap: the plugin treats `<s>` as strikethrough too, and the
   // explicit rule below keeps the delimiter stable across round-trips.
   td.use(gfm);
-  // A callout creates a loose list item. Serialize its siblings as loose too, so subsequent
-  // render/save cycles do not repeatedly change the spacing between list items.
-  const listItemRule = td.rules.array.find(rule => rule.filter === 'li');
-  if (listItemRule?.replacement) {
-    td.addRule('callout-list-item', {
-      filter: (node) => node.nodeName === 'LI' && !!node.parentElement
-        && Array.from(node.parentElement.children).some(item =>
-          Array.from(item.children).some(child => hasClass(child, 'callout'))),
-      replacement: (content, node, options) => {
-        const item = listItemRule.replacement!(content, node, options).replace(/(?:\n[ \t]*)+$/, '');
-        return node.nextElementSibling ? `${item}\n\n` : item;
-      },
-    });
-  }
+  // A callout makes the whole list loose on the next render, including its sibling items.
+  const hasCalloutItem = (list: Element | null): boolean => !!list
+    && Array.from(list.children).some(item =>
+      Array.from(item.children).some(child => hasClass(child, 'callout')));
+  td.addRule('callout-list-item', {
+    filter: (node) => node.nodeName === 'LI' && hasCalloutItem(node.parentElement),
+    replacement: (content, node, options) => {
+      const parent = node.parentElement!;
+      const index = Array.from(parent.children).indexOf(node);
+      const start = parent.getAttribute('start');
+      const prefix = parent.nodeName === 'OL'
+        ? `${(start ? Number(start) : 1) + index}.  `
+        : `${options.bulletListMarker}   `;
+      const item = content.replace(/^\n+|\n+$/g, '').replace(/\n/g, `\n${' '.repeat(prefix.length)}`);
+      return prefix + item + (node.nextElementSibling ? '\n\n' : '');
+    },
+  });
+  // A nested list after inline text must also acquire the paragraph boundary that Marked
+  // will emit for a loose item; otherwise the second save inserts an extra blank line.
+  td.addRule('callout-sibling-nested-list', {
+    filter: (node) => (node.nodeName === 'UL' || node.nodeName === 'OL')
+      && node.parentElement?.nodeName === 'LI'
+      && hasCalloutItem(node.parentElement.parentElement),
+    replacement: (content) => `\n\n${content}\n\n`,
+  });
   // In a loose task list Marked wraps the checkbox in a paragraph; the GFM plugin only handles
   // checkboxes that are direct children of an LI.
   td.addRule('loose-task-checkbox', {

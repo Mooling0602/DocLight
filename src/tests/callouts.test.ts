@@ -265,6 +265,16 @@ for (const source of [
       source: '- 甲\n  > [!TIP]\n  > - 子项一\n  > - 子项二\n- 乙',
     },
     {
+      name: '同级条目的子列表与标注块一次保存后稳定',
+      type: 'note',
+      source: '- 甲\n  - 子一\n  - 子二\n- 乙\n  > [!NOTE]\n  > 内',
+    },
+    {
+      name: '有序列表的同级子列表与标注块一次保存后稳定',
+      type: 'tip',
+      source: '3. 甲\n   1. 子一\n   2. 子二\n4. 乙\n   > [!TIP]\n   > 内',
+    },
+    {
       name: '任务列表中的标注块与复选框保持稳定',
       type: 'note',
       source: '- [x] 已完成\n  > [!NOTE]\n  > 提示\n- [ ] 未完成',
@@ -316,6 +326,17 @@ for (const source of [
     assert.ok(match, `${selector} 规则应存在于 style.css`);
     return match![1];
   };
+
+  // Saving a formerly tight list wraps item labels in paragraphs. The scoped CSS must keep
+  // those new wrappers from introducing extra outer margins without changing ordinary lists.
+  const savedList = roundTrip('- 甲\n- 乙\n  > [!NOTE]\n  > 内');
+  const doc = new JSDOM(`<style>${css}</style><div class="article">${render(savedList)}<ul><li><p>普通</p></li></ul></div>`);
+  const labels = doc.window.document.querySelectorAll('.article > ul:first-child > li > p');
+  assert.equal(labels.length, 2, '保存后列表标签应为段落');
+  assert.equal(doc.window.getComputedStyle(labels[0]).marginTop, '0px', '标注块列表的标签不应增加顶部边距');
+  assert.equal(doc.window.getComputedStyle(labels[0]).marginBottom, '0px', '单段标签不应增加底部边距');
+  const ordinary = doc.window.document.querySelector('.article > ul:last-child > li > p')!;
+  assert.ok(parseFloat(doc.window.getComputedStyle(ordinary).marginTop) > 0, '普通松散列表的段落样式不应改变');
 
   const callout = rule('.callout');
   assert.match(callout, /border-left:\s*4px solid var\(--callout-line\)/, '左侧色条应与 GitHub 一致（4px）');
