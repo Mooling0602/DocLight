@@ -88,6 +88,7 @@ const callout: MarkedExtension = {
         // Use Marked's blockquote rules for lazy continuation and block boundaries rather than
         // consuming only `>`-prefixed lines. A separate lexer prevents recursive callout parsing.
         const tokenizer = new Tokenizer({ gfm: true });
+        // Lexer initialization attaches the tokenizer's rules and lexer context.
         new Lexer({ gfm: true, tokenizer });
         const quote = tokenizer.blockquote(src);
         if (!quote) return undefined;
@@ -149,6 +150,28 @@ function createTurndown(): TurndownService {
   // those still win where they overlap: the plugin treats `<s>` as strikethrough too, and the
   // explicit rule below keeps the delimiter stable across round-trips.
   td.use(gfm);
+  // A callout creates a loose list item. Serialize its siblings as loose too, so subsequent
+  // render/save cycles do not repeatedly change the spacing between list items.
+  const listItemRule = td.rules.array.find(rule => rule.filter === 'li');
+  if (listItemRule?.replacement) {
+    td.addRule('callout-list-item', {
+      filter: (node) => node.nodeName === 'LI' && !!node.parentElement
+        && Array.from(node.parentElement.children).some(item =>
+          Array.from(item.children).some(child => hasClass(child, 'callout'))),
+      replacement: (content, node, options) => {
+        const item = listItemRule.replacement!(content, node, options).replace(/(?:\n[ \t]*)+$/, '');
+        return node.nextElementSibling ? `${item}\n\n` : item;
+      },
+    });
+  }
+  // In a loose task list Marked wraps the checkbox in a paragraph; the GFM plugin only handles
+  // checkboxes that are direct children of an LI.
+  td.addRule('loose-task-checkbox', {
+    filter: (node) => node.nodeName === 'INPUT' && node.getAttribute('type') === 'checkbox'
+      && node.parentElement?.nodeName === 'P' && node.parentElement.parentElement?.nodeName === 'LI'
+      && node.parentElement.firstElementChild === node,
+    replacement: (_content, node) => node.hasAttribute('checked') ? '[x] ' : '[ ] ',
+  });
   // Underline has no Markdown syntax: keep the tag so the round-trip is lossless.
   td.addRule('underline', {
     filter: ['u'],
@@ -172,9 +195,10 @@ function createTurndown(): TurndownService {
       if (!type) return content;
       const marker = `> [!${type.toUpperCase()}]`;
       const body = content.trim();
-      if (!body) return `${marker}\n\n`;
+      // Keep a block boundary before the marker, including when nested inside a list item.
+      if (!body) return `\n\n${marker}\n\n`;
       const quoted = body.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n');
-      return `${marker}\n${quoted}\n\n`;
+      return `\n\n${marker}\n${quoted}\n\n`;
     },
   });
   // Any element carrying an inline style (alignment, colour, ...) is preserved verbatim:

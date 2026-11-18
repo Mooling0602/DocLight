@@ -156,6 +156,152 @@ for (const source of [
   assert.equal(roundTrip(once), once, '二次往返应稳定');
 }
 
+/* ---------------------------------------- alerts nested inside a list item (WYSIWYG save)
+   GitHub lets an alert follow an item's own text as a nested block: the marker sits on its
+   own quoted line under the item, the card belongs to that <li>, and the items after it stay
+   siblings of the same list. Surrounding paragraphs stay outside the list.
+
+   The visual editor rewrites the stored Markdown on every save, so three properties matter
+   here: the marker must not be glued to the item text (that turns the card back into a plain
+   quote on the next render), the rendered page must be identical after a save, and a second
+   save must reproduce the first byte for byte — otherwise the file grows whitespace forever. */
+{
+  interface CardShape {
+    className: string;
+    /** Index of the list that owns the item, in document order. */
+    list: number;
+    /** Index of the item inside that list. */
+    item: number;
+    /** How many list levels the item is nested under. */
+    depth: number;
+    /** Card text without the generated title. */
+    body: string;
+  }
+  interface PageShape {
+    /** Top-level blocks, with paragraphs reduced to their text. */
+    blocks: string[];
+    /** Every list item as `depth:text`. */
+    items: string[];
+    cards: CardShape[];
+  }
+
+  /** Whitespace is layout, not content: compare the rendered page without it. */
+  const squash = (value: string | null): string => (value || '').replace(/\s+/g, '');
+
+  const shape = (html: string): PageShape => {
+    const doc = new JSDOM(html).window.document;
+    const lists = Array.from(doc.querySelectorAll('ul, ol'));
+    const depthOf = (node: Element): number => {
+      let depth = 0;
+      for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+        if (parent.matches('li')) depth += 1;
+      }
+      return depth;
+    };
+    const cards = Array.from(doc.querySelectorAll('.callout')).map((card) => {
+      const body = card.cloneNode(true) as Element;
+      const title = body.querySelector('.callout-title');
+      if (title) title.remove();
+      const item = card.closest('li');
+      const parent = item ? item.parentElement : null;
+      return {
+        className: card.className,
+        list: parent ? lists.indexOf(parent) : -1,
+        item: parent ? Array.from(parent.children).indexOf(item as Element) : -1,
+        depth: item ? depthOf(item) : -1,
+        body: squash(body.textContent),
+      };
+    });
+    return {
+      blocks: Array.from(doc.body.children).map((block) => (block.matches('ul, ol')
+        ? block.tagName.toLowerCase()
+        : `${block.tagName.toLowerCase()}:${squash(block.textContent)}`)),
+      items: Array.from(doc.querySelectorAll('li')).map((item) => `${depthOf(item)}:${squash(item.textContent)}`),
+      cards,
+    };
+  };
+
+  /** A marker line may carry list indentation and quote prefixes only — never item text. */
+  const markerStandsAlone = (markdown: string, type: string): boolean => {
+    const marker = `[!${type.toUpperCase()}]`;
+    return markdown.split('\n').every((line) => !line.includes(marker)
+      || /^[ \t]*(?:[-*+]|\d+\.)?[ \t]*(?:>[ \t]?)*\[![A-Z]+\][ \t]*$/.test(line));
+  };
+
+  const nested: Array<{ name: string; type: string; source: string }> = [
+    {
+      name: '无序列表：条目正文后嵌套标注块，后续同级条目仍在同一列表',
+      type: 'note',
+      source: '- 列表项\n  > [!NOTE]\n  > 正文\n- 后续项',
+    },
+    {
+      name: '有序列表：条目正文后嵌套标注块，后续同级条目仍在同一列表',
+      type: 'tip',
+      source: '1. 第一项\n   > [!TIP]\n   > 提示正文\n2. 第二项\n3. 第三项',
+    },
+    {
+      name: '松散条目：标注块前后的段落都留在条目内',
+      type: 'warning',
+      source: '- 前置说明\n\n  > [!WARNING]\n  > 警告正文\n\n  尾部说明\n- 后续项',
+    },
+    {
+      name: '列表前后的段落不属于列表',
+      type: 'note',
+      source: '引言段落\n\n- 甲\n  > [!NOTE]\n  > 内\n- 乙\n\n收尾段落',
+    },
+    {
+      name: '标注块位于中间条目时，前后条目都是同级',
+      type: 'caution',
+      source: '- 甲\n- 乙\n  > [!CAUTION]\n  > 内\n- 丙',
+    },
+    {
+      name: '嵌套列表中的标注块仍属于最内层条目',
+      type: 'note',
+      source: '- 甲\n  - 子项\n    > [!NOTE]\n    > 内\n- 乙',
+    },
+    {
+      name: '标注块内的列表不应破坏外层条目',
+      type: 'tip',
+      source: '- 甲\n  > [!TIP]\n  > - 子项一\n  > - 子项二\n- 乙',
+    },
+    {
+      name: '任务列表中的标注块与复选框保持稳定',
+      type: 'note',
+      source: '- [x] 已完成\n  > [!NOTE]\n  > 提示\n- [ ] 未完成',
+    },
+  ];
+
+  for (const { name, type, source } of nested) {
+    const marker = `> [!${type.toUpperCase()}]`;
+    const html = render(source);
+    const before = shape(html);
+
+    // The card is rendered inside the item, not floated out of the list.
+    assert.equal(before.cards.length, 1, `${name}：应渲染出一个标注块`);
+    assert.equal(before.cards[0].className, `callout callout-${type}`, `${name}：卡片应使用对应类型`);
+    assert.ok(before.cards[0].item >= 0 && before.cards[0].depth >= 0, `${name}：标注块应在列表条目内渲染`);
+    assert.ok(html.includes(`<span>${LABELS[type]}</span>`), `${name}：标题应使用本地化文案`);
+    assert.ok(!html.includes(marker), `${name}：标记不应出现在结果里`);
+
+    // One save keeps the marker on its own line, inside the same item, and the same page.
+    const saved = roundTrip(source);
+    assert.ok(saved.includes(marker), `${name}：一次保存应保留标记`);
+    assert.ok(markerStandsAlone(saved, type), `${name}：标记应独占一行，不能与条目正文粘连`);
+    assert.match(
+      saved,
+      new RegExp(`^[ \\t]+(?:>[ \\t]?)*\\[!${type.toUpperCase()}\\][ \\t]*$`, 'm'),
+      `${name}：标记应保留条目缩进，不能被提到列表外`,
+    );
+    assert.ok(!saved.includes('\\[!'), `${name}：保存不应把标记转义成普通文本`);
+    assert.deepEqual(shape(render(saved)), before, `${name}：一次保存不应改变渲染结果`);
+
+    // A second save must be a no-op, byte for byte: the editor rewrites on every save.
+    const twice = roundTrip(saved);
+    assert.deepEqual(shape(render(twice)), before, `${name}：二次保存不应改变渲染结果`);
+    assert.equal(twice, saved, `${name}：二次保存应与一次保存逐字节一致`);
+  }
+}
+
 /* ---------------------------------------------------- visual parity with GitHub
    The card deliberately imitates GitHub's `.markdown-alert` CSS: a 4px coloured left bar,
    no background, no rounded corners, a 500-weight coloured title and an 8px icon gap.
