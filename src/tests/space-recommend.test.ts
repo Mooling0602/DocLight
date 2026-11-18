@@ -208,11 +208,12 @@ async function main(): Promise<void> {
   assert.equal(($('#sp-recommend') as HTMLInputElement).checked, true);
   click('.cards a.card');
   await wait(120);
-  assert.equal(($('#btn-auth') as HTMLElement).hidden, true, '文章页仍不显示登录入口，避免挤压阅读操作');
+  assert.equal(($('#btn-auth') as HTMLElement).hidden, false, '文章预览应显示登录或退出入口');
 
   // ---- An open editor must survive a settings save: the footer is a reading-view concern.
   click('#btn-edit');
   await wait(50);
+  assert.equal(($('#btn-auth') as HTMLElement).hidden, true, '编辑期间隐藏账号入口');
   $('#editor')!.innerHTML = '<p>尚未保存的内容</p>';
   $('#editor')!.dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.equal(($('#dirty-pill') as HTMLElement).hidden, false, '前置：应处于未保存状态');

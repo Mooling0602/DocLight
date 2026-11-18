@@ -238,7 +238,7 @@ async function cancelMidFlightSyncsWithoutResuming(): Promise<void> {
     assert.equal(app.counts('/api/auth/login'), 1, '不应因为取消而重发登录');
     assert.equal(app.editorOpen(), false, '取消后不得继续打开编辑弹窗');
     assert.equal(app.get('#cluster-view').hidden, false, '文章页仍停留在阅读态');
-    assert.equal(app.authButton().hidden, true, '文章页不显示登录入口');
+    assert.equal(app.authButton().hidden, false, '文章预览显示账号入口');
 
     // The login was accepted server-side, so the session state must have been re-read.
     const loginAt = app.calls.findIndex(c => c.url.endsWith('/api/auth/login'));
@@ -629,7 +629,28 @@ async function brokenStorageStillSignsIn(): Promise<void> {
   } finally { app.dom.window.close(); }
 }
 
+async function articleAccountButton(): Promise<void> {
+  const app = await createApp();
+  try {
+    await waitFor(() => !app.get('#cluster-view').hidden, '文章预览渲染完成');
+    assert.equal(app.authButton().hidden, false, '未登录的文章预览应显示登录入口');
+    assert.equal(app.authButton().textContent, '登录');
+    app.click('#btn-auth');
+    assert.match(app.modalText(), /登录 DocLight/);
+    app.fill(ACCOUNT, PASSWORD);
+    app.click('#modal-root [data-x=ok]');
+    await waitFor(() => !app.modalOpen(), '文章预览登录成功');
+    assert.equal(app.authButton().textContent, '退出', '登录后可从文章预览退出');
+    assert.equal(app.editorOpen(), false, '直接登录不应自动进入编辑');
+    app.click('#btn-edit');
+    assert.equal(app.authButton().hidden, true, '编辑时隐藏账号入口');
+    app.click('#btn-cancel');
+    await waitFor(() => !app.authButton().hidden, '退出编辑后恢复账号入口');
+  } finally { app.dom.window.close(); }
+}
+
 async function main(): Promise<void> {
+  await articleAccountButton();
   await cancelMidFlightSyncsWithoutResuming();
   await cancelBeforeDispatchSendsNothing();
   await reopeningDoesNotStackEnterHandlers();

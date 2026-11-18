@@ -514,7 +514,7 @@ async function refreshAuthState() {
 
 function renderAuthUI() {
   const b = $('#btn-auth');
-  b.hidden = !!S.page;   // 文章页（含编辑态）不显示；空间总览与首页保留登录入口
+  b.hidden = !el.editWrap.hidden;   // Keep account actions out of the editor, including its unsaved draft.
   if (b.hidden) return;
   b.textContent = S.authed ? '退出' : (S.authSetup ? '初始化账号' : '登录');
   b.title = S.authed ? `${S.user} · 退出登录`
@@ -1198,6 +1198,7 @@ function enterEdit(focus = true) {
   el.clusterEdit.hidden = false;
   renderEditorLockStatus();
   el.editWrap.hidden = false;
+  renderAuthUI();
   el.titleInput.value = S.page.title;
 
   // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
