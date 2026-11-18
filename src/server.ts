@@ -1106,12 +1106,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (body.parent !== undefined) {
         const parent = body.parent || null;
         if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
-        if (parent === slug) return json(res, 400, { error: '不能移动到自身之下' });
+        const liveSlug = db.pages[idx].slug;
+        if (parent === slug || parent === liveSlug) return json(res, 400, { error: '不能移动到自身之下' });
         if (parent) {
           const pp = db.pages.find(p => p.slug === parent);
           if (!pp) return json(res, 404, { error: '目标父级不存在' });
           if (pp.space !== db.pages[idx].space) return json(res, 400, { error: '父级必须位于同一空间' });
-          if (descendantsOf(db.pages, slug).has(parent)) return json(res, 400, { error: '不能移动到自己的子页面之下' });
+          if (descendantsOf(db.pages, liveSlug).has(parent)) return json(res, 400, { error: '不能移动到自己的子页面之下' });
         }
         db.pages[idx].parent = parent;
       }
@@ -1144,6 +1145,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       // Any space whose home was among the removed pages (the page itself or a descendant)
       // would otherwise keep a pointer to a slug that no longer resolves.
       for (const sp of db.spaces) {
+        if (sp.builtIn) continue;
         if (sp.home && doomed.includes(sp.home)) sp.home = null;
         // Deleted pages also leave the manual order, for the same reason the renamed ones do: an
         // entry naming a page that no longer exists is rejected when the arrangement is

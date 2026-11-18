@@ -124,6 +124,26 @@ async function main(): Promise<void> {
     await start();
     assert.equal((await api('auth/setup', 'POST', { user: 'tester', ks: 'aa'.repeat(32) })).status, 200);
 
+    /* ---- combined rename and parent changes must not create cycles --------- */
+    assert.equal((await api('spaces', 'POST', { title: 'Cycle test' })).status, 201);
+    for (const [title, parent] of [['Root node', null], ['Child node', 'root_node'], ['Grandchild node', 'child_node'], ['Other node', null]] as const) {
+      assert.equal((await api('pages', 'POST', { title, space: 'cycle_test', parent })).status, 201);
+    }
+    assert.equal((await api('spaces/cycle_test', 'PUT', { sort: 'manual', order: ['root_node', 'child_node', 'grandchild_node', 'other_node'] })).status, 200);
+    const beforeCycleIndex = rawIndex(dataIndexFile);
+    const beforeCycleFiles = ['root_node', 'child_node', 'grandchild_node'].map(slug => fs.readFileSync(path.join(data, 'pages', `${slug}.md`), 'utf8'));
+    for (const parent of ['renamed_root', 'child_node', 'grandchild_node']) {
+      const rejected = await api('pages/root_node', 'PUT', { slug: 'renamed_root', parent });
+      assert.equal(rejected.status, 400, '改路径时不能将页面置于自身或后代之下');
+      assert.equal(rawIndex(dataIndexFile), beforeCycleIndex, '被拒绝的改路径不能改写空间索引');
+      assert.equal(fs.existsSync(path.join(data, 'pages', 'renamed_root.md')), false, '被拒绝的改路径不能生成新文件');
+      assert.deepEqual(['root_node', 'child_node', 'grandchild_node'].map(slug => fs.readFileSync(path.join(data, 'pages', `${slug}.md`), 'utf8')), beforeCycleFiles, '被拒绝的请求不能改写页面');
+    }
+    const validMove = await api('pages/root_node', 'PUT', { slug: 'renamed_root', parent: 'other_node' });
+    assert.equal(validMove.status, 200, '允许改路径并移到无关页面之下');
+    assert.equal(validMove.body.parent, 'other_node');
+    assert.deepEqual(dataSpace('cycle_test').order, ['renamed_root', 'child_node', 'grandchild_node', 'other_node']);
+
     /* ---- ordinary space: rename keeps the manual position ------------------- */
     assert.equal((await api('spaces', 'POST', { title: 'Alpha' })).status, 201);
     assert.equal((await api('spaces', 'POST', { title: 'Beta' })).status, 201);

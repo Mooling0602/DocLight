@@ -679,8 +679,13 @@ function chainOf(pageSlug) {
   if (!page) return [];
   const space = spaceBySlug(page.space);
   const chain = [];
+  const seen = new Set<string>();
   let cur = page;
-  while (cur) { chain.unshift(cur); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  while (cur && !seen.has(cur.slug)) {
+    seen.add(cur.slug);
+    chain.unshift(cur);
+    cur = cur.parent ? pageBySlug(cur.parent) : null;
+  }
   return space ? [space, ...chain] : chain;
 }
 function canonicalPath(slug) {
@@ -709,8 +714,7 @@ function revealPath(pageSlug) {
   const page = pageBySlug(pageSlug);
   if (!page) return;
   collapsedSet.delete('s:' + page.space);
-  let cur = page;
-  while (cur) { collapsedSet.delete('p:' + cur.slug); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  for (const node of chainOf(pageSlug)) collapsedSet.delete('p:' + node.slug);
 }
 
 /* ============================================================
@@ -1527,7 +1531,7 @@ async function lockSpaceFlow(space: Space) {
   }
   const m = openModal(`
     <h3>解锁空间「${esc(space.title)}」</h3>
-    <p class="desc">请输入当前登录账号的密码。密码仅在本地用于验证，不会发送明文。</p>
+    <p class="desc">请输入当前登录账号的密码。密码会在浏览器中用于生成验证信息，密码明文不会发送。远程访问请使用 HTTPS。</p>
     <input type="password" autocomplete="current-password" placeholder="登录密码">
     <p class="desc" data-x="error" style="color:var(--danger)" hidden></p>
     <div class="modal-actions"><button class="btn btn-ghost" data-x="no">取消</button><button class="btn btn-primary" data-x="ok">解锁</button></div>`);
@@ -2091,24 +2095,23 @@ function renderSpace(space) {
          <h1>${esc(space.title)}</h1>
          ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
-       <div class="space-acts"${pageContentLocked(space) && !devSourceEditable(space) ? ' hidden' : ''}>
-         <label class="sort-pick">
+       <div class="space-acts"${space.builtIn && !devSourceEditable(space) ? ' hidden' : ''}>
+         <label class="sort-pick"${!canSort ? ' hidden' : ''}>
            <span>排序</span>
            <select id="sp-sort" title="侧栏与总览的页面顺序">
              ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
            </select>
          </label>
-         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇">
+         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇"${!canSort ? ' hidden' : ''}>
            <span>启用推荐</span>
            <input type="checkbox" id="sp-recommend"${space.recommend ? ' checked' : ''}>
            <span class="switch-ui" aria-hidden="true"></span>
          </label>
-         <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
-         ${pageContentLocked(space) && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost" id="sp-settings">空间设置</button>'}
-         <button class="btn btn-ghost" id="sp-rename">重命名</button>
-         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>'}
+         <button class="btn btn-new" id="sp-add"${!canSort ? ' hidden' : ''}>＋ 新建页面</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost" id="sp-settings">空间设置</button>'}
+         <button class="btn btn-ghost" id="sp-rename"${!canSort ? ' hidden' : ''}>重命名</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : `<button class="btn btn-ghost danger-text" id="sp-delete"${!canSort ? ' hidden' : ''}>删除空间</button>`}
        </div>
-       ${pageContentLocked(space) && !devSourceEditable(space) && !space.builtIn ? '<button class="btn btn-ghost" id="sp-settings">空间设置</button>' : ''}
      </div>
      <div class="cards">${cards || ''}</div>
      ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;

@@ -214,6 +214,7 @@ async function main(): Promise<void> {
   try {
     window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
     await wait(100);
+    assert.ok($('#sp-settings').closest('.space-acts'), '未锁定时设置入口位于空间操作区域');
     click('#sp-settings');
     assert.match($('#modal-root h3').textContent || '', /空间设置/, '空间页面可以打开设置');
     click('#modal-root [data-x=no]');
@@ -238,6 +239,10 @@ async function main(): Promise<void> {
     assert.ok(document.querySelector('.space-row .lock-badge'), '侧栏显示锁定状态');
     assert.equal(document.querySelectorAll('#sp-settings').length, 1, '锁定空间只能有一个设置入口');
     assert.equal($('#sp-settings').closest('[hidden]'), null, '设置入口应可见');
+    assert.ok($('#sp-settings').closest('.space-acts'), '锁定后设置入口仍位于空间操作区域');
+    assert.equal($('#sp-add').hidden, true, '锁定后新建入口隐藏');
+    assert.ok($('#sp-sort').closest('[hidden]'), '锁定后排序控件隐藏');
+    assert.ok($('#sp-recommend').closest('[hidden]'), '锁定后推荐控件隐藏');
     click('#sp-settings');
     assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间/, '锁定后空间页面仍能打开解锁设置');
     assert.equal($<HTMLButtonElement>('#modal-root [data-x=slug]').disabled, true, '锁定时不能编辑空间 slug');
