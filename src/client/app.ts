@@ -2270,7 +2270,8 @@ function setupCardDrag(space) {
       }
       cleanup(true);
       if (ev.type !== 'pointercancel' && order.length) {
-        saveSpaceOrder(space, order, spacePages(space.slug, null).map(p => p.slug));
+        const current = spacePages(space.slug, null).map(p => p.slug);
+        saveSpaceOrder(space, buildSpaceOrder(space.slug, null, order), buildSpaceOrder(space.slug, null, current));
       }
     };
 
@@ -2322,11 +2323,17 @@ const SIDEBAR_DRAG_THRESHOLD = 4;
 /** Full DFS order of a space with one sibling group reordered, so the API gets a complete list. */
 function buildSpaceOrder(spaceSlug, parentSlug, siblingSlugs) {
   const order = [];
+  const seen = new Set<string>();
   const walk = (parent) => {
     const kids = (parent || null) === (parentSlug || null)
       ? siblingSlugs.map(slug => pageBySlug(slug)).filter(Boolean)
       : spacePages(spaceSlug, parent);
-    for (const kid of kids) { order.push(kid.slug); walk(kid.slug); }
+    for (const kid of kids) {
+      if (seen.has(kid.slug)) continue;
+      seen.add(kid.slug);
+      order.push(kid.slug);
+      walk(kid.slug);
+    }
   };
   walk(null);
   return order;

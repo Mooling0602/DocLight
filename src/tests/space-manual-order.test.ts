@@ -156,6 +156,50 @@ async function main(): Promise<void> {
     assert.deepEqual(puts[puts.length - 1].body, { order: ['gamma', 'beta', 'alpha'] }, '手动模式下再次拖动只提交 order');
   }
 
+  /* ---- Card drags preserve the existing order of every nested subtree. ---- */
+  {
+    const { window, document, spaces, puts } = await boot('http://localhost:4173/default', false, [
+      { slug: 'alpha_two', space: 'default', parent: 'alpha', title: '甲·二', createdAt: 1, updatedAt: 1 },
+      { slug: 'alpha_grandchild', space: 'default', parent: 'alpha_two', title: '甲·孙', createdAt: 1, updatedAt: 1 },
+      { slug: 'alpha_one', space: 'default', parent: 'alpha', title: '甲·一', createdAt: 2, updatedAt: 2 },
+    ]);
+    await wait(120);
+    spaces[0].sort = 'manual';
+    spaces[0].order = ['alpha', 'alpha_two', 'alpha_grandchild', 'alpha_one', 'beta', 'gamma'];
+    layoutCards(document);
+    const first = document.querySelectorAll<HTMLElement>('#article .card')[0];
+    pointer(window, 'pointerdown', 30, 20, first.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 40, 30, window);
+    pointer(window, 'pointerup', 40, 30, window);
+    await wait(80);
+    assert.equal(puts.length, 0, '包含子页面时原位放下也不得写入');
+    layoutCards(document);
+    pointer(window, 'pointerdown', 30, 20, first.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 300, 320, window);
+    pointer(window, 'pointerup', 300, 320, window);
+    await wait(160);
+    assert.deepEqual(puts[0].body, { order: ['beta', 'gamma', 'alpha', 'alpha_two', 'alpha_grandchild', 'alpha_one'] }, '卡片拖动必须保留完整子树与其原有顺序');
+    const sideTitles = [...document.querySelectorAll('#page-list .tree-row .page-item .t')].map(node => node.textContent);
+    assert.deepEqual(sideTitles, ['乙', '丙', '甲', '甲·二', '甲·孙', '甲·一'], '刷新树后侧栏仍按子树原顺序显示');
+    window.close();
+  }
+
+  /* ---- A stale card list must not recurse or submit duplicate page slugs. ---- */
+  {
+    const { window, document, pages, puts } = await boot('http://localhost:4173/default');
+    await wait(120);
+    layoutCards(document);
+    const first = document.querySelectorAll<HTMLElement>('#article .card')[0];
+    // The cards were rendered before the in-memory tree became inconsistent.
+    pages.find(page => page.slug === 'gamma')!.parent = 'gamma';
+    pointer(window, 'pointerdown', 30, 20, first.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 300, 320, window);
+    pointer(window, 'pointerup', 300, 320, window);
+    await wait(160);
+    assert.deepEqual(puts[0].body, { sort: 'manual', order: ['beta', 'gamma', 'alpha'] }, '异常页面树不得造成递归或重复 slug');
+    window.close();
+  }
+
   /* ---- Dropping a card back into its own slot writes nothing. ---- */
   {
     const { window, document, spaces, puts } = await boot('http://localhost:4173/default');

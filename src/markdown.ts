@@ -10,7 +10,7 @@
  * as raw inline HTML so the conversion is lossless — `marked` passes raw HTML through and
  * the client sanitises the result with DOMPurify before it reaches the DOM.
  */
-import { Marked, type MarkedExtension, type Token, type Tokens } from 'marked';
+import { Lexer, Marked, Tokenizer, type MarkedExtension, type Token, type Tokens } from 'marked';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 
@@ -44,8 +44,6 @@ interface CalloutToken extends Tokens.Generic {
 
 /** The marker may only be followed by whitespace: `> [!NOTE] 补充` stays a plain quote. */
 const CALLOUT_START = /^ {0,3}>[ \t]?\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?:\r?\n|$)/i;
-/** One quoted line, capturing the text with a single level of `> ` stripped. */
-const QUOTED_LINE = /^ {0,3}>[ \t]?([^\r\n]*)(?:\r\n|\n|$)/;
 
 /** Titles follow the UI language, as GitHub does: the content language is the author's. */
 const CALLOUT_LABELS: Record<CalloutType, string> = {
@@ -87,20 +85,14 @@ const callout: MarkedExtension = {
       tokenizer(src) {
         const head = CALLOUT_START.exec(src);
         if (!head) return undefined;
-        // Consume the whole quoted block: the callout ends with the blockquote itself, so a
-        // following paragraph outside the `>` prefix is left to the block tokenizer.
-        let raw = '';
-        let rest = src;
-        const lines: string[] = [];
-        for (;;) {
-          const line = QUOTED_LINE.exec(rest);
-          if (!line) break;
-          raw += line[0];
-          lines.push(line[1]);
-          rest = rest.slice(line[0].length);
-          if (!rest) break;
-        }
-        const text = lines.slice(1).join('\n');
+        // Use Marked's blockquote rules for lazy continuation and block boundaries rather than
+        // consuming only `>`-prefixed lines. A separate lexer prevents recursive callout parsing.
+        const tokenizer = new Tokenizer({ gfm: true });
+        new Lexer({ gfm: true, tokenizer });
+        const quote = tokenizer.blockquote(src);
+        if (!quote) return undefined;
+        const raw = quote.raw;
+        const text = quote.text.replace(/^\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?:\r?\n|$)/i, '');
         return {
           type: 'callout',
           raw,

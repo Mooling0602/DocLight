@@ -80,6 +80,26 @@ for (const type of CALLOUT_TYPES) {
   assert.equal(roundTrip(source), source);
 }
 
+// GitHub allows lazy continuation lines inside a blockquote until a real block boundary.
+{
+  const source = '> [!NOTE]\n> 第一行\n继续正文\n\n卡片外的段落';
+  const doc = new JSDOM(render(source)).window.document;
+  const card = doc.querySelector('.callout-note')!;
+  assert.match(card.textContent || '', /第一行\s+继续正文/, '没有引用前缀的延续行仍属于标注块');
+  assert.equal(card.nextElementSibling?.textContent, '卡片外的段落', '空行后的段落仍在标注块之外');
+  const saved = roundTrip(source);
+  assert.match(saved, /> 第一行\s+继续正文/, '可视化保存时延续内容仍属于引用');
+  assert.equal(roundTrip(saved), saved, '规范化后的源码再次保存应稳定');
+  const heading = new JSDOM(render('> [!TIP]\n> 内容\n# 外部标题')).window.document;
+  assert.equal(heading.querySelector('.callout-tip')?.nextElementSibling?.tagName, 'H1', '标题应终止延续行');
+  const outsideList = new JSDOM(render('> [!NOTE]\n> 内容\n- 外部列表')).window.document;
+  assert.equal(outsideList.querySelector('.callout-note')?.nextElementSibling?.tagName, 'UL', '未引用的列表应终止标注块');
+  const outsideCode = new JSDOM(render('> [!TIP]\n> 内容\n```js\ncode\n```')).window.document;
+  assert.equal(outsideCode.querySelector('.callout-tip')?.nextElementSibling?.tagName, 'PRE', '未引用的围栏代码块应终止标注块');
+  const list = new JSDOM(render('> [!WARNING]\n> - 列表项\n延续文本')).window.document;
+  assert.match(list.querySelector('.callout-warning li')?.textContent || '', /列表项\s+延续文本/, '列表项的延续行应留在标注块内');
+}
+
 // The marker is case-insensitive; saving normalises it to upper case.
 {
   assert.match(render('> [!note]\n> 正文'), /class="callout callout-note"/);
