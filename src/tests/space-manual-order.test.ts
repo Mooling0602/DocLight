@@ -184,6 +184,66 @@ async function main(): Promise<void> {
     window.close();
   }
 
+  /* ---- Nested cards expand independently and keep sibling drag ordering. ---- */
+  {
+    const { window, document, puts } = await boot('http://localhost:4173/default', false, [
+      { slug: 'alpha_one', space: 'default', parent: 'alpha', title: '子一', createdAt: 2, updatedAt: 2 },
+      { slug: 'alpha_two', space: 'default', parent: 'alpha', title: '子二', createdAt: 1, updatedAt: 1 },
+      { slug: 'alpha_grand', space: 'default', parent: 'alpha_one', title: '孙页', createdAt: 1, updatedAt: 1 },
+    ]);
+    await wait(120);
+    const card = (slug: string) => document.querySelector<HTMLElement>(`.space-page-card[data-slug="${slug}"]`);
+    const toggle = (slug: string) => card(slug)!.querySelector<HTMLButtonElement>(':scope > .card-expand')!;
+    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'false', '子页面默认折叠');
+    assert.equal(card('alpha_one'), null, '折叠时不渲染子卡片');
+    toggle('alpha').click();
+    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'true');
+    assert.equal(document.activeElement, toggle('alpha'), '重新渲染后保留键盘焦点');
+    assert.ok(card('alpha_one') && card('alpha_two'), '展开后显示直接子页面');
+    assert.equal(card('alpha_grand'), null, '孙页面仍默认折叠');
+    toggle('alpha_one').click();
+    assert.ok(card('alpha_grand'), '支持逐层展开');
+    toggle('alpha').click();
+    assert.equal(card('alpha_one'), null, '折叠父页面隐藏整个子树');
+    toggle('alpha').click();
+    assert.ok(card('alpha_grand'), '重新展开时保留后代展开状态');
+    assert.equal(puts.length, 0, '展开和折叠不得修改页面或顺序');
+
+    // Reorder the two children only; the first child's expanded subtree follows it.
+    layoutCards(document);
+    const first = card('alpha_one')!;
+    pointer(window, 'pointerdown', 30, 140, first.querySelector(':scope > .card-grip')!);
+    pointer(window, 'pointermove', 300, 500, window);
+    pointer(window, 'pointerup', 300, 500, window);
+    await wait(160);
+    assert.deepEqual(puts[0].body, { sort: 'manual', order: ['alpha', 'alpha_two', 'alpha_one', 'alpha_grand', 'beta', 'gamma'] }, '子卡片拖动只排序同级并保留完整子树');
+    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'true', '排序后保持展开状态');
+    assert.ok(card('alpha_grand'), '排序后保持后代展开状态');
+    layoutCards(document);
+    const parent = card('alpha')!;
+    pointer(window, 'pointerdown', 30, 20, parent.querySelector(':scope > .card-grip')!);
+    pointer(window, 'pointermove', 300, 1000, window);
+    pointer(window, 'pointerup', 300, 1000, window);
+    await wait(160);
+    assert.deepEqual(puts[1].body, { order: ['beta', 'gamma', 'alpha', 'alpha_two', 'alpha_one', 'alpha_grand'] }, '展开时拖动父卡片仍只排序顶层并保留子树');
+    card('alpha_two')!.querySelector<HTMLAnchorElement>(':scope > .card-link')!.click();
+    await wait(120);
+    assert.equal(document.title, '子二 · DocLight', '点击子卡片主体打开对应页面');
+    window.close();
+  }
+
+  /* ---- Read-only spaces still expose expansion but never sorting. ---- */
+  {
+    const { window, document } = await boot('http://localhost:4173/default', true, [
+      { slug: 'locked_child', space: 'default', parent: 'alpha', title: '只读子页', createdAt: 1, updatedAt: 1 },
+    ]);
+    await wait(120);
+    document.querySelector<HTMLButtonElement>('.space-page-card[data-slug="alpha"] > .card-expand')!.click();
+    assert.ok(document.querySelector('.space-page-card[data-slug="locked_child"] > .card-link'), '只读空间也可展开子页面');
+    assert.equal(document.querySelectorAll('#article .card-grip').length, 0, '只读空间的子页面也不能拖动');
+    window.close();
+  }
+
   /* ---- A stale card list must not recurse or submit duplicate page slugs. ---- */
   {
     const { window, document, pages, puts } = await boot('http://localhost:4173/default');

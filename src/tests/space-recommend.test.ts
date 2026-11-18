@@ -206,7 +206,7 @@ async function main(): Promise<void> {
   await wait(120);
   assert.deepEqual(puts[puts.length - 1].body, { recommend: true });
   assert.equal(($('#sp-recommend') as HTMLInputElement).checked, true);
-  click('.cards a.card');
+  click('.cards .space-page-card > .card-link');
   await wait(120);
   assert.equal(($('#btn-auth') as HTMLElement).hidden, false, '文章预览应显示登录或退出入口');
 

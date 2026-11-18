@@ -362,7 +362,7 @@ async function main(): Promise<void> {
     await wait(100);
     assert.match($('#article .lock-badge').textContent || '', /永久只读/, '空间页显示永久只读');
     assert.equal($<HTMLElement>('.space-acts').hidden, true);
-    click('a.card[data-nav]');
+    click('.space-page-card > .card-link[data-nav]');
     await wait(100);
     assert.match($('#article .lock-badge').textContent || '', /永久只读/, '页面显示永久只读');
     assert.match($('#article').textContent || '', /随应用更新/, '内置页面不应显示固定模板日期');

@@ -2060,6 +2060,9 @@ function renderHome() {
   renderSidebar(el.search.value);
 }
 
+// Space-index expansion is independent from the sidebar and lasts for this browser session.
+const expandedSpaceCards = new Set<string>();
+
 function renderSpace(space) {
   S.page = null; S.space = space;
   collapsedSet.delete('s:' + space.slug);   // 进入空间索引时展开
@@ -2077,14 +2080,25 @@ function renderSpace(space) {
   const tops = spacePages(space.slug, null);
   // Manual ordering is a write: locked spaces and the read-only built-in template get no grips.
   const canSort = !pageContentLocked(space) || devSourceEditable(space);
-  const cards = tops.map(p => {
-    const n = childrenOf(p.slug).filter(k => k.space === space.slug).length;
-    return `<a class="card" data-slug="${esc(p.slug)}" draggable="false" data-nav href="${esc(canonicalPath(p.slug))}">
+  let cardGroupId = 0;
+  const renderCards = (pages, ancestors = new Set<string>()) => pages.map(p => {
+    if (ancestors.has(p.slug)) return '';
+    const children = spacePages(space.slug, p.slug).filter(child => !ancestors.has(child.slug) && child.slug !== p.slug);
+    const key = JSON.stringify([space.slug, p.slug]);
+    const open = children.length > 0 && expandedSpaceCards.has(key);
+    const groupId = `space-card-children-${cardGroupId++}`;
+    const nextAncestors = new Set(ancestors); nextAncestors.add(p.slug);
+    return `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
               ${canSort ? `<span class="card-grip" role="button" aria-label="拖动排序" title="拖动排序"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/></g></svg></span>` : ''}
-              <span class="t">${esc(p.title)}</span>
-              <span class="s">${n ? n + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
-            </a>`;
+              <a class="card-link" data-nav href="${esc(canonicalPath(p.slug))}" draggable="false">
+                <span class="t">${esc(p.title)}</span>
+                <span class="s">${children.length ? children.length + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
+              </a>
+              ${children.length ? `<button class="card-expand" type="button" aria-expanded="${open}" aria-controls="${groupId}" aria-label="${open ? '折叠' : '展开'}${esc(p.title)}的子页面"><span aria-hidden="true">${open ? '▾' : '▸'}</span> ${open ? '收起' : '查看'} ${children.length} 个子页面</button>
+                <div id="${groupId}" class="cards card-children" data-parent="${esc(p.slug)}"${open ? '' : ' hidden'}>${open ? renderCards(children, nextAncestors) : ''}</div>` : ''}
+            </div>`;
   }).join('');
+  const cards = renderCards(tops);
 
   el.article.innerHTML =
     `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
@@ -2126,7 +2140,23 @@ function renderSpace(space) {
   $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
-  if (canSort && tops.length > 1) setupCardDrag(space);
+  const article = el.article as HTMLElement;
+  article.querySelectorAll('.card-expand').forEach(button => button.addEventListener('click', () => {
+    const card = button.parentElement as HTMLElement;
+    const slug = card.dataset.slug;
+    const key = JSON.stringify([space.slug, slug]);
+    if (expandedSpaceCards.has(key)) expandedSpaceCards.delete(key); else expandedSpaceCards.add(key);
+    renderSpace(space);
+    const current = [...article.querySelectorAll<HTMLElement>('.space-page-card')].find(item => item.dataset.slug === slug);
+    current?.querySelector<HTMLButtonElement>(':scope > .card-expand')?.focus();
+  }));
+  if (canSort) {
+    article.querySelectorAll<HTMLElement>('.cards').forEach(container => {
+      if ([...container.children].filter(child => child.classList.contains('space-page-card')).length > 1) {
+        setupCardDrag(space, container);
+      }
+    });
+  }
   renderAuthUI();
   renderSidebar(el.search.value);
 }
@@ -2145,16 +2175,17 @@ const CARD_DRAG_THRESHOLD = 4;
  * Nothing is persisted until the pointer is released: the DOM is the preview, and the drop sends
  * the new slug order to the space API (switching the space to manual sort on the first drag).
  */
-function setupCardDrag(space) {
-  const container = $('#article .cards');
-  if (!container) return;
-  const cardsIn = () => [...container.querySelectorAll('.card[data-slug]')];
+function setupCardDrag(space, container: HTMLElement) {
+  const parentSlug = container.dataset.parent || null;
+  const cardsIn = () => [...container.children].filter((child): child is HTMLElement =>
+    child instanceof HTMLElement && child.classList.contains('space-page-card'));
   let swallowClick = false;
 
   // A drag ends with a click on the link under the pointer; swallow exactly that one, and never let
   // a tap on the grip navigate.
   container.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+    if (target.closest?.('.cards') !== container) return;
     if (target.closest?.('.card-grip')) { e.preventDefault(); e.stopPropagation(); return; }
     if (!swallowClick) return;
     e.preventDefault();
@@ -2165,8 +2196,9 @@ function setupCardDrag(space) {
   container.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const target = e.target as HTMLElement;
-    const card = target.closest?.('.card[data-slug]');
-    if (!card) return;
+    if (target.closest?.('.cards') !== container || target.closest?.('.card-expand')) return;
+    const card = target.closest?.('.space-page-card[data-slug]') as HTMLElement | null;
+    if (!card || card.parentElement !== container) return;
     const grip = target.closest?.('.card-grip');
     if (!grip && e.pointerType && e.pointerType !== 'mouse') return;
     if (grip) e.preventDefault();
@@ -2266,12 +2298,12 @@ function setupCardDrag(space) {
       const order: string[] = [];
       for (const child of container.children) {
         if (child === placeholder) order.push(card.dataset.slug);
-        else if (child !== card && child.classList && child.classList.contains('card')) order.push(child.dataset.slug);
+        else if (child !== card && child instanceof HTMLElement && child.classList.contains('card')) order.push(child.dataset.slug);
       }
       cleanup(true);
       if (ev.type !== 'pointercancel' && order.length) {
         const current = spacePages(space.slug, null).map(p => p.slug);
-        saveSpaceOrder(space, buildSpaceOrder(space.slug, null, order), buildSpaceOrder(space.slug, null, current));
+        saveSpaceOrder(space, buildSpaceOrder(space.slug, parentSlug, order), buildSpaceOrder(space.slug, null, current));
       }
     };
 
