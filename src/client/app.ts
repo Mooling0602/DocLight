@@ -1615,6 +1615,7 @@ async function refreshTree() {
     const tree = await api<TreeResponse>('tree');
     S.spaces = tree.spaces || S.spaces;
     S.pages = tree.pages || S.pages;
+    pruneExpandedSpaceCards();
     // The space index renders `sort`, so it has to point at the refetched record, not the old one.
     if (S.space) S.space = S.spaces.find(s => s.slug === S.space.slug) || S.space;
   } catch (err) {
@@ -1765,6 +1766,7 @@ async function slugSpaceFlow(space) {
     // Pages reference their space by slug, so the whole tree has to follow the rename.
     const newSlug = updated.slug;
     S.pages.forEach(p => { if (p.space === old) p.space = newSlug; });
+    pruneExpandedSpaceCards();
     if (S.page?.space === old) S.page.space = newSlug;
     const i = S.spaces.findIndex(s => s.slug === old);
     if (i >= 0) S.spaces[i] = updated;
@@ -1800,6 +1802,7 @@ async function deleteSpaceFlow(space) {
   try {
     const r = await api<DeleteSpaceResponse>('spaces/' + encodeURIComponent(space.slug), { method: 'DELETE' });
     S.pages = S.pages.filter(p => p.space !== space.slug);
+    pruneExpandedSpaceCards();
     S.spaces = S.spaces.filter(s => s.slug !== space.slug);
     toast(r.removedPages.length ? `已删除空间及 ${r.removedPages.length} 个页面` : '已删除空间');
     if (S.page && S.page.space === space.slug) { S.page = null; navigate('/'); }
@@ -1894,6 +1897,7 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     S.pages.forEach(p => { if (p.parent === old) p.parent = newSlug; });
     const i = S.pages.findIndex(p => p.slug === old);
     if (i >= 0) { S.pages[i].slug = newSlug; S.pages[i].updatedAt = updated.updatedAt; }
+    pruneExpandedSpaceCards();
     await refreshTree();          // slug is the order's tie-break, so the rank can move
     toast('页面路径已更新 ✓');
     if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(newSlug)); }
@@ -1955,6 +1959,7 @@ async function moveFlow(pg: PageMeta | null = S.page) {
       });
       const i = S.pages.findIndex(p => p.slug === pg.slug);
       if (i >= 0) { S.pages[i].space = updated.space; S.pages[i].parent = updated.parent; }
+      pruneExpandedSpaceCards();
       // The moved page kept its old array slot, which reflects the *source* space's order; only
       // the server puts it in the right place among its new siblings.
       await refreshTree();
@@ -1986,6 +1991,7 @@ async function deleteFlow(pg: PageMeta | null = S.page) {
     await api('pages/' + encodeURIComponent(pg.slug), { method: 'DELETE' });
     const doomed = new Set([pg.slug, ...descendantSlugsOf(pg.slug)]);
     S.pages = S.pages.filter(p => !doomed.has(p.slug));
+    pruneExpandedSpaceCards();
     toast(kidCount ? `已删除 ${kidCount + 1} 个页面` : '已删除');
     if (S.page && doomed.has(S.page.slug)) { S.page = null; navigate('/'); }
     else {
@@ -2062,6 +2068,14 @@ function renderHome() {
 
 // Space-index expansion is independent from the sidebar and lasts for this browser session.
 const expandedSpaceCards = new Set<string>();
+const spaceCardKey = (space: string, slug: string) => JSON.stringify([space, slug]);
+
+/** Drop expansion state for pages removed, renamed, or moved to another space. */
+function pruneExpandedSpaceCards(): void {
+  if (!expandedSpaceCards.size) return;
+  const live = new Set(S.pages.map(p => spaceCardKey(p.space, p.slug)));
+  for (const key of expandedSpaceCards) if (!live.has(key)) expandedSpaceCards.delete(key);
+}
 
 function renderSpace(space) {
   S.page = null; S.space = space;
@@ -2077,26 +2091,36 @@ function renderSpace(space) {
   el.dirtyPill.hidden = true;
   el.editor.innerHTML = '';
 
-  const tops = spacePages(space.slug, null);
+  const childrenByParent = new Map<string | null, PageMeta[]>();
+  for (const page of S.pages as PageMeta[]) {
+    if (page.space !== space.slug) continue;
+    const parent = page.parent || null;
+    const siblings = childrenByParent.get(parent) || [];
+    siblings.push(page);
+    childrenByParent.set(parent, siblings);
+  }
+  const tops = childrenByParent.get(null) || [];
   // Manual ordering is a write: locked spaces and the read-only built-in template get no grips.
   const canSort = !pageContentLocked(space) || devSourceEditable(space);
   let cardGroupId = 0;
   const renderCards = (pages, ancestors = new Set<string>()) => pages.map(p => {
     if (ancestors.has(p.slug)) return '';
-    const children = spacePages(space.slug, p.slug).filter(child => !ancestors.has(child.slug) && child.slug !== p.slug);
-    const key = JSON.stringify([space.slug, p.slug]);
+    const children = (childrenByParent.get(p.slug) || []).filter(child => !ancestors.has(child.slug) && child.slug !== p.slug);
+    const key = spaceCardKey(space.slug, p.slug);
     const open = children.length > 0 && expandedSpaceCards.has(key);
     const groupId = `space-card-children-${cardGroupId++}`;
-    const nextAncestors = new Set(ancestors); nextAncestors.add(p.slug);
-    return `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
+    ancestors.add(p.slug);
+    const html = `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
               ${canSort ? `<span class="card-grip" role="button" aria-label="拖动排序" title="拖动排序"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/></g></svg></span>` : ''}
               <a class="card-link" data-nav href="${esc(canonicalPath(p.slug))}" draggable="false">
                 <span class="t">${esc(p.title)}</span>
                 <span class="s">${children.length ? children.length + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
               </a>
               ${children.length ? `<button class="card-expand" type="button" aria-expanded="${open}" aria-controls="${groupId}" aria-label="${open ? '折叠' : '展开'}${esc(p.title)}的子页面"><span aria-hidden="true">${open ? '▾' : '▸'}</span> ${open ? '收起' : '查看'} ${children.length} 个子页面</button>
-                <div id="${groupId}" class="cards card-children" data-parent="${esc(p.slug)}"${open ? '' : ' hidden'}>${open ? renderCards(children, nextAncestors) : ''}</div>` : ''}
+                <div id="${groupId}" class="cards card-children" data-parent="${esc(p.slug)}"${open ? '' : ' hidden'}>${open ? renderCards(children, ancestors) : ''}</div>` : ''}
             </div>`;
+    ancestors.delete(p.slug);
+    return html;
   }).join('');
   const cards = renderCards(tops);
 
@@ -2144,7 +2168,7 @@ function renderSpace(space) {
   article.querySelectorAll('.card-expand').forEach(button => button.addEventListener('click', () => {
     const card = button.parentElement as HTMLElement;
     const slug = card.dataset.slug;
-    const key = JSON.stringify([space.slug, slug]);
+    const key = spaceCardKey(space.slug, slug);
     if (expandedSpaceCards.has(key)) expandedSpaceCards.delete(key); else expandedSpaceCards.add(key);
     renderSpace(space);
     const current = [...article.querySelectorAll<HTMLElement>('.space-page-card')].find(item => item.dataset.slug === slug);
@@ -2165,6 +2189,47 @@ function renderSpace(space) {
    Manual card ordering (drag)
    ============================================================ */
 const CARD_DRAG_THRESHOLD = 4;
+
+/** Scroll a drag container near its vertical edges and recompute the drop target after each step. */
+function createDragAutoScroller(container: HTMLElement, onScroll: (x: number, y: number) => void) {
+  let x = 0, y = 0, frame = 0, lastTime = 0, stopped = false;
+  const speed = () => {
+    const rect = container.getBoundingClientRect();
+    const top = Math.max(0, rect.top), bottom = Math.min(window.innerHeight, rect.bottom);
+    const edge = Math.min(56, (bottom - top) / 3);
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (edge <= 0 || maxScroll <= 0) return 0;
+    if (y < top + edge && container.scrollTop > 0) return -Math.min(1, (top + edge - y) / edge);
+    if (y > bottom - edge && container.scrollTop < maxScroll) return Math.min(1, (y - bottom + edge) / edge);
+    return 0;
+  };
+  const tick = (time: number) => {
+    frame = 0;
+    if (stopped) return;
+    const direction = speed();
+    if (!direction) { lastTime = 0; return; }
+    const elapsed = lastTime ? Math.min(50, Math.max(0, time - lastTime)) : 1000 / 60;
+    lastTime = time;
+    const before = container.scrollTop;
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    container.scrollTop = Math.max(0, Math.min(maxScroll, before + direction * 18 * elapsed / (1000 / 60)));
+    if (container.scrollTop === before) { lastTime = 0; return; }
+    onScroll(x, y);
+    if (!stopped && speed()) frame = requestAnimationFrame(tick);
+    else lastTime = 0;
+  };
+  return {
+    update(nextX: number, nextY: number) {
+      x = nextX; y = nextY;
+      if (!stopped && !frame && speed()) frame = requestAnimationFrame(tick);
+    },
+    stop() {
+      stopped = true;
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+    },
+  };
+}
 
 /**
  * Pointer-driven reordering for the space index cards, in the spirit of Yuque's card lists: the
@@ -2210,8 +2275,11 @@ function setupCardDrag(space, container: HTMLElement) {
     let active = false;
     let placeholder = null;
     let offsetX = 0, offsetY = 0;
+    const scrollArea = container.closest('.scroll-area') as HTMLElement | null;
+    const autoScroll = scrollArea ? createDragAutoScroller(scrollArea, (x, y) => placePlaceholder(x, y)) : null;
 
     const cleanup = (restore) => {
+      autoScroll?.stop();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
@@ -2290,6 +2358,7 @@ function setupCardDrag(space, container: HTMLElement) {
       card.style.left = (ev.clientX - offsetX) + 'px';
       card.style.top = (ev.clientY - offsetY) + 'px';
       placePlaceholder(ev.clientX, ev.clientY);
+      autoScroll?.update(ev.clientX, ev.clientY);
     };
 
     const onUp = (ev) => {
@@ -2418,7 +2487,7 @@ function setupSidebarDrag() {
     let targetRow = null;
     let dropBefore = false;
     let lastX = startX, lastY = startY;
-    let scrollRaf = 0;
+    const autoScroll = createDragAutoScroller(el.list as HTMLElement, (x, y) => placeMarker(x, y));
 
     const touchBlocker = (ev) => { if (active) ev.preventDefault(); };
     // A slow press on the handle can still raise the browser's callout mid-drag; suppress it while
@@ -2431,7 +2500,7 @@ function setupSidebarDrag() {
       window.removeEventListener('pointercancel', onUp);
       document.removeEventListener('touchmove', touchBlocker);
       document.removeEventListener('contextmenu', blockMenu, true);
-      if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0; }
+      autoScroll.stop();
       if (ghost) { ghost.remove(); ghost = null; }
       if (marker) { marker.remove(); marker = null; }
       if (highlightRow) { highlightRow.classList.remove('is-drop-target'); highlightRow = null; }
@@ -2454,18 +2523,6 @@ function setupSidebarDrag() {
       marker.setAttribute('aria-hidden', 'true');
       el.list.appendChild(marker);
 
-      // Holding the pointer near an edge keeps scrolling the list, like Yuque's tree does.
-      const scrollStep = () => {
-        if (!active) return;
-        const rect = el.list.getBoundingClientRect();
-        const edge = 36;
-        let moved = false;
-        if (lastY < rect.top + edge && el.list.scrollTop > 0) { el.list.scrollTop -= 10; moved = true; }
-        else if (lastY > rect.bottom - edge) { el.list.scrollTop += 10; moved = true; }
-        if (moved) placeMarker(lastX, lastY);
-        scrollRaf = requestAnimationFrame(scrollStep);
-      };
-      scrollRaf = requestAnimationFrame(scrollStep);
     };
 
     let highlightRow = null;
@@ -2508,7 +2565,7 @@ function setupSidebarDrag() {
       const indent = anchorEl ? anchorEl.getBoundingClientRect().left - listRect.left : 24;
       const left = Math.max(12, indent - 2);
       marker.hidden = false;
-      marker.style.top = (dropBefore ? edgeRect.top : edgeRect.bottom) - listRect.top - 1 + 'px';
+      marker.style.top = (dropBefore ? edgeRect.top : edgeRect.bottom) - listRect.top + el.list.scrollTop - 1 + 'px';
       marker.style.left = left + 'px';
       marker.style.width = Math.max(24, listRect.width - left - 10) + 'px';
       if (highlightRow !== edge) {
@@ -2528,6 +2585,7 @@ function setupSidebarDrag() {
       lastY = ev.clientY;
       if (ghost) { ghost.style.left = lastX + 'px'; ghost.style.top = lastY + 'px'; }
       placeMarker(lastX, lastY);
+      autoScroll.update(lastX, lastY);
     };
 
     const onUp = (ev) => {

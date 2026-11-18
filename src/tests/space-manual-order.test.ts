@@ -41,9 +41,10 @@ interface Harness {
   puts: { url: string; body: any }[];
 }
 
-async function boot(url: string, locked = false, extraPages: any[] = []): Promise<Harness> {
+async function boot(url: string, locked = false, extraPages: any[] = [], configureWindow?: (window: any) => void): Promise<Harness> {
   const dom = new JSDOM(html, { url, pretendToBeVisual: true, runScripts: 'outside-only' });
   const window = dom.window as any;
+  configureWindow?.(window);
   const document = window.document as Document;
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   Object.defineProperty(window, 'localStorage', {
@@ -95,6 +96,23 @@ async function boot(url: string, locked = false, extraPages: any[] = []): Promis
 }
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Advance animation frames deterministically without a browser layout engine. */
+function mockFrames(window: any) {
+  let nextId = 1, now = 0;
+  const pending = new Map<number, (time: number) => void>();
+  window.requestAnimationFrame = (callback: (time: number) => void) => { const id = nextId++; pending.set(id, callback); return id; };
+  window.cancelAnimationFrame = (id: number) => pending.delete(id);
+  return {
+    step(count = 1) {
+      for (let i = 0; i < count; i++) {
+        now += 1000 / 60;
+        const callbacks = [...pending.values()]; pending.clear();
+        callbacks.forEach(callback => callback(now));
+      }
+    },
+  };
+}
 
 /** Give the cards a vertical layout that jsdom does not compute on its own. */
 function layoutCards(document: Document): void {
@@ -232,6 +250,32 @@ async function main(): Promise<void> {
     window.close();
   }
 
+  /* ---- Refreshing the tree removes expansion state for deleted and recreated pages. ---- */
+  {
+    const { window, document, pages } = await boot('http://localhost:4173/default', false, [
+      { slug: 'alpha_child', space: 'default', parent: 'alpha', title: '子页', createdAt: 1, updatedAt: 1 },
+    ]);
+    await wait(120);
+    const toggle = () => document.querySelector<HTMLButtonElement>('.space-page-card[data-slug="alpha"] > .card-expand')!;
+    toggle().click();
+    const changeSort = async (value: string) => {
+      const select = document.querySelector<HTMLSelectElement>('#sp-sort')!;
+      select.value = value;
+      select.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await wait(160);
+    };
+    await changeSort('created_asc');
+    assert.equal(toggle().getAttribute('aria-expanded'), 'true', '页面仍存在时刷新保留展开状态');
+    const removed = pages.filter(page => page.slug === 'alpha' || page.slug === 'alpha_child');
+    for (const page of removed) pages.splice(pages.indexOf(page), 1);
+    await changeSort('updated_desc');
+    assert.equal(document.querySelector('.space-page-card[data-slug="alpha"]'), null);
+    pages.push(...removed);
+    await changeSort('title_asc');
+    assert.equal(toggle().getAttribute('aria-expanded'), 'false', '删除后重建同名页面不应继承旧展开状态');
+    window.close();
+  }
+
   /* ---- Read-only spaces still expose expansion but never sorting. ---- */
   {
     const { window, document } = await boot('http://localhost:4173/default', true, [
@@ -241,6 +285,107 @@ async function main(): Promise<void> {
     document.querySelector<HTMLButtonElement>('.space-page-card[data-slug="alpha"] > .card-expand')!.click();
     assert.ok(document.querySelector('.space-page-card[data-slug="locked_child"] > .card-link'), '只读空间也可展开子页面');
     assert.equal(document.querySelectorAll('#article .card-grip').length, 0, '只读空间的子页面也不能拖动');
+    window.close();
+  }
+
+  /* ---- A stationary pointer near a card viewport edge scrolls and updates the drop slot. ---- */
+  {
+    let frames!: ReturnType<typeof mockFrames>;
+    const { window, document, puts } = await boot('http://localhost:4173/default', false, [
+      ...Array.from({ length: 5 }, (_, i) => ({ slug: `extra_${i}`, space: 'default', parent: null, title: `额外${i}`, createdAt: 0, updatedAt: 0 })),
+    ], w => { frames = mockFrames(w); });
+    await wait(120);
+    const area = document.querySelector<HTMLElement>('.scroll-area')!;
+    Object.defineProperties(area, { clientHeight: { value: 300 }, scrollHeight: { value: 1400 } });
+    area.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    [...document.querySelectorAll<HTMLElement>('#article .space-page-card')].forEach((card, index) => {
+      card.getBoundingClientRect = () => {
+        const top = index * 120 - area.scrollTop;
+        return { left: 20, top, right: 320, bottom: top + 100, width: 300, height: 100, x: 20, y: top, toJSON() {} } as DOMRect;
+      };
+    });
+    const card = document.querySelector<HTMLElement>('.space-page-card[data-slug="alpha"]')!;
+    pointer(window, 'pointerdown', 30, 20, card.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 300, 295, window);
+    const slot = () => document.querySelector('#article .card-placeholder')?.nextElementSibling?.getAttribute('data-slug');
+    const before = slot();
+    frames.step(12);
+    assert.ok(area.scrollTop > 0, '指针停在底部时内容区应持续向下滚动');
+    assert.notEqual(slot(), before, '内容滚动后应更新卡片落点');
+    pointer(window, 'pointermove', 300, 150, window);
+    const centeredAt = area.scrollTop;
+    frames.step(5);
+    assert.equal(area.scrollTop, centeredAt, '指针离开边缘后应停止滚动');
+    area.scrollTop = 1100;
+    pointer(window, 'pointermove', 300, 295, window);
+    frames.step(5);
+    assert.equal(area.scrollTop, 1100, '滚动到底后不得越界');
+    pointer(window, 'pointercancel', 300, 295, window);
+    const stoppedAt = area.scrollTop;
+    frames.step(5);
+    assert.equal(area.scrollTop, stoppedAt, '取消拖拽后必须停止自动滚动');
+    assert.equal(puts.length, 0, '取消拖拽不得提交排序');
+
+    area.scrollTop = 150;
+    const third = document.querySelector<HTMLElement>('.space-page-card[data-slug="gamma"]')!;
+    pointer(window, 'pointerdown', 30, 110, third.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 30, 1, window);
+    frames.step(8);
+    assert.ok(area.scrollTop < 150, '指针停在顶部时内容区应向上滚动');
+    pointer(window, 'pointerup', 30, 1, window);
+    const releasedAt = area.scrollTop;
+    frames.step(5);
+    assert.equal(area.scrollTop, releasedAt, '放下后必须停止自动滚动');
+    await wait(160);
+    assert.equal(puts.length, 1, '自动滚动后放下应正常提交排序');
+    window.close();
+  }
+
+  /* ---- Sidebar autoscroll updates both the target and its content-relative indicator. ---- */
+  {
+    let frames!: ReturnType<typeof mockFrames>;
+    const { window, document, puts } = await boot('http://localhost:4173/default', false, [
+      ...Array.from({ length: 5 }, (_, i) => ({ slug: `side_${i}`, space: 'default', parent: null, title: `目录${i}`, createdAt: 0, updatedAt: 0 })),
+    ], w => { frames = mockFrames(w); });
+    await wait(120);
+    const list = document.querySelector<HTMLElement>('#page-list')!;
+    Object.defineProperties(list, { clientHeight: { value: 200 }, scrollHeight: { value: 800 } });
+    list.getBoundingClientRect = () => ({ left: 0, top: 0, right: 260, bottom: 200, width: 260, height: 200, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    [...list.querySelectorAll<HTMLElement>('.tree-row')].forEach((row, index) => {
+      row.getBoundingClientRect = () => {
+        const top = index * 80 - list.scrollTop;
+        return { left: 0, top, right: 260, bottom: top + 60, width: 260, height: 60, x: 0, y: top, toJSON() {} } as DOMRect;
+      };
+    });
+    const first = list.querySelector<HTMLElement>('.tree-row')!;
+    pointer(window, 'pointerdown', 20, 20, first.querySelector('.tree-grip')!);
+    pointer(window, 'pointermove', 20, 195, window);
+    const initialTarget = list.querySelector('.tree-row.is-drop-target')?.getAttribute('data-slug');
+    frames.step(12);
+    assert.ok(list.scrollTop > 0, '侧边栏底部应自动滚动');
+    const target = list.querySelector<HTMLElement>('.tree-row.is-drop-target')!;
+    assert.notEqual(target.dataset.slug, initialTarget, '滚动时侧栏目标行应更新');
+    const indicator = list.querySelector<HTMLElement>('.tree-drop')!;
+    const targetRect = target.getBoundingClientRect();
+    const markerTop = parseFloat(indicator.style.top);
+    assert.ok(Math.abs(markerTop - (targetRect.top + list.scrollTop - 1)) < 1 || Math.abs(markerTop - (targetRect.bottom + list.scrollTop - 1)) < 1, '插入线位置必须包含滚动偏移');
+    pointer(window, 'pointercancel', 20, 195, window);
+    const stoppedAt = list.scrollTop;
+    frames.step(5);
+    assert.equal(list.scrollTop, stoppedAt, '取消侧栏拖拽应停止滚动');
+    assert.equal(puts.length, 0);
+    list.scrollTop = 160;
+    const third = list.querySelector<HTMLElement>('.tree-row[data-slug="gamma"]')!;
+    pointer(window, 'pointerdown', 20, 20, third.querySelector('.tree-grip')!);
+    pointer(window, 'pointermove', 20, 1, window);
+    frames.step(8);
+    assert.ok(list.scrollTop < 160, '侧边栏顶部应自动向上滚动');
+    pointer(window, 'pointerup', 20, 1, window);
+    const releasedAt = list.scrollTop;
+    frames.step(5);
+    assert.equal(list.scrollTop, releasedAt, '侧边栏放下后应停止滚动');
+    await wait(160);
+    assert.equal(puts.length, 1, '侧边栏自动滚动后放下应提交顺序');
     window.close();
   }
 
@@ -385,6 +530,15 @@ async function main(): Promise<void> {
     };
     assert.match(rule('.card-grip'), /position:\s*absolute/, '拖动手柄应固定在卡片角上');
     assert.match(rule('.card-grip'), /touch-action:\s*none/, '触摸拖动时不应触发滚动');
+    assert.match(rule('body.is-card-dragging .article'), /animation:\s*none/, '拖动时文章入场动画不能改变固定定位参照');
+    assert.match(rule('body.is-card-dragging .article'), /transform:\s*none\s*!important/, '拖动时文章不得建立固定定位包含块');
+    const ancestorRule = rule('body.is-card-dragging .card:has(.card.is-dragging)');
+    assert.match(ancestorRule, /transform:\s*none\s*!important/, '拖动时祖先卡片不得建立固定定位包含块');
+    assert.match(ancestorRule, /transition:\s*none\s*!important/, '祖先变换不得在拖动期间继续过渡');
+    const dom = new JSDOM(`<style>${css}</style><body class="is-card-dragging"><div class="card" id="ancestor"><div class="card is-dragging"></div></div><div class="card" id="other"></div></body>`);
+    assert.equal(dom.window.getComputedStyle(dom.window.document.querySelector('#ancestor')!).transform, 'none', '拖动中祖先的 transform 应为 none');
+    assert.equal(dom.window.document.querySelector('#other')!.matches('body.is-card-dragging .card:has(.card.is-dragging)'), false, '无关卡片不受祖先规则影响');
+    dom.window.close();
     assert.match(rule('.card.is-dragging'), /position:\s*fixed/, '拖动中的卡片应脱离文档流跟随指针');
     assert.match(rule('.card.is-dragging'), /box-shadow:\s*var\(--shadow-lg\)/, '拖动中的卡片应有抬起阴影');
     assert.match(rule('.card-placeholder'), /border:\s*1.5px dashed/, '放置位应使用虚线占位');

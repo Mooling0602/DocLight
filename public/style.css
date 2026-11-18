@@ -895,6 +895,9 @@ body.is-row-dragging, body.is-row-dragging * { cursor: grabbing; user-select: no
 .card-grip:hover { color: var(--text); background: var(--bg-hover); }
 .card-grip:active { cursor: grabbing; }
 @media (hover: none) { .card-grip { opacity: 1; } }
+/* A transformed ancestor would rebase fixed drag coordinates away from the viewport. */
+body.is-card-dragging .article { animation: none; transform: none !important; }
+body.is-card-dragging .card:has(.card.is-dragging) { transform: none !important; transition: none !important; }
 .card.is-dragging {
   position: fixed; z-index: 80; margin: 0;
   pointer-events: none; cursor: grabbing;
@@ -910,6 +913,7 @@ body.is-row-dragging, body.is-row-dragging * { cursor: grabbing; user-select: no
 }
 .cards.is-sorting, .cards.is-sorting * { user-select: none; }
 body.is-card-dragging { cursor: grabbing; }
+body.is-card-dragging .scroll-area { scroll-behavior: auto; }
 body.is-card-dragging #article a { cursor: grabbing; }
 .card .s { font-size: 12px; color: var(--text-3); }
 .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
