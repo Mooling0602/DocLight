@@ -159,9 +159,10 @@ function createTurndown(): TurndownService {
     replacement: (content, node, options) => {
       const parent = node.parentElement!;
       const index = Array.from(parent.children).indexOf(node);
-      const start = parent.getAttribute('start');
+      const start = parent.getAttribute('start')?.trim() ?? '';
+      const startNumber = /^[+-]?\d+$/.test(start) ? Number(start) : 1;
       const prefix = parent.nodeName === 'OL'
-        ? `${(start ? Number(start) : 1) + index}.  `
+        ? `${(Number.isSafeInteger(startNumber) && startNumber >= 0 && startNumber + index <= 999999999 ? startNumber : 1) + index}.  `
         : `${options.bulletListMarker}   `;
       const item = content.replace(/^\n+|\n+$/g, '').replace(/\n/g, `\n${' '.repeat(prefix.length)}`);
       return prefix + item + (node.nextElementSibling ? '\n\n' : '');
@@ -231,13 +232,24 @@ function createTurndown(): TurndownService {
  * holds a list at `>` depth) are kept in front: the padding is inside the quoted content.
  */
 function tidyListMarkers(markdown: string): string {
-  let inFence = false;
+  let fence: { char: string; length: number } | null = null;
   return markdown.split('\n').map((line) => {
+    // Turndown indents fences in lists; remove container prefixes only for detection, never
+    // from the saved line. A closing fence must match the opening character and length.
+    const fenceLine = line.replace(/^(?:[ \t]*>[ \t]?)*[ \t]*/, '');
+    if (fence) {
+      const close = /^(`+|~+)[ \t]*$/.exec(fenceLine);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+      return line;
+    }
+    const open = /^(?:(?:[-*+]|\d+\.)[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(fenceLine);
+    if (open && (open[1][0] !== '`' || !open[2].includes('`'))) {
+      fence = { char: open[1][0], length: open[1].length };
+      return line;
+    }
     const quoted = /^((?: {0,3}> ?)+)/.exec(line);
     const prefix = quoted ? quoted[1] : '';
     const body = line.slice(prefix.length);
-    if (/^\s{0,3}(```|~~~)/.test(body)) { inFence = !inFence; return line; }
-    if (inFence) return line;
     return prefix + body
       .replace(/^(\s*)([-*+]|\d+\.)\s{1,}/, '$1$2 ')
       // The GFM task-list rule emits `- [x]  text`; collapse that extra space too.

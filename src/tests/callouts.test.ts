@@ -312,6 +312,18 @@ for (const source of [
   }
 }
 
+// Invalid HTML list starts must not turn the list and its callout into plain text.
+{
+  const card = '<div class="callout callout-note"><div class="callout-title">注意</div><p>内</p></div>';
+  for (const start of ['x', '1.5', 'Infinity', '999999999999999999999']) {
+    const saved = htmlToMarkdown(`<ol start="${start}"><li>甲</li><li>乙${card}</li></ol>`);
+    assert.match(saved, /^1\. 甲/, `${start}: 无效起始值应回退到 1`);
+    assert.equal(new JSDOM(render(saved)).window.document.querySelectorAll('ol > li').length, 2);
+    assert.equal(new JSDOM(render(saved)).window.document.querySelectorAll('.callout-note').length, 1);
+    assert.equal(roundTrip(saved), saved);
+  }
+}
+
 /* ---------------------------------------------------- visual parity with GitHub
    The card deliberately imitates GitHub's `.markdown-alert` CSS: a 4px coloured left bar,
    no background, no rounded corners, a 500-weight coloured title and an 8px icon gap.
@@ -335,6 +347,15 @@ for (const source of [
   assert.equal(labels.length, 2, '保存后列表标签应为段落');
   assert.equal(doc.window.getComputedStyle(labels[0]).marginTop, '0px', '标注块列表的标签不应增加顶部边距');
   assert.equal(doc.window.getComputedStyle(labels[0]).marginBottom, '0px', '单段标签不应增加底部边距');
+  const blocks = new JSDOM(`<style>${css}</style><div class="article"><ul>
+    <li><p>代码</p><pre>内容</pre></li><li><p>引用</p><blockquote>内容</blockquote></li>
+    <li><p>段落一</p><p>段落二</p></li><li><p>标注</p><div class="callout"></div></li>
+    </ul></div>`);
+  const blockLabels = blocks.window.document.querySelectorAll('li > p:first-child');
+  for (const index of [0, 1, 3]) {
+    assert.equal(blocks.window.getComputedStyle(blockLabels[index]).marginBottom, '0px', '非段落块前的标签不应增加底部边距');
+  }
+  assert.ok(parseFloat(blocks.window.getComputedStyle(blockLabels[2]).marginBottom) > 0, '相邻段落应保留段间距');
   const ordinary = doc.window.document.querySelector('.article > ul:last-child > li > p')!;
   assert.ok(parseFloat(doc.window.getComputedStyle(ordinary).marginTop) > 0, '普通松散列表的段落样式不应改变');
 

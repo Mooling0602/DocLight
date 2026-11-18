@@ -409,8 +409,7 @@ li { margin: .34em 0; }
 li::marker { color: var(--accent); }
 /* Saving a callout makes sibling items loose; avoid adding paragraph margins to their labels. */
 :is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:first-child { margin-top: 0; }
-:is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:only-child,
-:is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:first-child:has(+ :is(ul, ol, .callout)) { margin-bottom: 0; }
+:is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:first-child:not(:has(+ p)) { margin-bottom: 0; }
 
 blockquote {
   margin: 1.2em 0; padding: .8em 1.15em;
