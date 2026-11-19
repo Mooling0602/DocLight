@@ -1113,6 +1113,7 @@ function renderArticle(page) {
   el.clusterEdit.hidden = true;
   el.clusterView.hidden = pageContentLocked(space);
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
   renderAuthUI();
@@ -1132,6 +1133,11 @@ let markdownDraft = '';
 let visualBaseline = '';
 let savedVisualRange: Range | null = null;
 let visualGeneration = 0;
+
+function clearVisualSelection() {
+  savedVisualRange = null;
+  visualGeneration++;
+}
 
 function rememberVisualSelection() {
   const sel = getSelection();
@@ -1201,8 +1207,7 @@ function renderModeToggle(mode: EditMode) {
  */
 function setEditMode(mode: EditMode, focus = true) {
   if (S.editMode === mode) return;
-  savedVisualRange = null;
-  visualGeneration++;
+  clearVisualSelection();
   // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
   const markdown = currentMarkdown();
   markdownDraft = markdown;
@@ -1258,8 +1263,7 @@ function enterEdit(focus = true) {
   if (S.page.unclosedFrontMatter) { toast('页面开头的元数据围栏未闭合，请先检查原始文件；为保护内容，暂不能编辑。', 6000); return; }
   if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
-  savedVisualRange = null;
-  visualGeneration++;
+  clearVisualSelection();
   // The editor always goes full width, unaffected by the reading-view cap
   el.article.classList.remove('is-reading');
   el.article.hidden = true;
@@ -2112,6 +2116,7 @@ function renderHome() {
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = true;
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
   if (builtInConflict) {
@@ -2182,6 +2187,7 @@ function renderSpace(space) {
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = true;
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
   const childrenByParent = new Map<string | null, PageMeta[]>();

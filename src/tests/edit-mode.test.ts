@@ -315,6 +315,16 @@ async function main(): Promise<void> {
   assert.match($('#toasts').textContent || '', /元数据围栏未闭合/);
   assert.equal(puts.length, 4, '阻止编辑时不得提交正文');
 
+  // All views that discard the visual DOM must also release its saved selection.
+  const clientSource = fs.readFileSync(path.join(root, 'src/client/app.ts'), 'utf8');
+  for (const view of ['renderArticle', 'renderHome', 'renderSpace']) {
+    const start = clientSource.indexOf(`function ${view}(`);
+    assert.notEqual(start, -1);
+    const end = clientSource.indexOf("el.editor.innerHTML = '';", start);
+    assert.notEqual(end, -1);
+    assert.match(clientSource.slice(start, end), /clearVisualSelection\(\);\s*$/, `${view} 应在清空编辑区时释放选区`);
+  }
+
   // The source editor belongs to the page rather than a bordered, vertically scrolling box.
   const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');
   const cssRule = (selector: string) => {
