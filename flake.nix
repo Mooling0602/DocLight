@@ -21,7 +21,7 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "doclight";
-          version = "1.2.0";
+          version = "1.3.0";
           src = self;
 
           # Hashes are taken straight from the `integrity` fields of package-lock.json,
