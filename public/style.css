@@ -21,6 +21,11 @@
   --accent-ink: #ffffff;
   --accent-line: rgba(84, 87, 207, .38);
   --accent-soft-u: rgba(84, 87, 207, .55);
+  --callout-note: #0969da;      --callout-note-line: #0969da;
+  --callout-tip: #1a7f37;       --callout-tip-line: #1a7f37;
+  --callout-important: #8250df; --callout-important-line: #8250df;
+  --callout-warning: #9a6700;   --callout-warning-line: #9a6700;
+  --callout-caution: #d1242f;   --callout-caution-line: #cf222e;
   --danger: #d5484c;
   --danger-soft: rgba(213, 72, 76, .1);
   --code-bg: #eceef4;
@@ -51,6 +56,11 @@
   --accent-ink: #101120;
   --accent-line: rgba(131, 134, 255, .4);
   --accent-soft-u: rgba(131, 134, 255, .6);
+  --callout-note: #4493f8;      --callout-note-line: #1f6feb;
+  --callout-tip: #3fb950;       --callout-tip-line: #238636;
+  --callout-important: #ab7df8; --callout-important-line: #8957e5;
+  --callout-warning: #d29922;   --callout-warning-line: #9e6a03;
+  --callout-caution: #f85149;   --callout-caution-line: #da3633;
   --danger: #ff7074;
   --danger-soft: rgba(255, 112, 116, .13);
   --code-bg: #22252f;
@@ -133,22 +143,12 @@ button { font: inherit; cursor: pointer; }
 .cluster { display: flex; align-items: center; gap: 8px; animation: fadein .18s ease; }
 
 .brand { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; color: var(--text); }
+/* Shares public/assets/favicon.svg with the browser tab icon; the relative URL keeps
+   the asset resolvable under DOCLIGHT_BASE_PATH without a server-side rewrite. */
 .brand-mark {
-  width: 24px; height: 24px; border-radius: 7px; flex: none;
-  background: linear-gradient(135deg, #6a6dff, #494bc9);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 2px 6px rgba(84,87,207,.35);
-  position: relative;
-}
-.brand-mark::after {
-  content: ""; position: absolute; inset: 6px 5px auto 5px; height: 2.6px; border-radius: 2px;
-  background:
-    linear-gradient(#fff 0 0) top/100% 100% no-repeat,
-    linear-gradient(#fff 0 0) center/70% 100% no-repeat,
-    linear-gradient(#fff 0 0) bottom/45% 100% no-repeat;
-  box-shadow: 0 0 0 transparent;
-  opacity: .95;
-  background-position: 0 0, 0 130%, 0 260%;
-  background-size: 100% 32%, 70% 32%, 45% 32%;
+  width: 24px; height: 24px; flex: none;
+  background: url(assets/favicon.svg) center / contain no-repeat;
+  filter: drop-shadow(0 2px 5px rgba(84,87,207,.32));
 }
 .brand-name { font-weight: 700; letter-spacing: -.015em; font-size: 16.5px; }
 
@@ -407,6 +407,9 @@ p { margin: .85em 0; color: var(--text); }
 ul, ol { padding-left: 1.45em; margin: .8em 0; }
 li { margin: .34em 0; }
 li::marker { color: var(--accent); }
+/* Saving a callout makes sibling items loose; avoid adding paragraph margins to their labels. */
+:is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:first-child { margin-top: 0; }
+:is(.article, #editor) :is(ul, ol):has(> li > .callout) > li > p:first-child:not(:has(+ p)) { margin-bottom: 0; }
 
 blockquote {
   margin: 1.2em 0; padding: .8em 1.15em;
@@ -416,6 +419,57 @@ blockquote {
   color: var(--text-2);
 }
 blockquote p { margin: .25em 0; }
+
+/* ---------- GitHub-style callouts (alerts)
+   Mirrors GitHub's own alert CSS (`.markdown-alert`): a 4px coloured left bar, transparent
+   background, no rounded corners, a 500-weight coloured title with an octicon, and 8px/16px
+   padding. Colours come from GitHub's Primer tokens, so the same Markdown looks the same
+   when pasted between the two. */
+.callout {
+  margin: 1.2em 0;
+  padding: 8px 16px;
+  border-left: 4px solid var(--callout-line);
+  color: inherit;
+}
+.callout-note      { --callout-accent: var(--callout-note);      --callout-line: var(--callout-note-line); }
+.callout-tip       { --callout-accent: var(--callout-tip);       --callout-line: var(--callout-tip-line); }
+.callout-important { --callout-accent: var(--callout-important); --callout-line: var(--callout-important-line); }
+.callout-warning   { --callout-accent: var(--callout-warning);   --callout-line: var(--callout-warning-line); }
+.callout-caution   { --callout-accent: var(--callout-caution);   --callout-line: var(--callout-caution-line); }
+.callout-title {
+  display: flex; align-items: center;
+  margin: 0 0 10px;
+  color: var(--callout-accent);
+  font-size: 1em; font-weight: 500; line-height: 1;
+}
+.callout-icon { flex: none; display: block; margin-right: 8px; }
+.callout p { margin: 0 0 10px; }
+.callout > :last-child { margin-bottom: 0; }
+
+/* ---------- Recommend footer (上一篇 / 下一篇)
+   Rendered at the bottom of an article when the space enables "自动按顺序推荐其他文章". The
+   order is the sidebar's depth-first order, so the cards walk the same sequence the tree does. */
+.page-nav {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin-top: 2.4em; padding-top: 1.6em;
+  border-top: 1px solid var(--border);
+}
+.page-nav-card {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 12px 16px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-elev);
+  transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+.article .page-nav-card { text-decoration: none; }
+.page-nav-card:hover { border-color: var(--accent-line); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.page-nav-card .dir { font-size: 12.5px; color: var(--text-3); }
+.page-nav-card .t { font-size: 14.5px; font-weight: 600; color: var(--accent); }
+.page-nav-card.next { grid-column: 2; text-align: right; }
+@media (max-width: 640px) {
+  .page-nav { grid-template-columns: 1fr; }
+  .page-nav-card.next { grid-column: auto; text-align: left; }
+}
 
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "JetBrains Mono", monospace;
@@ -477,23 +531,24 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   pointer-events: none;
 }
 
-/* Markdown source surface: shares the visual editor's metrics so hot-switching does not
-   jump. Monospace and a real scrollbar (content may be long and lines must not wrap away). */
-.source-editor {
-  display: block; width: 100%; min-height: 56vh;
-  font: 14px/1.75 ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
-  color: var(--text);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  padding: 16px 18px;
-  outline: none; resize: vertical;
-  tab-size: 2;
-  caret-color: var(--accent);
-  transition: border-color .2s ease, background-color .25s ease;
-}
-.source-editor:focus { border-color: var(--accent); }
-.source-editor::placeholder { color: var(--text-3); }
+/* A real code editor keeps line numbers, wrapping and the input surface in one layout. */
+.source-panel { min-width: 0; }
+.source-controls { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; margin-bottom: 8px; color: var(--text-3); font-size: 12px; }
+.source-controls .btn { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+.source-editor { min-width: 0; }
+.source-editor .cm-editor { min-height: 56vh; color: var(--text); font: 14px/1.75 ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace; }
+.source-editor .cm-editor.cm-focused { outline: none; }
+/* Let the surrounding page scroll vertically; the editor only scrolls sideways for long lines. */
+.source-editor .cm-scroller { overflow-x: auto; overflow-y: hidden; font: inherit; }
+.source-editor .cm-content { min-height: 56vh; padding: 8px 0; caret-color: var(--accent); }
+.source-editor .cm-line { padding: 0 10px; }
+/* Match the page background so horizontally scrolled text cannot show through the sticky gutter.
+   CodeMirror already aligns the gutter with content padding; extra vertical padding doubles it. */
+.source-editor .cm-editor .cm-gutters { background: var(--bg); color: var(--text-3); border: 0; }
+.source-editor .cm-lineNumbers .cm-gutterElement { padding: 0 10px; min-width: 3em; }
+.source-editor .cm-activeLine, .source-editor .cm-activeLineGutter { background: var(--accent-soft); }
+.source-editor .cm-placeholder { color: var(--text-3); }
+.source-editor .cm-cursor { border-left-color: var(--accent); }
 
 .edit-hint { font-size: 12.5px; color: var(--text-3); margin-top: 26px; }
 
@@ -716,10 +771,69 @@ svg.sf-badge { color: var(--text-3); }
      The selector must match .article.is-reading in specificity; a bare .article would lose to it. */
   .article.is-reading { max-width: none; }
   .reading-handle { display: none !important; }
+  .callout { break-inside: avoid; }
 }
 
 /* ---------- Tree sidebar / breadcrumb / space cards ---------- */
 .tree-row { display: flex; align-items: stretch; }
+/* Sidebar manual ordering: the grip on the left is the only drag surface, so pressing the row
+   itself stays a plain link tap and never raises the browser's own long-press menu. */
+.tree-grip {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--text-3);
+  cursor: grab;
+  opacity: 0;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  transition: opacity .14s ease, color .14s ease, background-color .14s ease;
+}
+.tree-row:hover .tree-grip, .tree-row:focus-within .tree-grip { opacity: 1; }
+.tree-grip:hover { color: var(--text); background: var(--bg-hover); }
+.tree-grip:active { cursor: grabbing; }
+/* No hover on touch screens, so the handle has to be visible up front. */
+@media (hover: none) { .tree-grip { opacity: 1; } }
+/* Sidebar manual ordering: too narrow for a floating card, so the drop target is a Yuque-style
+   insertion line — `>----------` — and a small ghost chip follows the pointer for context. */
+#page-list { position: relative; }
+.tree-drop {
+  position: absolute;
+  height: 2px;
+  margin: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 5;
+}
+.tree-drop::before {
+  content: '';
+  position: absolute;
+  left: -9px; top: 50%;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  transform: translateY(-50%);
+}
+.tree-row.is-drop-target { background: var(--bg-hover); border-radius: 8px; }
+.tree-row.is-dragging { opacity: .4; }
+.tree-drag-ghost {
+  position: fixed; z-index: 95;
+  max-width: 220px;
+  padding: 4px 9px;
+  font-size: 12.5px; line-height: 1.4; color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  opacity: .96;
+  transform: translate(12px, 10px);
+}
+body.is-row-dragging, body.is-row-dragging * { cursor: grabbing; user-select: none; }
 .caret {
   width: 20px; flex: none; margin-left: 6px;
   border: none; border-radius: 8px; background: none; color: var(--text-3);
@@ -748,6 +862,56 @@ svg.sf-badge { color: var(--text-3); }
 }
 .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border-strong); }
 .card .t { font-weight: 650; font-size: 15px; }
+.card { position: relative; }
+.space-page-card { min-width: 0; }
+.article .card-link {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  margin: -18px -18px 0; padding: 18px 44px 12px 18px;
+  color: inherit; text-decoration: none; overflow-wrap: anywhere;
+}
+.article .card-link:hover { text-decoration: none; }
+.article .card-expand {
+  align-self: flex-start; padding: 4px 7px; margin-left: -7px;
+  border-radius: 6px; color: var(--text-2); text-decoration: none;
+  font-size: 12px;
+}
+.article .card-expand:hover, .article .card-expand:focus-visible { color: var(--accent); background: var(--bg-hover); text-decoration: none; }
+/* Manual ordering (drag). Yuque-style: a subtle grip appears on hover, the card lifts under the
+   pointer, and a dashed slot shows where it will land; siblings slide with a FLIP animation. */
+.card-grip {
+  position: absolute; top: 9px; right: 9px;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 8px;
+  color: var(--text-3);
+  cursor: grab;
+  opacity: 0;
+  transition: opacity .15s ease, color .15s ease, background-color .15s ease;
+  touch-action: none;
+}
+.card:hover .card-grip, .card:focus-within .card-grip { opacity: 1; }
+.card-grip:hover { color: var(--text); background: var(--bg-hover); }
+.card-grip:active { cursor: grabbing; }
+@media (hover: none) { .card-grip { opacity: 1; } }
+/* A transformed ancestor would rebase fixed drag coordinates away from the viewport. */
+body.is-card-dragging .article { animation: none; transform: none !important; }
+.card.is-dragging {
+  position: fixed; z-index: 80; margin: 0;
+  pointer-events: none; cursor: grabbing;
+  opacity: .96;
+  border-color: var(--accent-line);
+  box-shadow: var(--shadow-lg);
+  transform: scale(1.01);
+}
+.card-placeholder {
+  border: 1.5px dashed var(--accent-line);
+  border-radius: 14px;
+  background: var(--accent-soft);
+}
+.cards.is-sorting, .cards.is-sorting * { user-select: none; }
+body.is-card-dragging { cursor: grabbing; }
+body.is-card-dragging .scroll-area { scroll-behavior: auto; }
+body.is-card-dragging #article a { cursor: grabbing; }
 .card .s { font-size: 12px; color: var(--text-3); }
 .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .overview-head h1 { margin: 0; }
@@ -848,6 +1012,46 @@ svg.sf-badge { color: var(--text-3); }
  */
 .modal .sort-pick { display: flex; margin-bottom: 16px; }
 .modal .sort-pick select { width: auto; flex: 1; min-width: 0; margin-bottom: 0; }
+
+/* Space settings: the recommendation switch. The checkbox stays focusable but visually replaced
+   by the pill, so the modal's generic input box rules are overridden explicitly. */
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin: 0 0 18px;
+  cursor: pointer;
+}
+/* The same switch also sits inline on the space index, next to the sort picker. */
+.switch-inline {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--text-2);
+  cursor: pointer;
+}
+.switch-copy { display: flex; flex-direction: column; gap: 3px; }
+.switch-copy > span { font-size: 13px; color: var(--text); }
+.switch-copy small { font-size: 12px; color: var(--text-3); line-height: 1.45; }
+.switch-row input[type="checkbox"],
+.switch-inline input[type="checkbox"] {
+  position: absolute; width: 1px; height: 1px; margin: 0; padding: 0;
+  border: none; opacity: 0; pointer-events: none;
+}
+.switch-ui {
+  position: relative; flex: none;
+  width: 40px; height: 22px; border-radius: 99px;
+  background: var(--border-strong);
+  transition: background-color .18s ease;
+}
+.switch-ui::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(16, 20, 40, .28);
+  transition: transform .18s ease;
+}
+.switch-row input:checked + .switch-ui,
+.switch-inline input:checked + .switch-ui { background: var(--accent); }
+.switch-row input:checked + .switch-ui::after,
+.switch-inline input:checked + .switch-ui::after { transform: translateX(18px); }
+.switch-row input:focus-visible + .switch-ui,
+.switch-inline input:focus-visible + .switch-ui { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 .danger-text { color: var(--danger); }
 .danger-text:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .card .d { font-size: 13px; color: var(--text-2); }

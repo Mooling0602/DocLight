@@ -81,6 +81,7 @@ async function run(basePath?: string): Promise<void> {
       assert.ok(html.includes(`href="${prefix}/style.css?`), route);
       assert.ok(html.includes(`src="${prefix}/app.js"`), route);
       assert.ok(html.includes(`class="brand" href="${prefix}/"`), route);
+      assert.ok(html.includes(`href="${prefix}/assets/favicon.svg"`), route);
     }
     if (!prefix) {
       const html = await (await request('/editor/?q=1')).text();
@@ -92,6 +93,12 @@ async function run(basePath?: string): Promise<void> {
         assert.equal(res.status, 200);
         assert.match(res.headers.get('content-type') || '', asset.endsWith('.css') ? /text\/css/ : /javascript/);
       }
+      const css = await (await request(p + '/style.css')).text();
+      assert.ok(css.includes('url(assets/favicon.svg)'), 'brand mark must reference the icon relatively');
+      const icon = await request(p + '/assets/favicon.svg');
+      assert.equal(icon.status, 200);
+      assert.match(icon.headers.get('content-type') || '', /image\/svg\+xml/);
+      assert.match(await icon.text(), /<svg/);
       const state = await request(p + '/api/auth/state');
       assert.equal((await state.json() as { mode: string }).mode, 'setup');
       assert.equal((await request(p + '/api/pages', { method: 'POST' })).status, 401);

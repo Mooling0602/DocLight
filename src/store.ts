@@ -17,7 +17,7 @@ import { isDeepStrictEqual } from 'node:util';
 import * as YAML from 'yaml';
 import { runTemplateTransaction } from './template-transaction.js';
 import type { TemplateTransaction } from './template-transaction.js';
-import { DEFAULT_SORT, isSortKey } from './sort.js';
+import { DEFAULT_SORT, applyManualOrder, isSortKey, removeFromOrder, renameInOrder } from './sort.js';
 import type { SortKey } from './sort.js';
 
 export { DEFAULT_SORT, SORT_KEYS, isSortKey } from './sort.js';
@@ -30,6 +30,10 @@ export interface Space {
   home: string | null;
   /** Absent means `DEFAULT_SORT`; omitted from `spaces.json` so untouched spaces stay clean. */
   sort?: SortKey;
+  /** Page slugs in manual reading order; only consulted while `sort` is `manual`. */
+  order?: string[];
+  /** Show previous/next page cards at the bottom of every article. False is the default. */
+  recommend?: boolean;
   /** Only the locked state is persisted. */
   locked?: boolean;
   /** Source-owned virtual space, never persisted. */
@@ -47,6 +51,8 @@ export interface Page {
   title: string;
   /** Page body as Markdown. */
   content: string;
+  /** The file begins with an ambiguous, unterminated metadata fence; never edit it in the UI. */
+  unclosedFrontMatter?: true;
   createdAt: number;
   updatedAt: number;
 }
@@ -124,7 +130,7 @@ function titleFromBody(body: string, fallback: string): string {
  * Split a page file into front matter and body. A file without a leading `---` fence is all
  * body, which makes hand-written notes just work.
  */
-function splitFrontMatter(raw: string): { meta: FrontMatter; body: string } {
+function splitFrontMatter(raw: string): { meta: FrontMatter; body: string; unclosedFrontMatter?: true } {
   const text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   if (!text.startsWith(FRONT_MATTER_FENCE + '\n') && text.trim() !== FRONT_MATTER_FENCE) {
     return { meta: {}, body: text };
@@ -135,7 +141,7 @@ function splitFrontMatter(raw: string): { meta: FrontMatter; body: string } {
   for (let i = 1; i < lines.length; i++) {
     if (lines[i].trim() === FRONT_MATTER_FENCE) { end = i; break; }
   }
-  if (end < 0) return { meta: {}, body: text }; // No closing fence: treat the whole file as body.
+  if (end < 0) return { meta: {}, body: text, unclosedFrontMatter: true }; // Ambiguous: keep readable, but refuse edits.
   let meta: FrontMatter = {};
   try {
     const parsed = YAML.parse(lines.slice(1, end).join('\n'));
@@ -159,8 +165,73 @@ function joinFrontMatter(page: Page): string {
     updatedAt: page.updatedAt,
   };
   const yaml = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-  const body = page.content.replace(/\s+$/, '');
-  return `${FRONT_MATTER_FENCE}\n${yaml}\n${FRONT_MATTER_FENCE}\n\n${body}\n`;
+  // The final newline is the file terminator; all whitespace in the body is user content.
+  return `${FRONT_MATTER_FENCE}\n${yaml}\n${FRONT_MATTER_FENCE}\n\n${page.content}\n`;
+}
+
+type PageMetaKey = 'title' | 'space' | 'parent' | 'createdAt' | 'updatedAt';
+const PAGE_META_KEYS: PageMetaKey[] = ['title', 'space', 'parent', 'createdAt', 'updatedAt'];
+
+/** Patch only changed metadata and preserve the original YAML and body when they did not change. */
+function updatePageFile(raw: string, page: Page, previous: Page): string {
+  const changed = PAGE_META_KEYS.filter(key => page[key] !== previous[key]);
+  const bodyChanged = page.content !== previous.content;
+  if (!changed.length && !bodyChanged) return raw;
+
+  const opening = /^(\uFEFF?---\r?\n)/.exec(raw);
+  if (!opening) {
+    // A fence without a terminating newline is an incomplete front matter, not an ordinary note.
+    if (raw.replace(/^\uFEFF/, '').trim() === '---') throw sourceError('页面 front matter 缺少结束围栏');
+    return joinFrontMatter(page);
+  }
+  const closing = /^[ \t]*---[ \t]*(?:\r?\n|$)/gm;
+  closing.lastIndex = opening[0].length;
+  const fence = closing.exec(raw);
+  if (!fence) throw sourceError('页面 front matter 缺少结束围栏');
+  const yamlText = raw.slice(opening[0].length, fence.index);
+  let nextYaml = yamlText;
+  if (changed.length) {
+    const doc = YAML.parseDocument(yamlText, { uniqueKeys: true });
+    if (doc.errors.length || !YAML.isMap(doc.contents) || doc.contents.flow) {
+      throw sourceError('页面 front matter 无法安全修改');
+    }
+    let references = false;
+    YAML.visit(doc, (_key, node) => {
+      if (YAML.isAlias(node) || (YAML.isNode(node) && 'anchor' in node && node.anchor)) references = true;
+    });
+    if (references) throw sourceError('页面 front matter 含锚点或别名，无法安全修改');
+    const edits: Array<{ start: number; end: number; value: string }> = [];
+    const missing: PageMetaKey[] = [];
+    for (const key of changed) {
+      const node = doc.get(key, true);
+      if (node === undefined) { missing.push(key); continue; }
+      if (!YAML.isScalar(node) || !node.range || node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') {
+        throw sourceError(`页面 front matter 的 ${key} 无法安全修改`);
+      }
+      edits.push({ start: node.range[0], end: node.range[1], value: JSON.stringify(page[key]) });
+    }
+    for (const edit of edits.sort((a, b) => b.start - a.start)) {
+      nextYaml = nextYaml.slice(0, edit.start) + edit.value + nextYaml.slice(edit.end);
+    }
+    if (missing.length) {
+      const eol = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
+      if (nextYaml && !nextYaml.endsWith('\n')) nextYaml += eol;
+      nextYaml += missing.map(key => `${key}: ${JSON.stringify(page[key])}${eol}`).join('');
+    }
+    const verified = YAML.parseDocument(nextYaml, { uniqueKeys: true });
+    if (verified.errors.length || !YAML.isMap(verified.contents)) throw sourceError('修改后的 front matter 无效');
+    const expected = doc.toJS() as Record<string, unknown>;
+    for (const key of changed) expected[key] = page[key];
+    if (!isDeepStrictEqual(expected, verified.toJS())) throw sourceError('修改 front matter 会改变其他字段，已拒绝');
+  }
+  const prefix = opening[0] + nextYaml + fence[0];
+  if (!bodyChanged) return prefix + raw.slice(fence.index + fence[0].length);
+  // Preserve the existing optional blank separator; only the editor-owned body is replaced.
+  const oldBody = raw.slice(fence.index + fence[0].length);
+  const separator = oldBody.startsWith('\r\n') ? '\r\n' : oldBody.startsWith('\n') ? '\n' : '';
+  const eol = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
+  // A closing fence at EOF needs a newline before any body can follow it.
+  return prefix + (fence[0].endsWith('\n') ? '' : eol) + separator + page.content + '\n';
 }
 
 /* ------------------------------------------------------------ ordering */
@@ -182,14 +253,31 @@ export function sortPages(pages: Page[], key: SortKey = DEFAULT_SORT): Page[] {
     case 'updated_desc': sorted.sort((a, b) => b.updatedAt - a.updatedAt || bySlug(a, b)); break;
     case 'updated_asc': sorted.sort((a, b) => a.updatedAt - b.updatedAt || bySlug(a, b)); break;
     case 'title_asc': sorted.sort((a, b) => a.title.localeCompare(b.title, 'zh') || bySlug(a, b)); break;
+    // Manual order is applied by `applyManualOrder` at read time, because it needs the space's
+    // stored slug list; leaving the incoming order untouched keeps this helper free of it.
+    case 'manual': break;
   }
   return sorted;
 }
 
 /* ------------------------------------------------------------ read */
 
+/** Original file contents and identity captured during a store read. */
+export interface PageFileSnapshot { raw: string; stat: fs.Stats }
+
+function samePageFile(a: fs.Stats, b: fs.Stats): boolean {
+  return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino
+    && a.mode === b.mode && a.nlink === b.nlink && a.size === b.size
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+}
+
 /** Read the whole store from disk. Missing pieces degrade to empty rather than throwing. */
-export function readStore(dataDir: string): Database {
+export function readStore(dataDir: string, files?: Map<string, PageFileSnapshot>): Database {
+  return readStoreSnapshot(dataDir, undefined, files);
+}
+
+/** Optionally retain the UTF-8 source text read alongside its decoded page metadata. */
+function readStoreSnapshot(dataDir: string, rawFiles?: Map<string, string>, files?: Map<string, PageFileSnapshot>): Database {
   let spaces: Space[] = [];
   try {
     const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
@@ -200,6 +288,16 @@ export function readStore(dataDir: string): Database {
   for (const space of spaces) {
     if (space.sort !== undefined && !isSortKey(space.sort)) delete space.sort;
     if (space.locked !== true) delete space.locked;
+    if (space.recommend !== true) delete space.recommend;
+    // The order list is hand-editable too: keep only unique, filesystem-safe slug strings and drop
+    // the key entirely when nothing usable is left, so a broken entry cannot reorder pages by accident.
+    if (space.order !== undefined) {
+      const clean = Array.isArray(space.order)
+        ? space.order.filter((slug, index, all) => typeof slug === 'string' && SLUG_RE.test(slug) && all.indexOf(slug) === index)
+        : [];
+      if (clean.length) space.order = clean;
+      else delete space.order;
+    }
   }
 
   const pages: Page[] = [];
@@ -217,8 +315,25 @@ export function readStore(dataDir: string): Database {
     const full = path.join(pagesDir(dataDir), entry.name);
     let raw = '';
     let stat: fs.Stats | null = null;
-    try { raw = fs.readFileSync(full, 'utf8'); stat = fs.statSync(full); } catch { continue; }
-    const { meta, body } = splitFrontMatter(raw);
+    try {
+      if (files) {
+        // Bind the text and file identity to the same open file, then confirm the path still names it.
+        const fd = fs.openSync(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try {
+          const before = fs.fstatSync(fd);
+          raw = fs.readFileSync(fd, 'utf8');
+          const after = fs.fstatSync(fd);
+          if (!samePageFile(before, after) || !samePageFile(after, fs.lstatSync(full))) continue;
+          stat = after;
+        } finally { fs.closeSync(fd); }
+      } else {
+        raw = fs.readFileSync(full, 'utf8');
+        stat = fs.statSync(full);
+      }
+    } catch { continue; }
+    rawFiles?.set(slug, raw);
+    if (stat) files?.set(slug, { raw, stat });
+    const { meta, body, unclosedFrontMatter } = splitFrontMatter(raw);
     const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
     pages.push({
       slug,
@@ -228,6 +343,7 @@ export function readStore(dataDir: string): Database {
       // The file ends with one trailing newline; drop it so the in-memory body matches what
       // the editor saves (Turndown trims), keeping the content stable across save cycles.
       content: body.replace(/\n$/, ''),
+      ...(unclosedFrontMatter ? { unclosedFrontMatter } : {}),
       createdAt: num(meta.createdAt, fallbackTime),
       updatedAt: num(meta.updatedAt, fallbackTime),
     });
@@ -244,7 +360,10 @@ export function readStore(dataDir: string): Database {
   // so every page collapsed onto the synthetic fallback) are appended rather than dropped.
   const ordered: Page[] = [];
   for (const space of spaces) {
-    ordered.push(...sortPages(pages.filter((p) => p.space === space.slug), space.sort ?? DEFAULT_SORT));
+    const own = pages.filter((p) => p.space === space.slug);
+    ordered.push(...(space.sort === 'manual'
+      ? applyManualOrder(own, space.order)
+      : sortPages(own, space.sort ?? DEFAULT_SORT)));
   }
   ordered.push(...sortPages(pages.filter((p) => !knownSpaces.has(p.space))));
 
@@ -393,9 +512,17 @@ export function renameTemplatePage(dirs: TemplateDirs, fromSlug: string, toSlug:
       tx.write('template', `pages/${page.slug}.md`, patchSourceFrontMatter(page.raw, { parent: toSlug }));
     }
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home === fromSlug) {
-      space.home = toSlug;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // The manual order names source file slugs, so the rename has to follow it: leaving the old
+      // name behind drops the renamed page out of its stored position (and `readDb` would filter
+      // the stale entry away entirely). Both edits share one index write, and an index that
+      // mentions neither the home nor the order is left untouched rather than re-serialised.
+      const ordered = renameInOrder(space.order, fromSlug, toSlug);
+      const orderChanged = ordered !== space.order;
+      const homeChanged = space.home === fromSlug;
+      if (orderChanged) space.order = ordered;
+      if (homeChanged) space.home = toSlug;
+      if (orderChanged || homeChanged) writeTemplateIndex(tx, index);
     }
     tx.write('template', `pages/${toSlug}.md`, source.raw);
     tx.remove('template', `pages/${fromSlug}.md`);
@@ -416,9 +543,20 @@ export function deleteTemplateSubtree(dirs: TemplateDirs, slug: string): string[
     }
     for (const victim of doomed) tx.remove('template', `pages/${victim}.md`);
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home && doomed.has(space.home)) {
-      space.home = null;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // The order lists source file slugs, so deleted ones have to go with the files. A leftover
+      // entry would name a page the space no longer has — the ordinary space API would reject the
+      // arrangement if it were re-submitted, and a page later minted under that name would inherit
+      // the dead position instead of being appended.
+      const ordered = removeFromOrder(space.order, doomed);
+      const orderChanged = ordered !== space.order;
+      const homeDoomed = !!space.home && doomed.has(space.home);
+      if (orderChanged) {
+        if (ordered) space.order = ordered;
+        else delete space.order;
+      }
+      if (homeDoomed) space.home = null;
+      if (orderChanged || homeDoomed) writeTemplateIndex(tx, index);
     }
     return [...doomed];
   });
@@ -518,9 +656,17 @@ export function moveTemplatePageToSpace(dirs: TemplateDirs, sourceSlug: string, 
       emptied.add(slug);
     }
     const space = index.spaces.find(item => item.slug === 'default');
-    if (space && space.home && doomed.has(space.home)) {
-      space.home = null;
-      writeTemplateIndex(tx, index);
+    if (space) {
+      // Moved-away pages leave the built-in space, so their entries leave its order too.
+      const ordered = removeFromOrder(space.order, emptied);
+      const orderChanged = ordered !== space.order;
+      const homeDoomed = !!space.home && doomed.has(space.home);
+      if (orderChanged) {
+        if (ordered) space.order = ordered;
+        else delete space.order;
+      }
+      if (homeDoomed) space.home = null;
+      if (orderChanged || homeDoomed) writeTemplateIndex(tx, index);
     }
     return [...emptied];
   });
@@ -562,6 +708,17 @@ export function moveDataPageToTemplate(dirs: TemplateDirs, dataSlug: string): st
       let changed = false;
       for (const space of dataIndex.spaces as Array<Record<string, unknown>>) {
         if (typeof space.home === 'string' && doomed.has(space.home)) { space.home = null; changed = true; }
+        // The moved pages are no longer part of the ordinary space, so their manual positions have
+        // to go with them — a stale entry would be rejected on the next re-submit and could later
+        // be inherited by an unrelated page minted under the same slug.
+        if (Array.isArray(space.order)) {
+          const kept = removeFromOrder(space.order as string[], doomed);
+          if (kept !== space.order) {
+            if (kept) space.order = kept;
+            else delete space.order;
+            changed = true;
+          }
+        }
       }
       if (changed) tx.write('data', 'spaces.json', JSON.stringify(dataIndex, null, 2) + '\n');
     }
@@ -658,7 +815,7 @@ export function createTemplatePage(templateDir: string, page: Page): void {
 }
 
 /** Update source-space metadata without serialising pages or discarding unknown index fields. */
-export function editTemplateSpace(templateDir: string, changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string }): void {
+export function editTemplateSpace(templateDir: string, changes: { title?: string; desc?: string; sort?: SortKey | null; order?: string[] | null; recommend?: boolean | null; virtualSlug?: string }): void {
   const invalid = () => Object.assign(new Error('内置空间模板无效或不安全'), { code: 400 });
   const file = path.join(templateDir, 'spaces.json');
   let stat: fs.Stats;
@@ -691,6 +848,14 @@ export function editTemplateSpace(templateDir: string, changes: { title?: string
   if (changes.sort !== undefined) {
     if (changes.sort === null) delete space.sort;
     else space.sort = changes.sort;
+  }
+  if (changes.recommend !== undefined) {
+    if (changes.recommend === null) delete space.recommend;
+    else space.recommend = changes.recommend;
+  }
+  if (changes.order !== undefined) {
+    if (changes.order === null) delete space.order;
+    else space.order = changes.order;
   }
   space.updatedAt = Date.now();
   const next = JSON.stringify(index, null, 2) + '\n';
@@ -733,6 +898,11 @@ export interface WriteOptions {
   onlyCreate?: boolean;
   /** Leave existing pages in locked spaces byte-for-byte unchanged during ordinary writes. */
   preserveLocked?: boolean;
+  /** Explicit source and destination for a page slug rename, preserving its original metadata. */
+  rename?: { from: string; to: string };
+  /** Original files captured by readStore when the caller decided which pages to remove.
+   * Existing files cannot be removed without this snapshot. */
+  expectedRemoved?: ReadonlyMap<string, PageFileSnapshot>;
 }
 
 /**
@@ -741,7 +911,8 @@ export interface WriteOptions {
  * and file watchers.
  *
  * `removed` lists the slugs the caller itself deleted or renamed. Only those files are
- * unlinked — never "every file the incoming db happens not to mention". That distinction is
+ * unlinked — never "every file the incoming db happens not to mention". Existing removed files
+ * require the original `readStore` snapshot in `options.expectedRemoved`. That distinction is
  * what keeps a write from destroying data it never saw: a page whose file could not be read
  * is absent from `db`, and a migration write carries only the pages in its snapshot,
  * so neither may be treated as an authoritative statement that the other files are unwanted.
@@ -753,9 +924,24 @@ export function writeStore(
   options: WriteOptions = {},
 ): void {
   const dir = pagesDir(dataDir);
+  const removedSlugs = [...new Set(removed)];
+  if (options.onlyCreate && removedSlugs.length) throw sourceError('仅创建模式不能删除页面');
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
+  // Compare against the same source text and stat-derived defaults used to build the snapshot.
+  const rawFiles = new Map<string, string>();
+  const existing = new Map(readStoreSnapshot(dataDir, rawFiles).pages.map(page => [page.slug, page]));
+  if (options.rename) {
+    const { from, to } = options.rename;
+    if (options.onlyCreate || !SLUG_RE.test(from) || !SLUG_RE.test(to) || from === to
+        || db.pages.some(page => page.slug === from) || !db.pages.some(page => page.slug === to)) {
+      throw sourceError('无法安全重命名页面文件');
+    }
+    if (!existing.has(from)) throw sourceError('页面源文件不存在或无法读取，已拒绝重命名');
+    if (fs.existsSync(path.join(dir, `${to}.md`))) throw sourceError('页面目标文件已存在，已拒绝覆盖');
+  }
+  const pending: Array<{ file: string; next: string; sourceFile?: string; sourceRaw?: string; newFile: boolean }> = [];
   const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
   for (const page of db.pages) {
     // The slug becomes a file name, so it is validated here rather than trusted from the caller.
@@ -774,14 +960,94 @@ export function writeStore(
     if (options.onlyCreate && fs.existsSync(file)) continue;
     // Serializing the entire tree can normalize unrelated files; a locked page must stay untouched.
     if (lockedSpaces.has(page.space) && fs.existsSync(file)) continue;
-    const next = joinFrontMatter(page);
-    if (!sameContent(file, next)) writeAtomic(file, next);
+    let next: string;
+    const sourceSlug = options.rename?.to === page.slug ? options.rename.from : page.slug;
+    const sourceFile = path.join(dir, `${sourceSlug}.md`);
+    const raw = rawFiles.get(sourceSlug);
+    if (fs.existsSync(sourceFile)) {
+      const previous = existing.get(sourceSlug);
+      if (!previous || raw === undefined) throw sourceError(`无法读取页面 ${sourceSlug}.md，已拒绝覆盖`);
+      next = updatePageFile(raw, page, previous);
+    } else if (sourceSlug !== page.slug) {
+      throw sourceError('页面源文件不存在，已拒绝重命名');
+    } else if (raw !== undefined) {
+      throw sourceError('页面源文件已变化，已拒绝覆盖');
+    } else {
+      next = joinFrontMatter(page);
+    }
+    // Existing pages have already been read for the snapshot; avoid reading unchanged pages again.
+    const newFile = sourceSlug !== page.slug || raw === undefined;
+    if (newFile || next !== raw) {
+      pending.push({ file, next, ...(raw === undefined ? {} : { sourceFile, sourceRaw: raw }), newFile });
+    }
   }
 
-  for (const slug of new Set(removed)) {
+  // A write-time snapshot cannot establish what the caller originally chose to delete.
+  const expectedRemoved = options.expectedRemoved;
+  const removals: Array<{ file: string; expected: PageFileSnapshot }> = [];
+  for (const slug of removedSlugs) {
     // A slug that is still live wins: a rename that reuses a name must not delete the new file.
     if (wanted.has(slug) || !SLUG_RE.test(slug)) continue;
-    try { fs.unlinkSync(path.join(dir, `${slug}.md`)); } catch { /* best effort */ }
+    const file = path.join(dir, `${slug}.md`);
+    const expected = expectedRemoved?.get(slug);
+    if (!expected) {
+      try { fs.lstatSync(file); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw sourceError('待删除页面无法读取，已拒绝删除');
+      }
+      throw sourceError('待删除页面不在原始快照中，已拒绝删除');
+    }
+    removals.push({ file, expected });
+  }
+
+  const verifyRemoval = ({ file, expected }: { file: string; expected: PageFileSnapshot }, partial: boolean) => {
+    try {
+      const before = fs.lstatSync(file);
+      if (!samePageFile(expected.stat, before)) throw new Error('file changed');
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      let raw: string;
+      try {
+        const opened = fs.fstatSync(fd);
+        if (!samePageFile(before, opened)) throw new Error('file changed');
+        raw = fs.readFileSync(fd, 'utf8');
+        if (!samePageFile(opened, fs.fstatSync(fd))) throw new Error('file changed');
+      } finally { fs.closeSync(fd); }
+      const after = fs.lstatSync(file);
+      if (samePageFile(before, after) && raw === expected.raw) return;
+    } catch { /* A missing or unreadable file is also a conflict. */ }
+    throw sourceError(partial
+      ? '待删除页面已变化或无法读取，原文件未删除；部分更改可能已写入，请检查后重试'
+      : '待删除页面已变化或无法读取，已拒绝删除');
+  };
+  // Validate every removal before writing anything. Check again immediately before each unlink.
+  for (const removal of removals) verifyRemoval(removal, false);
+
+  // Recheck only pages that will change, so external edits during preparation are not silently
+  // overwritten. This is not a cross-process transaction; a later race remains possible.
+  for (const { file, sourceFile, sourceRaw, newFile } of pending) {
+    if (newFile && fs.existsSync(file)) throw sourceError('页面目标文件已存在，已拒绝覆盖');
+    if (sourceFile) {
+      let current: string;
+      try { current = fs.readFileSync(sourceFile, 'utf8'); }
+      catch { throw sourceError('页面源文件无法读取，已拒绝覆盖'); }
+      if (current !== sourceRaw) throw sourceError('页面文件已变化，请重新加载后重试');
+    }
+  }
+  // Validate every page before writing any of them or deleting a renamed page.
+  for (const { file, next } of pending) writeAtomic(file, next);
+
+  // Path verification and unlink are separate operations; non-cooperating external writers can
+  // still race in between. This is not a cross-process transaction or an atomic conditional unlink.
+  let removedCount = 0;
+  for (const removal of removals) {
+    const partial = pending.length > 0 || removedCount > 0;
+    verifyRemoval(removal, partial);
+    try { fs.unlinkSync(removal.file); }
+    catch { throw sourceError(partial
+      ? '无法删除页面；部分更改可能已写入，请检查后重试'
+      : '无法删除页面，请检查文件状态后重试'); }
+    removedCount++;
   }
 
   // The index obeys the same rule as the page files: under `onlyCreate` a *usable* existing

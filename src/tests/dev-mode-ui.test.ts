@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildSync } from 'esbuild';
 import { JSDOM } from 'jsdom';
+import { setSource } from './source-editor-utils.js';
 
 const root = path.resolve(__dirname, '../..');
 const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8')
@@ -73,15 +74,15 @@ async function main() {
     assert.equal(get('#cluster-edit .editor-lock-badge').textContent, '开发者模式');
     click('#mode-toggle [data-mode=markdown]');
     const title = get<HTMLInputElement>('#title-input');
-    const source = get<HTMLTextAreaElement>('#source-editor');
     title.value = '新标题'; title.dispatchEvent(new w.Event('input', { bubbles: true }));
-    source.value = '# 新内容\n\n原样保存'; source.dispatchEvent(new w.Event('input', { bubbles: true }));
+    setSource(d, '# 新内容\n\n原样保存');
     click('#btn-save'); await wait();
     assert.deepEqual(calls.filter(c => c.method === 'PUT'), [{ url: '/api/pages/guide', method: 'PUT', body: { title: '新标题', content: '# 新内容\n\n原样保存' } }]);
     assert.equal(get('#edit-wrap').hidden, true);
     click('.space-title'); await wait();
     assert.equal(get<HTMLElement>('.space-acts').hidden, false);
-    assert.ok(d.querySelector('#sp-slug-edit'));
+    assert.ok(d.querySelector('#sp-slug'));
+    assert.notEqual(get('#sp-slug').tagName, 'A', 'space slug chip should not be a link');
     assert.doesNotMatch(get('#article').textContent || '', /永久只读/);
     click('.brand'); await wait();
     assert.doesNotMatch(get('#article').textContent || '', /永久只读/);
@@ -146,7 +147,8 @@ async function main() {
       }
       return originalFetch(input, opts);
     };
-    spaceSlug.click('#sp-slug-edit');
+    spaceSlug.click('#sp-settings');
+    spaceSlug.click('#modal-root [data-x=slug]');
     assert.match(spaceSlug.get('#modal-root').textContent || '', /旧空间链接及 Markdown 中硬编码的旧链接将失效/);
     spaceSlug.get<HTMLInputElement>('#modal-root input').value = 'renamed';
     spaceSlug.click('#modal-root [data-x=ok]'); await wait();

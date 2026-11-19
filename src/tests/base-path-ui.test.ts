@@ -77,6 +77,15 @@ async function main() {
       assert.equal(root.w.location.pathname, '/');
     } finally { root.dom.window.close(); }
   }
+  const childIndex = await boot('/editor', '/editor/doclight-default/doclight-default-guide?view=children');
+  try {
+    assert.equal(childIndex.d.querySelector('#article h1')?.textContent, 'Guide的子页面');
+    assert.equal(childIndex.d.querySelector('.space-page-card .card-link')?.getAttribute('href'), '/editor/doclight-default/doclight-default-guide/child');
+    assert.equal(childIndex.d.querySelector('#article .crumbs a')?.getAttribute('href'), '/editor/doclight-default?view=children');
+    click(childIndex.w, childIndex.d, '#article .crumbs a'); await wait();
+    assert.equal(childIndex.w.location.pathname + childIndex.w.location.search, '/editor/doclight-default?view=children');
+    assert.ok(childIndex.d.querySelector('.space-page-card[data-slug="doclight-default-guide"]'));
+  } finally { childIndex.dom.window.close(); }
   const boundary = await boot('/editor', '/editorial/doclight-default');
   try { assert.equal(boundary.w.location.pathname, '/editor/'); } finally { boundary.dom.window.close(); }
   const legacy = await boot('/editor', '/editor/doclight-default-guide');

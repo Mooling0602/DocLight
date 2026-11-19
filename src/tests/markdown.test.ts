@@ -13,9 +13,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
-import { marked } from 'marked';
 import createDOMPurify from 'dompurify';
-import { htmlToMarkdown, sanitizeMarkdown } from '../markdown.js';
+import { htmlToMarkdown, markdownToHtml, sanitizeMarkdown } from '../markdown.js';
 
 const root = path.resolve(__dirname, '../..');
 const publicDir = path.join(root, 'public');
@@ -36,6 +35,27 @@ assert.equal(htmlToMarkdown('<ul><li>甲<ul><li>乙</li></ul></li></ul>'), '- �
 assert.equal(
   htmlToMarkdown('<pre><code>- 保持原样\n    - 缩进也保持</code></pre>'),
   '```\n- 保持原样\n    - 缩进也保持\n```',
+);
+
+// Code fences at any list depth must protect their contents, including nested quotes and
+// fence-like lines shorter than the opening delimiter.
+for (const html of [
+  '<ul><li>甲<pre><code>-   foo\n1.   bar</code></pre></li></ul>',
+  '<ul><li>甲<ul><li>乙<pre><code>-   foo\n1.   bar</code></pre></li></ul></li></ul>',
+  '<blockquote><ul><li>甲<pre><code>-   foo\n1.   bar</code></pre></li></ul></blockquote>',
+  '<ul><li>甲<pre><code>```\n-   foo\n~~~\n1.   bar</code></pre></li></ul>',
+]) {
+  const saved = htmlToMarkdown(html);
+  const code = new JSDOM(markdownToHtml(saved)).window.document.querySelector('pre code');
+  assert.ok(code, '代码块应在保存后保留');
+  assert.match(code.textContent || '', /-   foo\n(?:~~~\n)?1\.   bar/, '代码内容中的空格应保持原样');
+  assert.equal(htmlToMarkdown(markdownToHtml(saved)), saved, '嵌套围栏二次保存应稳定');
+}
+
+assert.match(
+  htmlToMarkdown('<ul><li>甲<pre><code>~~~\n-   foo</code></pre></li><li>乙</li></ul>'),
+  /```\n[ \t]+~~~\n[ \t]+-   foo\n[ \t]+```\n(?:[ \t]*\n)?- 乙$/,
+  '围栏结束后应恢复同级列表标记规范化',
 );
 
 // Markdown has no underline syntax: the tag is preserved so the round-trip keeps it.
@@ -77,7 +97,7 @@ assert.equal(sanitizeMarkdown(null), '');
   // bundled types require the DOM globals to be declared on the same object.
   const purify = createDOMPurify(domForPurify.window as unknown as Parameters<typeof createDOMPurify>[0]);
   const roundTrip = (markdown: string): string =>
-    htmlToMarkdown(purify.sanitize(marked.parse(markdown, { async: false }) as string));
+    htmlToMarkdown(purify.sanitize(markdownToHtml(markdown)));
   // The sample site is laid out like the store: each page is its own Markdown file.
   const pagesDir = path.join(root, 'template', 'pages');
   const files = fs.readdirSync(pagesDir).filter(name => name.endsWith('.md'));
@@ -121,6 +141,9 @@ const EVIL_CONTENT = [
   '<form action="https://evil.example"><input name="pwd" type="password"><button>登录</button></form>',
   '',
   '- [x] 已完成',
+  '',
+  '> [!TIP]',
+  '> 标注块中的提示。',
   '',
   '<u>保留的下划线</u>',
 ].join('\n');
@@ -168,6 +191,12 @@ async function main(): Promise<void> {
 
   // The supported inline HTML survives sanitising, so the author keeps their formatting.
   assert.ok(article.querySelector('u'), 'preserved <u> should survive the sanitize pass');
+
+  // GitHub callouts render as a styled card; the `[!TIP]` marker is consumed, not displayed.
+  const callout = article.querySelector<HTMLElement>('.callout.callout-tip');
+  assert.ok(callout, 'callout should render as a card');
+  assert.ok(callout.querySelector('.callout-title'), 'callout card should carry a title');
+  assert.ok(!(article.textContent || '').includes('[!TIP]'), 'callout marker must not leak into the text');
 
   console.log('markdown assertions passed');
 }

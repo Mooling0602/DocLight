@@ -117,6 +117,45 @@ async function main(): Promise<void> {
     assert.equal(tree.spaces[0].slug, 'default', 'seed space should be default');
     assert.ok(tree.pages.filter((p: any) => p.space !== 'doclight-default').every((p: any) => p.space === 'default'), 'seed pages should belong to default');
 
+    /* ---- Recommendation flag (space settings switch) ---- */
+    const recOn = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ recommend: true }) });
+    assert.equal(recOn.status, 200, '开启推荐应成功');
+    assert.equal(recOn.body.recommend, true, '响应应带上 recommend');
+    assert.equal((await readTree()).spaces.find((s: any) => s.slug === 'default').recommend, true, 'tree 应返回 recommend');
+    const spaceIndexPath = path.join(server.dataDir, 'spaces.json');
+    const storedSpace = () => JSON.parse(fs.readFileSync(spaceIndexPath, 'utf8')).spaces[0];
+    assert.equal(storedSpace().recommend, true, 'recommend 应落盘');
+    assert.equal(
+      (await api('spaces/default', { method: 'PUT', body: JSON.stringify({ recommend: 'yes' }) })).status, 400,
+      '非布尔值应被拒绝',
+    );
+    assert.equal(storedSpace().recommend, true, '被拒绝的请求不得改动已存储的值');
+    const recOff = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ recommend: false }) });
+    assert.equal(recOff.status, 200);
+    assert.equal('recommend' in recOff.body, false, '关闭后响应不应带该键');
+    assert.equal('recommend' in storedSpace(), false, '关闭后应从文件删除该键');
+
+    /* ---- Manual ordering ---- */
+    const manual = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ sort: 'manual' }) });
+    assert.equal(manual.status, 200, '切换手动排序应成功');
+    assert.equal(manual.body.sort, 'manual');
+    assert.ok(Array.isArray(manual.body.order) && manual.body.order.length > 0, '切换手动排序应按当前显示顺序种子 order');
+    const seededOrder = manual.body.order as string[];
+    const reversedOrder = [...seededOrder].reverse();
+    const savedOrder = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ order: reversedOrder }) });
+    assert.equal(savedOrder.status, 200);
+    assert.deepEqual(savedOrder.body.order, reversedOrder, '响应应回显新的顺序');
+    assert.deepEqual(storedSpace().order, reversedOrder, 'order 应落盘');
+    assert.deepEqual(
+      (await readTree()).pages.filter((p: any) => p.space === 'default').map((p: any) => p.slug),
+      reversedOrder,
+      'tree 应按手动顺序返回页面',
+    );
+    assert.equal((await api('spaces/default', { method: 'PUT', body: JSON.stringify({ order: ['not_a_page'] }) })).status, 400, '未知 slug 应拒绝');
+    assert.equal((await api('spaces/default', { method: 'PUT', body: JSON.stringify({ order: [seededOrder[0], seededOrder[0]] }) })).status, 400, '重复 slug 应拒绝');
+    assert.equal((await api('spaces/default', { method: 'PUT', body: JSON.stringify({ order: 'nope' }) })).status, 400, '非数组应拒绝');
+    assert.deepEqual(storedSpace().order, reversedOrder, '被拒绝的请求不得改动 order');
+
     /* ---- Validation rejects without touching anything ---- */
     const reserved = await api('spaces/default', { method: 'PUT', body: JSON.stringify({ slug: 'spaces' }) });
     assert.equal(reserved.status, 400, 'reserved keyword should be rejected');

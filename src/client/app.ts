@@ -3,11 +3,12 @@
    v4 space model: spaces[] / pages[] (pages belong to a space and nest inside it)
    Page content is Markdown; the reading view renders it and the editor converts both ways.
    ============================================================ */
-import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { htmlToMarkdown } from '../markdown.js';
-import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS } from '../sort.js';
+import { htmlToMarkdown, markdownToHtml } from '../markdown.js';
+import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS, pageNeighbors } from '../sort.js';
 import type { SortKey } from '../sort.js';
+import { createMarkdownEditor } from './source-editor.js';
+import { SourceDraft } from './source-draft.js';
 
 interface Space {
   slug: string;
@@ -15,6 +16,8 @@ interface Space {
   desc: string;
   home: string | null;
   sort?: SortKey;
+  order?: string[];
+  recommend?: boolean;
   locked?: boolean;
   builtIn?: boolean;
   devEditable?: boolean;
@@ -33,6 +36,7 @@ interface PageMeta {
 
 interface Page extends PageMeta {
   content: string;
+  unclosedFrontMatter?: true;
 }
 
 interface TreeResponse {
@@ -48,11 +52,12 @@ interface AuthStateResponse {
   iters: number;
 }
 
+// The challenge carries no account name on purpose: the proof is computed from the password and
+// the nonce alone, so nothing in this exchange depends on who the visitor claims to be.
 interface AuthChallengeResponse {
   nonce: string;
   salt: string;
   iters: number;
-  user: string;
 }
 
 interface DeleteSpaceResponse {
@@ -87,7 +92,6 @@ interface AppState {
   pendingEdit: string | null;
   authed: boolean;
   authSetup: boolean;
-  accountName: string | null;
   user: string | null;
   salt: string;
   iters: number;
@@ -150,6 +154,7 @@ function wordCount(markdown: unknown): number {
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')     // images contribute no text
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')   // links keep their label, drop the target
     .replace(/<[^>]*>/g, ' ')                  // preserved inline HTML
+    .replace(/^\s{0,3}>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/gim, '') // callout marker line
     .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
     .replace(/[*_]{1,3}/g, '')
     .replace(/~{1,2}/g, '')
@@ -180,10 +185,8 @@ DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
 /** Render Markdown to safe HTML. Raw HTML in the source passes through `marked` and is then
     sanitised with DOMPurify, so inline preservation cannot become an XSS vector. */
 function renderMarkdown(markdown: unknown): string {
-  const source = String(markdown ?? '');
-  if (!source.trim()) return '';
   let html = '';
-  try { html = marked.parse(source, { async: false }) as string; } catch { return ''; }
+  try { html = markdownToHtml(markdown); } catch { return ''; }
   return DOMPurify.sanitize(html, PURIFY_OPTIONS);
 }
 
@@ -309,7 +312,6 @@ const S: AppState = {
   pendingEdit: null,
   authed: false,
   authSetup: false,
-  accountName: null,
   user: null,
   salt: '',
   iters: 0,
@@ -331,6 +333,8 @@ const el = {
   editWrap: $('#edit-wrap'),
   editor: $('#editor'),
   sourceEditor: $('#source-editor'),
+  sourcePanel: $('#source-panel'),
+  sourceWrapToggle: $('#source-wrap-toggle'),
   modeToggle: $('#mode-toggle'),
   editHint: $('#edit-hint'),
   titleInput: $('#title-input'),
@@ -438,14 +442,12 @@ function openRowMenu(btn, kind, obj) {
   rowMenu.dataset.slug = obj.slug;
   rowMenu.innerHTML = kind === 'space'
     ? `
-      ${obj.builtIn ? '' : `<button class="menu-item" data-act="lock"><span>${obj.locked ? '解锁空间…' : '锁定空间…'}</span></button>`}
-      ${pageContentLocked(obj) ? '' : `<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>
-      <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+      ${pageContentLocked(obj) ? '' : '<button class="menu-item" data-act="rename"><span>重命名空间…</span></button>'}
       <button class="menu-item" data-act="settings"><span>空间设置…</span></button>
-      ${obj.builtIn && !devSourceEditable(obj) ? '' : '<button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>'}`}`
+      ${pageContentLocked(obj) || (obj.builtIn && !devSourceEditable(obj)) ? '' : '<button class="menu-item danger" data-act="delete"><span>删除空间…</span></button>'}`
     : `
       <button class="menu-item" data-act="rename"><span>重命名…</span></button>
-      <button class="menu-item" data-act="slug"><span>编辑 slug…</span></button>
+      <button class="menu-item" data-act="slug"><span>编辑路径…</span></button>
       <button class="menu-item" data-act="move"><span>移动到…</span></button>
       <button class="menu-item danger" data-act="delete"><span>删除…</span></button>`;
   rowMenu.hidden = false;
@@ -510,7 +512,6 @@ async function refreshAuthState() {
     S.authSetup = st.mode === 'setup';
     S.authed = !!st.authed;
     S.user = st.authed ? (st.user || null) : null;
-    S.accountName = st.user || null;
     S.salt = st.salt; S.iters = st.iters;
   } catch { /* 网络异常时保留旧状态 */ }
   renderAuthUI();
@@ -518,7 +519,7 @@ async function refreshAuthState() {
 
 function renderAuthUI() {
   const b = $('#btn-auth');
-  b.hidden = !!S.page || !!S.space;   // 文章页/编辑态不显示
+  b.hidden = !el.editWrap.hidden;   // Keep account actions out of the editor, including its unsaved draft.
   if (b.hidden) return;
   b.textContent = S.authed ? '退出' : (S.authSetup ? '初始化账号' : '登录');
   b.title = S.authed ? `${S.user} · 退出登录`
@@ -535,13 +536,45 @@ function renderAuthUI() {
   };
 }
 
+// The login dialog borrows the shared modal element and the caller's continuation, so a stale
+// instance must never act again once the user dismissed it. Every dialog registers its own
+// `cancel` here; opening a second one supersedes the first instead of stacking closures on the
+// same `.modal` node (a keydown listener added there outlived `innerHTML = ''` and fired once
+// more per reopening).
+let closeLoginDialog: (() => void) | null = null;
+
+/* ---------------- Remembered account name ---------------- */
+// A visitor who is not signed in cannot learn the account name from the server — the session
+// state only names whoever is logged in — so the login form remembers it locally instead. Only
+// the name is kept: the password, the derived key, nonces and proofs must never be written to
+// disk, and the browser's own autofill is free to supply everything else.
+const LOGIN_USER_KEY = 'doclight-login-user';
+
+/** Stored account name, or '' when nothing usable is available (also under privacy mode). */
+function readRememberedUser(): string {
+  try {
+    const saved = localStorage.getItem(LOGIN_USER_KEY);
+    if (typeof saved !== 'string') return '';
+    const name = saved.trim();
+    return name && name.length <= 40 ? name : '';
+  } catch { return ''; }   // disabled storage: leave the field to the browser's autofill
+}
+
+/** Remember a name that the server just accepted; failures never block the sign-in. */
+function rememberUser(name: string): void {
+  const saved = name.trim();
+  if (!saved) return;
+  try { localStorage.setItem(LOGIN_USER_KEY, saved.slice(0, 40)); } catch { /* ignore */ }
+}
+
 function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () => void } = {}) {
+  closeLoginDialog?.();
   const m = openModal(`
     <h3>${setup ? '初始化站长账号' : '登录 DocLight'}</h3>
     <p class="desc">${setup
       ? '首次使用，设置用户名与密码。密码经 PBKDF2 派生，明文不落盘、不上网。用户名仅限字母、数字、_ 或 -。'
       : '修改内容前需要登录（阅读始终公开）。'}</p>
-    <input id="lg-user" type="text" placeholder="${setup ? '请设置用户名' : '请输入用户名'}" maxlength="40" autocomplete="username" value="${setup ? '' : esc(S.accountName || S.user || '')}">
+    <input id="lg-user" type="text" placeholder="${setup ? '请设置用户名' : '请输入用户名'}" maxlength="40" autocomplete="username" value="${setup ? '' : esc(readRememberedUser())}">
     <input id="lg-pass" type="password" placeholder="密码" autocomplete="${setup ? 'new-password' : 'current-password'}">
     ${setup ? '<input id="lg-pass2" type="password" placeholder="确认密码" autocomplete="new-password">' : ''}
     <p class="desc" id="lg-err" style="color:var(--danger)" hidden></p>
@@ -550,40 +583,84 @@ function showLoginDialog({ setup = false, then }: { setup?: boolean; then?: () =
       <button class="btn btn-primary" data-x="ok">${setup ? '创建并登录' : '登录'}</button>
     </div>`);
   const $lg = s => $(s, m);
-  const err = t => { const e = $lg('#lg-err'); e.textContent = t; e.hidden = !t; };
+  // Capture the nodes once: after `closeModal()` empties `.modal` they are detached, which is
+  // exactly how a finishing request tells that its dialog is gone.
+  const userInput = $lg('#lg-user');
+  const passInput = $lg('#lg-pass');
+  const pass2Input = $lg('#lg-pass2');
+  const errBox = $lg('#lg-err');
   const okBtn = $lg('[data-x=ok]');
+  const idleLabel = setup ? '创建并登录' : '登录';
+  const err = t => { errBox.textContent = t; errBox.hidden = !t; };
+  let busy = false;   // one request at a time: Enter, click and the re-enabled button all funnel here
+  let cancelled = false;
+  // Cancelled, or replaced by another modal: either way there is nothing left to paint, and a
+  // caller's flow must not resume. `isConnected` is the exact test — every route that takes the
+  // dialog away (`closeModal`, another `openModal`) replaces `.modal`'s children.
+  const alive = () => !cancelled && userInput.isConnected;
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (closeLoginDialog === cancel) closeLoginDialog = null;
+    passInput.value = '';
+    if (pass2Input) pass2Input.value = '';
+    if (userInput.isConnected) closeModal();   // another modal may already own the slot
+  };
   const submit = async () => {
-    const user = $lg('#lg-user').value.trim();
-    const pass = $lg('#lg-pass').value;
-    if (setup && !/^[A-Za-z0-9_-]{1,40}$/.test(user)) { err('用户名仅限字母、数字、下划线、连字符（≤40 位）'); return; }
+    if (busy || cancelled) return;
+    const user = userInput.value.trim();
+    const pass = passInput.value;
+    // Both setup and login require an account name; validate its format before making a request.
+    if (!user) { err('请输入用户名'); return; }
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(user)) { err('用户名仅限字母、数字、下划线、连字符（≤40 位）'); return; }
     if (!/^[\x20-\x7E]+$/.test(pass)) { err('密码仅支持英文、数字与半角符号，不能包含中文或全角字符'); return; }
     if (pass.length < 6) { err('密码长度至少 6 位'); return; }
-    if (setup && pass !== $lg('#lg-pass2').value) { err('两次输入的密码不一致'); return; }
+    if (setup && pass !== pass2Input.value) { err('两次输入的密码不一致'); return; }
+    busy = true;
     okBtn.disabled = true; okBtn.textContent = '验证中…'; err('');
     try {
       if (setup) {
         const ks = await deriveKeyHex(pass, S.salt, S.iters);
+        if (!alive()) return;   // nothing was sent yet, so there is no session change to sync
         await api('auth/setup', { method: 'POST', body: JSON.stringify({ user, ks }) });
       } else {
         const ch = await api<AuthChallengeResponse>('auth/challenge');
         const k = await deriveKeyHex(pass, ch.salt, ch.iters);
         const proof = await hmacHex(k, ch.nonce);
-        await api('auth/login', { method: 'POST', body: JSON.stringify({ nonce: ch.nonce, proof }) });
+        if (!alive()) return;
+        // The server checks the submitted name and password proof before creating a session.
+        await api('auth/login', { method: 'POST', body: JSON.stringify({ user, nonce: ch.nonce, proof }) });
       }
+      // The credentials were already sent: a dialog cancelled mid-flight still has to resync the
+      // session, because the server may have accepted the login before the user dismissed it.
       await refreshAuthState();
+      if (!alive()) return;   // dismissed ⇢ sync the state, but never remember or resume
+      // Remember only a sign-in the user actually completed, and only the name the session
+      // confirms. A failed attempt or a cancel never writes, so the memory cannot go stale.
+      if (S.authed) rememberUser(S.user || user);
       closeModal();
+      if (closeLoginDialog === cancel) closeLoginDialog = null;
       toast(setup ? '账号已创建 ✓' : `欢迎回来，${S.user}`);
       then?.();
     } catch (e2) {
+      if (!alive()) return;
+      busy = false;
+      okBtn.disabled = false; okBtn.textContent = idleLabel;
       err(e2.message || '操作失败');
-      okBtn.disabled = false; okBtn.textContent = setup ? '创建并登录' : '登录';
     }
   };
-  $('[data-x=no]', m).onclick = () => closeModal();
+  // Enter is bound to the freshly created inputs rather than to `.modal`: those nodes die with
+  // the dialog, so a reopening cannot inherit an extra handler, and `preventDefault` keeps a
+  // second activation from reaching the same round trip.
+  const onEnter = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+  userInput.addEventListener('keydown', onEnter);
+  passInput.addEventListener('keydown', onEnter);
+  pass2Input?.addEventListener('keydown', onEnter);
+  $('[data-x=no]', m).onclick = cancel;
   okBtn.onclick = submit;
-  activeModalDone = () => closeModal();
-  m.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
-  $lg('#lg-user').focus();
+  closeLoginDialog = cancel;
+  activeModalDone = cancel;
+  userInput.focus();
 }
 
 /* ============================================================
@@ -607,8 +684,13 @@ function chainOf(pageSlug) {
   if (!page) return [];
   const space = spaceBySlug(page.space);
   const chain = [];
+  const seen = new Set<string>();
   let cur = page;
-  while (cur) { chain.unshift(cur); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  while (cur && !seen.has(cur.slug)) {
+    seen.add(cur.slug);
+    chain.unshift(cur);
+    cur = cur.parent ? pageBySlug(cur.parent) : null;
+  }
   return space ? [space, ...chain] : chain;
 }
 function canonicalPath(slug) {
@@ -637,13 +719,32 @@ function revealPath(pageSlug) {
   const page = pageBySlug(pageSlug);
   if (!page) return;
   collapsedSet.delete('s:' + page.space);
-  let cur = page;
-  while (cur) { collapsedSet.delete('p:' + cur.slug); cur = cur.parent ? pageBySlug(cur.parent) : null; }
+  for (const node of chainOf(pageSlug)) collapsedSet.delete('p:' + node.slug);
 }
 
 /* ============================================================
    Sidebar: space sections + page tree
    ============================================================ */
+const TREE_GRIP_SVG = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true"><g fill="currentColor">' +
+  '<circle cx="2.6" cy="3.2" r="1.35"/><circle cx="7.4" cy="3.2" r="1.35"/>' +
+  '<circle cx="2.6" cy="8" r="1.35"/><circle cx="7.4" cy="8" r="1.35"/>' +
+  '<circle cx="2.6" cy="12.8" r="1.35"/><circle cx="7.4" cy="12.8" r="1.35"/></g></svg>';
+
+/**
+ * Drag handle for a sidebar page row. The grip is the only drag surface, so pressing the row
+ * itself keeps behaving like a plain link — on touch, a long press there raises the browser's
+ * own link menu, which is exactly what the handle avoids.
+ */
+function sidebarGrip(depth: number): HTMLElement {
+  const grip = document.createElement('span');
+  grip.className = 'tree-grip';
+  grip.title = '拖动调整顺序';
+  grip.setAttribute('aria-hidden', 'true');
+  grip.style.left = (depth * 16 + 3) + 'px';
+  grip.innerHTML = TREE_GRIP_SVG;
+  return grip;
+}
+
 function renderSidebar(filter = '') {
   const q = filter.trim().toLowerCase();
   el.list.innerHTML = '';
@@ -734,6 +835,10 @@ function renderSidebar(filter = '') {
 
           const row = document.createElement('div');
           row.className = 'tree-row';
+          row.dataset.slug = p.slug;
+          row.dataset.parent = p.parent || '';
+          row.dataset.space = space.slug;
+          row.dataset.depth = String(depth);
 
           const pc = document.createElement('button');
           pc.className = 'caret' + (pOpen ? ' open' : '');
@@ -746,12 +851,15 @@ function renderSidebar(filter = '') {
             renderSidebar(el.search.value);
           });
 
+          const reorderable = !pageContentLocked(space) || devSourceEditable(space);
           const a = document.createElement('a');
           a.className = 'page-item' + (S.page?.slug === p.slug ? ' active' : '');
           a.href = canonicalPath(p.slug);
           a.dataset.nav = '';
-          a.style.paddingLeft = (10 + depth * 16) + 'px';
+          a.style.paddingLeft = (10 + depth * 16 + (reorderable ? 18 : 0)) + 'px';
+          a.draggable = false;
           a.innerHTML = `<span class="t">${esc(p.title)}</span><span class="s">${space.builtIn ? '随应用更新' : relTime(p.updatedAt)}${kids.length ? ' · ' + kids.length + ' 子页' : ''}</span>`;
+          if (reorderable) a.append(sidebarGrip(depth));
 
           const acts = document.createElement('span');
           acts.className = 'row-actions';
@@ -937,7 +1045,29 @@ function decorate(container) {
   }
 }
 
+/**
+ * "Recommend other articles" footer, rendered only when the space enables it.
+ *
+ * Order follows the sidebar (depth-first over the space tree), so previous/next read in the same
+ * sequence the tree navigates. The first and last page get a single card, and a space holding one
+ * page shows none.
+ */
+function recommendFooter(space, page) {
+  if (!space?.recommend) return '';
+  const { prev, next } = pageNeighbors(S.pages, page.slug);
+  if (!prev && !next) return '';
+  const card = (target, dir, kind) => `<a class="page-nav-card ${kind}" data-nav href="${esc(canonicalPath(target.slug))}">
+      <span class="dir">${dir}</span>
+      <span class="t">${esc(target.title)}</span>
+    </a>`;
+  return `<nav class="page-nav" aria-label="上一篇 / 下一篇">
+      ${prev ? card(prev, '← 上一篇', 'prev') : ''}
+      ${next ? card(next, '下一篇 →', 'next') : ''}
+    </nav>`;
+}
+
 function renderArticle(page) {
+  destroySourceEditor();
   const space = spaceBySlug(page.space);
   const locked = pageContentLocked(space);
   const chain = chainOf(page.slug);
@@ -953,8 +1083,8 @@ function renderArticle(page) {
        <span>${space?.builtIn ? '随应用更新' : `更新于 ${relTime(page.updatedAt)}`}</span><span class="sep">·</span>
        <span>${wordCount(page.content)} 字</span><span class="sep">·</span>
        <a href="javascript:void 0" id="copy-link">复制页面链接</a><span class="sep">·</span>
-       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑链接 slug">#${esc(page.slug)}</a>`}
-     </div>` + renderMarkdown(page.content);
+       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑页面路径">#${esc(page.slug)}</a><span class="lock-badge">开发者模式：编辑将写入模板源码</span>` : locked ? `<span class="slug-chip">#${esc(page.slug)}</span><span class="lock-badge">🔒 ${space?.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="slug-edit" class="slug-chip" title="编辑页面路径">#${esc(page.slug)}</a>`}
+     </div>` + renderMarkdown(page.content) + recommendFooter(space, page);
 
   decorate(el.article);
   $('#copy-link').addEventListener('click', () => {
@@ -983,6 +1113,7 @@ function renderArticle(page) {
   el.clusterEdit.hidden = true;
   el.clusterView.hidden = pageContentLocked(space);
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
   renderAuthUI();
@@ -992,6 +1123,52 @@ function renderArticle(page) {
 /* ============================================================
    Editor core
    ============================================================ */
+const SOURCE_WRAP_KEY = 'doclight-markdown-wrap';
+let sourceWrap = true;
+try { sourceWrap = localStorage.getItem(SOURCE_WRAP_KEY) !== 'off'; } catch { /* default on */ }
+let sourceView: ReturnType<typeof createMarkdownEditor> | null = null;
+let sourceGeneration = 0;
+const sourceDraft = new SourceDraft();
+let markdownDraft = '';
+let visualBaseline = '';
+let savedVisualRange: Range | null = null;
+let visualGeneration = 0;
+
+function clearVisualSelection() {
+  savedVisualRange = null;
+  visualGeneration++;
+}
+
+function rememberVisualSelection() {
+  const sel = getSelection();
+  if (el.editWrap.hidden || S.editMode !== 'visual' || !sel?.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (el.editor.contains(range.startContainer) && el.editor.contains(range.endContainer)) {
+    savedVisualRange = range.cloneRange();
+  }
+}
+
+el.editor.addEventListener('blur', rememberVisualSelection);
+
+function destroySourceEditor() {
+  sourceGeneration++;
+  sourceView?.destroy();
+  sourceView = null;
+}
+
+function renderSourceWrap() {
+  el.sourceWrapToggle.setAttribute('aria-pressed', String(sourceWrap));
+  el.sourceWrapToggle.textContent = `自动换行：${sourceWrap ? '开' : '关'}`;
+}
+
+el.sourceWrapToggle.addEventListener('click', () => {
+  sourceWrap = !sourceWrap;
+  try { localStorage.setItem(SOURCE_WRAP_KEY, sourceWrap ? 'on' : 'off'); } catch { /* preference is optional */ }
+  sourceView?.setWrap(sourceWrap);
+  renderSourceWrap();
+});
+renderSourceWrap();
+
 function markDirty() {
   if (!S.dirty) { S.dirty = true; el.dirtyPill.hidden = false; }
 }
@@ -1009,8 +1186,8 @@ function placeCaretEnd(node) {
 /** Read the document from whichever surface is active, in Markdown form. */
 function currentMarkdown(): string {
   return S.editMode === 'markdown'
-    ? el.sourceEditor.value
-    : htmlToMarkdown(el.editor.innerHTML);
+    ? sourceDraft.read(markdownDraft)
+    : el.editor.innerHTML === visualBaseline ? markdownDraft : htmlToMarkdown(el.editor.innerHTML);
 }
 
 /** Reflect the active mode on the segmented control, visually and for assistive tech. */
@@ -1023,31 +1200,46 @@ function renderModeToggle(mode: EditMode) {
 }
 
 /**
- * Switch between the visual (contenteditable) and Markdown (textarea) surfaces without
+ * Switch between the visual and Markdown surfaces without
  * losing edits. Both surfaces describe the same Markdown document, so the outgoing one is
  * serialised first and the incoming one is rebuilt from it. Kept idempotent: selecting the
  * already-active mode does nothing, so a stray click cannot reflow the document.
  */
 function setEditMode(mode: EditMode, focus = true) {
   if (S.editMode === mode) return;
+  clearVisualSelection();
   // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
   const markdown = currentMarkdown();
+  markdownDraft = markdown;
   S.editMode = mode;
 
   const visual = mode === 'visual';
   el.editor.hidden = !visual;
-  el.sourceEditor.hidden = visual;
+  el.sourcePanel.hidden = visual;
   // The formatting toolbar only makes sense for the WYSIWYG surface; Markdown is edited raw.
   el.toolbarWrap.hidden = !visual;
   el.editHint.innerHTML = visual ? EDIT_HINTS.visual : EDIT_HINTS.markdown;
 
   if (visual) {
     el.editor.innerHTML = renderMarkdown(markdown);
+    visualBaseline = el.editor.innerHTML;
     if (focus) placeCaretEnd(el.editor);
     setTimeout(() => refreshToolbarState(), 50);
   } else {
-    el.sourceEditor.value = markdown;
-    if (focus) el.sourceEditor.focus();
+    if (!sourceView || sourceView.view.state.doc.toString() !== markdown) {
+      destroySourceEditor();
+      sourceDraft.clear();
+      const generation = sourceGeneration;
+      sourceView = createMarkdownEditor(el.sourceEditor, markdown, sourceWrap, document => {
+        if (S.editMode !== 'markdown' || generation !== sourceGeneration) return;
+        sourceDraft.update(document);
+        markDirty();
+      });
+      sourceDraft.update(sourceView.view.state.doc);
+    } else {
+      sourceView.view.requestMeasure();
+    }
+    if (focus) sourceView.view.focus();
   }
   renderModeToggle(mode);
 }
@@ -1068,8 +1260,10 @@ function renderEditorLockStatus() {
 
 function enterEdit(focus = true) {
   if (!S.page) return;
+  if (S.page.unclosedFrontMatter) { toast('页面开头的元数据围栏未闭合，请先检查原始文件；为保护内容，暂不能编辑。', 6000); return; }
   if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
+  clearVisualSelection();
   // The editor always goes full width, unaffected by the reading-view cap
   el.article.classList.remove('is-reading');
   el.article.hidden = true;
@@ -1078,15 +1272,19 @@ function enterEdit(focus = true) {
   el.clusterEdit.hidden = false;
   renderEditorLockStatus();
   el.editWrap.hidden = false;
+  renderAuthUI();
   el.titleInput.value = S.page.title;
 
-  // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
-  // the editor has a valid document on either side.
+  // Keep the original body until the visual surface actually changes; merely opening the
+  // editor or changing the title must not normalise hand-written Markdown.
+  destroySourceEditor();
+  sourceDraft.clear();
+  markdownDraft = S.page.content || '';
   S.editMode = 'visual';
-  el.editor.innerHTML = renderMarkdown(S.page.content);
-  el.sourceEditor.value = S.page.content || '';
+  el.editor.innerHTML = renderMarkdown(markdownDraft);
+  visualBaseline = el.editor.innerHTML;
   el.editor.hidden = false;
-  el.sourceEditor.hidden = true;
+  el.sourcePanel.hidden = true;
   el.toolbarWrap.hidden = false;
   el.editHint.innerHTML = EDIT_HINTS.visual;
   renderModeToggle('visual');
@@ -1180,6 +1378,7 @@ function refreshToolbarState() {
 }
 
 document.addEventListener('selectionchange', () => {
+  if (document.activeElement === el.editor) rememberVisualSelection();
   if (!el.editWrap.hidden) requestAnimationFrame(refreshToolbarState);
 });
 
@@ -1208,10 +1407,17 @@ function surroundInlineCode() {
 }
 
 async function cmdLink() {
-  el.editor.focus();
   const sel = getSelection();
-  const text = sel.rangeCount ? sel.getRangeAt(0).toString() : '';
-  const existing = sel.rangeCount && sel.anchorNode?.parentElement?.closest('a');
+  const currentRange = document.activeElement === el.editor && sel?.rangeCount ? sel.getRangeAt(0) : null;
+  const range = (currentRange || savedVisualRange)?.cloneRange();
+  if (!sel || !range || !el.editor.contains(range.startContainer) || !el.editor.contains(range.endContainer)) {
+    toast('请先将光标放在编辑区内');
+    return;
+  }
+  const generation = visualGeneration;
+  const text = range.toString();
+  const start = range.startContainer;
+  const existing = (start.nodeType === Node.ELEMENT_NODE ? start as Element : start.parentElement)?.closest('a');
   const url = await promptModal({
     title: '插入链接',
     label: text ? `将为「${text.slice(0, 24)}」添加超链接` : '选中文本后再点击工具栏，可直接给文字加链接',
@@ -1222,15 +1428,27 @@ async function cmdLink() {
   if (url === null) return;
   const finalUrl = normalizeUrl(url);
   if (!finalUrl) { toast('请输入有效的链接地址'); return; }
-  if (existing) {
+  // The prompt focuses its input, so restore the editor selection before using browser commands.
+  if (generation !== visualGeneration || el.editWrap.hidden || S.editMode !== 'visual' ||
+      !el.editor.contains(range.startContainer) || !el.editor.contains(range.endContainer)) {
+    toast('编辑位置已失效，请重新选择文本');
+    return;
+  }
+  el.editor.focus();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  if (existing && el.editor.contains(existing)) {
     existing.setAttribute('href', finalUrl);
   } else if (text.trim()) {
-    document.execCommand('createLink', false, esc(finalUrl));
+    if (!document.execCommand('createLink', false, finalUrl)) { toast('插入链接失败'); return; }
     const a = sel.anchorNode?.parentElement?.closest('a');
     if (a) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
   } else {
-    document.execCommand('insertHTML', false,
-      `<a href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">${esc(finalUrl)}</a>&nbsp;`);
+    if (!document.execCommand('insertHTML', false,
+      `<a href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">${esc(finalUrl)}</a>&nbsp;`)) {
+      toast('插入链接失败');
+      return;
+    }
   }
   markDirty();
 }
@@ -1354,7 +1572,7 @@ $('#toolbar').addEventListener('click', async e => {
     if (tip) toast(tip, 1400);
   }
   const cmd = btn.dataset.cmd;
-  el.editor.focus();
+  if (cmd !== 'createlink') el.editor.focus();
 
   switch (cmd) {
     case 'inlinecode': surroundInlineCode(); break;
@@ -1406,7 +1624,7 @@ async function lockSpaceFlow(space: Space) {
   }
   const m = openModal(`
     <h3>解锁空间「${esc(space.title)}」</h3>
-    <p class="desc">请输入当前登录账号的密码。密码仅在本地用于验证，不会发送明文。</p>
+    <p class="desc">请输入当前登录账号的密码。密码会在浏览器中用于生成验证信息，密码明文不会发送。远程访问请使用 HTTPS。</p>
     <input type="password" autocomplete="current-password" placeholder="登录密码">
     <p class="desc" data-x="error" style="color:var(--danger)" hidden></p>
     <div class="modal-actions"><button class="btn btn-ghost" data-x="no">取消</button><button class="btn btn-primary" data-x="ok">解锁</button></div>`);
@@ -1498,38 +1716,45 @@ async function refreshTree() {
   }
 }
 
-async function setSpaceSort(space, key) {
-  if (!space) return;
-  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
-  // `sort` key and a future change of the default still reaches the files that never set one.
-  const body = { sort: key === DEFAULT_SORT ? null : key };
+/**
+ * Persist one space-settings change and refresh whatever depends on it.
+ *
+ * Order is computed server-side from the page fields, so the tree is refetched rather than patched
+ * locally — that keeps one definition of the order instead of two that can drift. The failure
+ * branch must never navigate: the settings entry is reachable from every route, and rendering the
+ * index clears `S.page`, hides the editor and empties `#editor`, which used to discard unsaved
+ * work with no confirmation.
+ */
+async function saveSpaceSettings(space, changes: { sort?: SortKey | null; recommend?: boolean }, note = '空间设置已更新 ✓') {
+  if (!space || !Object.keys(changes).length) return;
   try {
     const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
-      method: 'PUT', body: JSON.stringify(body),
+      method: 'PUT', body: JSON.stringify(changes),
     });
     const i = S.spaces.findIndex(s => s.slug === space.slug);
     if (i >= 0) S.spaces[i] = updated;
     // Keep `S.space` in step even if the refetch below fails, so the index renders the value the
     // server just stored rather than the one it replaced.
     if (S.space?.slug === space.slug) S.space = updated;
-    // Order is computed server-side from the page files, so the tree has to be refetched rather
-    // than re-sorted here — that keeps one definition of the order instead of two that can drift.
     await refreshTree();
-    // Only the space index owns a picker to re-render; anywhere else the sidebar is enough. The
-    // entry point is reachable from every route, so rendering the index unconditionally would
-    // navigate the reader away from the article they are on.
     if (S.space?.slug === space.slug) renderSpace(S.space);
+    // The reading view only needs a re-render when the recommendation footer itself changed, and
+    // never while the editor is open: re-rendering the article would discard unsaved content.
+    else if (changes.recommend !== undefined && S.page?.space === space.slug && el.editWrap.hidden) renderArticle(S.page);
     else renderSidebar(el.search.value);
-    toast('排序已更新 ✓');
+    toast(note);
   } catch (err) {
     toast(err.message, 3000);
-    // The stored value is unchanged, so only the index's own picker needs putting back. Rendering
-    // the index from here used to be unconditional, which from an article — or from the editor —
-    // replaced the view: `renderSpace` clears `S.page`, hides the editor and empties `#editor`,
-    // silently discarding unsaved work with no confirmation.
+    // The stored value is unchanged, so only the index's own controls need putting back.
     if (S.space?.slug === space.slug) renderSpace(S.space);
     else renderSidebar(el.search.value);
   }
+}
+
+async function setSpaceSort(space, key) {
+  // Choosing the default clears the field rather than writing it, so an untouched space keeps no
+  // `sort` key and a future change of the default still reaches the files that never set one.
+  await saveSpaceSettings(space, { sort: key === DEFAULT_SORT ? null : key }, '排序已更新 ✓');
 }
 
 /**
@@ -1541,47 +1766,90 @@ async function setSpaceSort(space, key) {
  */
 async function spaceSettingsFlow(space) {
   if (!space) return;
+  const locked = pageContentLocked(space);
   const m = openModal(`
     <h3>空间设置</h3>
     <p class="desc">${esc(space.title)}</p>
+    <div class="switch-row">
+      <span class="switch-copy"><span>空间路径</span><small>${esc(space.slug)}</small></span>
+      <button type="button" class="btn btn-ghost" data-x="slug"${locked ? ' disabled' : ''}>编辑路径…</button>
+    </div>
     <label class="sort-pick" for="ss-sort">
       <span>排序</span>
-      <select id="ss-sort" title="侧栏与总览的页面顺序">
+      <select id="ss-sort" title="侧栏与总览的页面顺序"${locked ? ' disabled' : ''}>
         ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
       </select>
     </label>
+    <label class="switch-row" for="ss-recommend">
+      <span class="switch-copy">
+        <span>自动按顺序推荐其他文章</span>
+        <small>在文章底部显示上一篇 / 下一篇卡片</small>
+      </span>
+      <input type="checkbox" id="ss-recommend"${space.recommend ? ' checked' : ''}${locked ? ' disabled' : ''}>
+      <span class="switch-ui" aria-hidden="true"></span>
+    </label>
+    ${space.builtIn ? '' : `<div class="switch-row">
+      <span class="switch-copy"><span>空间锁定</span><small>锁定后内容仍可阅读，修改需先解锁</small></span>
+      <button type="button" class="btn btn-ghost" data-x="lock">${space.locked ? '解锁空间…' : '锁定空间…'}</button>
+    </div>`}
     <div class="modal-actions">
       <button class="btn btn-ghost" data-x="no">关闭</button>
-      <button class="btn btn-primary" data-x="ok">保存</button>
+      <button class="btn btn-primary" data-x="ok"${locked ? ' disabled' : ''}>保存</button>
     </div>`);
   const sel = $('#ss-sort', m) as HTMLSelectElement;
+  const rec = $('#ss-recommend', m) as HTMLInputElement;
   let settled = false;
   const finish = async save => {
     if (settled) return;
     settled = true;
     const pick = sel.value;
+    // Send only what changed: an untouched field must not be rewritten (the default sort is
+    // stored as `null`, not as the current default value), and an empty change skips the request.
+    const changes: { sort?: SortKey | null; recommend?: boolean } = {};
+    if (pick !== (space.sort ?? DEFAULT_SORT)) changes.sort = pick === DEFAULT_SORT ? null : (pick as SortKey);
+    if (rec.checked !== !!space.recommend) changes.recommend = rec.checked;
     closeModal();
-    if (save && pick !== (space.sort ?? DEFAULT_SORT)) await setSpaceSort(space, pick);
+    // Keep the sort-only message other suites and the toast copy rely on; the switch gets the
+    // broader wording because the same save may have touched two fields.
+    if (save) await saveSpaceSettings(space, changes, changes.recommend === undefined ? '排序已更新 ✓' : '空间设置已更新 ✓');
   };
   $('[data-x=no]', m).onclick = () => finish(false);
   $('[data-x=ok]', m).onclick = () => finish(true);
+  const openSubflow = (flow: () => void) => {
+    if (sel.value !== (space.sort ?? DEFAULT_SORT) || rec.checked !== !!space.recommend) {
+      toast('请先保存或放弃空间设置的更改');
+      return;
+    }
+    finish(false);
+    flow();
+  };
+  const lockButton = m.querySelector('[data-x=lock]') as HTMLButtonElement | null;
+  if (lockButton) lockButton.onclick = () => openSubflow(() => lockSpaceFlow(space));
+  $('[data-x=slug]', m).onclick = () => openSubflow(() => slugSpaceFlow(space));
   activeModalDone = () => finish(false);
 }
 
 async function slugSpaceFlow(space) {
-  if (!space) return;
+  if (!space || pageContentLocked(space)) return;
+  if (!S.authed) {
+    showLoginDialog({ setup: S.authSetup, then: () => {
+      const current = spaceBySlug(space.slug);
+      if (current) slugSpaceFlow(current);
+    } });
+    return;
+  }
   const value = await promptModal({
-    title: '编辑空间 slug',
+    title: '编辑空间路径',
     label: devSourceEditable(space)
       ? '仅限小写字母、数字、下划线。修改后旧空间链接及 Markdown 中硬编码的旧链接将失效。'
-      : '仅限小写字母、数字、下划线。slug 是空间的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+      : '仅限小写字母、数字、下划线。修改空间路径后，旧链接将失效。',
     value: space.slug,
     placeholder: 'my_space',
     ok: '保存',
   });
   if (value === null || value === space.slug) return;
   const ns = normalizeSlugInput(value);
-  if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
+  if (!ns) { toast('空间路径只能含小写字母、数字、下划线'); return; }
   try {
     const old = space.slug;
     const updated = await api<Space>('spaces/' + encodeURIComponent(old), {
@@ -1595,7 +1863,7 @@ async function slugSpaceFlow(space) {
     if (i >= 0) S.spaces[i] = updated;
     const wasCurrent = S.space?.slug === old;
     if (wasCurrent) S.space = updated;
-    toast('slug 已更新 ✓');
+    toast('空间路径已更新 ✓');
     // Update the address bar without re-routing: pages keep their own slug, so only
     // the leading space segment changes.
     if (S.page?.space === newSlug) {
@@ -1687,22 +1955,29 @@ function normalizeSlugInput(value: string): string {
 }
 
 async function slugFlow(pg: PageMeta | null = S.page) {
-  if (!pg) return;
+  if (!pg || pageContentLocked(spaceBySlug(pg.space))) return;
+  if (!S.authed) {
+    showLoginDialog({ setup: S.authSetup, then: () => {
+      const current = pageBySlug(pg.slug);
+      if (current) slugFlow(current);
+    } });
+    return;
+  }
   const dev = devSourceEditable(spaceBySlug(pg.space));
   const prefix = 'doclight-default-';
   const initial = dev && pg.slug.startsWith(prefix) ? pg.slug.slice(prefix.length) : pg.slug;
   const value = await promptModal({
-    title: '编辑链接 slug',
+    title: '编辑页面路径',
     label: dev
       ? '仅限小写字母、数字、下划线，对应模板源文件名；修改后旧链接将失效。'
-      : '仅限小写字母、数字、下划线。slug 是页面的永久地址，修改后旧链接将失效（免费随便改 🙂）',
+      : '仅限小写字母、数字、下划线。修改页面路径后，旧链接将失效。',
     value: initial,
     placeholder: 'my_page_1',
     ok: '保存',
   });
   if (value === null || value === initial) return;
   const ns = normalizeSlugInput(value);
-  if (!ns) { toast('slug 只能含小写字母、数字、下划线'); return; }
+  if (!ns) { toast('页面路径只能含小写字母、数字、下划线'); return; }
   try {
     const old = pg.slug;
     const updated = await api<Page>('pages/' + encodeURIComponent(old), {
@@ -1713,7 +1988,7 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     const i = S.pages.findIndex(p => p.slug === old);
     if (i >= 0) { S.pages[i].slug = newSlug; S.pages[i].updatedAt = updated.updatedAt; }
     await refreshTree();          // slug is the order's tie-break, so the rank can move
-    toast('slug 已更新 ✓');
+    toast('页面路径已更新 ✓');
     if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(newSlug)); }
     else if (S.space) renderSpace(S.space);
     else renderSidebar(el.search.value);
@@ -1830,6 +2105,7 @@ function dispatchPageAction(action: string, page: PageMeta | null = S.page): voi
    Views: space overview / space index / article
    ============================================================ */
 function renderHome() {
+  destroySourceEditor();
   S.page = null; S.space = null;
   document.title = 'DocLight · 空间总览';
   el.crumb.textContent = '';
@@ -1840,6 +2116,7 @@ function renderHome() {
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = true;
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
   if (builtInConflict) {
@@ -1878,11 +2155,31 @@ function renderHome() {
   renderSidebar(el.search.value);
 }
 
+// A query parameter distinguishes a page's child-card index from the page itself.
+const childCardsPath = (slug: string) => `${canonicalPath(slug)}?view=children`;
+
+function cardIndexParent(space: Space): PageMeta | null {
+  if (new URLSearchParams(location.search).get('view') !== 'children') return null;
+  const path = withoutBase(location.pathname);
+  if (!path) return null;
+  let last: string;
+  try { last = decodeURIComponent(path.split('/').filter(Boolean).at(-1) || ''); }
+  catch { return null; }
+  const page = pageBySlug(last) as PageMeta | null;
+  return page && page.space === space.slug && canonicalPath(page.slug) === location.pathname ? page : null;
+}
+
 function renderSpace(space) {
+  destroySourceEditor();
   S.page = null; S.space = space;
+  const parent = cardIndexParent(space);
+  if (!parent && new URLSearchParams(location.search).get('view') === 'children'
+      && location.pathname !== canonicalPath(space.slug)) {
+    history.replaceState(null, '', childCardsPath(space.slug));
+  }
   collapsedSet.delete('s:' + space.slug);   // 进入空间索引时展开
-  document.title = space.title + ' · DocLight';
-  el.crumb.textContent = space.title;
+  document.title = (parent ? `${parent.title}的子页面 · ${space.title}` : space.title) + ' · DocLight';
+  el.crumb.textContent = parent ? parent.title : space.title;
   el.article.classList.remove('is-reading');
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
@@ -1890,50 +2187,524 @@ function renderSpace(space) {
   el.clusterView.hidden = true;
   el.clusterEdit.hidden = true;
   el.dirtyPill.hidden = true;
+  clearVisualSelection();
   el.editor.innerHTML = '';
 
-  const tops = spacePages(space.slug, null);
-  const cards = tops.map(p => {
-    const n = childrenOf(p.slug).filter(k => k.space === space.slug).length;
-    return `<a class="card" data-nav href="${esc(canonicalPath(p.slug))}">
-              <span class="t">${esc(p.title)}</span>
-              <span class="s">${n ? n + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
-            </a>`;
+  const childrenByParent = new Map<string | null, PageMeta[]>();
+  for (const page of S.pages as PageMeta[]) {
+    if (page.space !== space.slug) continue;
+    const parent = page.parent || null;
+    const siblings = childrenByParent.get(parent) || [];
+    siblings.push(page);
+    childrenByParent.set(parent, siblings);
+  }
+  const pages = (childrenByParent.get(parent?.slug || null) || []).filter(p => p.slug !== parent?.slug);
+  const path = parent ? chainOf(parent.slug) : [];
+  const crumbs = parent ? path.map((node, index) => index === path.length - 1
+    ? `<span class="cur">${esc(node.title)}的子页面</span>`
+    : `<a data-nav href="${esc(childCardsPath(node.slug))}">${esc(node.title)}</a>`).join('<span aria-hidden="true"> / </span>')
+    : `<span class="cur">${esc(space.title)}</span>`;
+  // Manual ordering is a write: locked spaces and the read-only built-in template get no grips.
+  const canSort = !pageContentLocked(space) || devSourceEditable(space);
+  const cards = pages.map(p => {
+    const children = (childrenByParent.get(p.slug) || []).filter(child => child.slug !== p.slug);
+    return `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
+              ${canSort ? `<span class="card-grip" role="button" aria-label="拖动排序" title="拖动排序"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/></g></svg></span>` : ''}
+              <a class="card-link" data-nav href="${esc(canonicalPath(p.slug))}" draggable="false">
+                <span class="t">${esc(p.title)}</span>
+                <span class="s">${children.length ? children.length + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
+              </a>
+              ${children.length ? `<a class="card-expand" data-nav href="${esc(childCardsPath(p.slug))}" aria-label="查看${esc(p.title)}的子页面">查看 ${children.length} 个子页面 <span aria-hidden="true">→</span></a>` : ''}
+            </div>`;
   }).join('');
 
   el.article.innerHTML =
-    `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
-       ${devSourceEditable(space) ? `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a><span class="lock-badge">开发者模式：可编辑模板源码</span>` : pageContentLocked(space) ? `<span class="slug-chip">#${esc(space.slug)}</span><span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : `<a href="javascript:void 0" id="sp-slug-edit" class="slug-chip" title="编辑空间 slug">#${esc(space.slug)}</a>`}
+    `<div class="meta-row"><nav class="crumbs" aria-label="页面层级">${crumbs}</nav><span class="sep">·</span>
+       <span id="sp-slug" class="slug-chip">#${esc(space.slug)}</span>${devSourceEditable(space) ? '<span class="lock-badge">开发者模式：可编辑模板源码</span>' : pageContentLocked(space) ? `<span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : ''}
      </div>
      <div class="space-head">
        <div>
-         <h1>${esc(space.title)}</h1>
-         ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
+         <h1>${parent ? `${esc(parent.title)}的子页面` : esc(space.title)}</h1>
+         ${!parent && space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
-       <div class="space-acts"${pageContentLocked(space) && !devSourceEditable(space) ? ' hidden' : ''}>
-         <label class="sort-pick">
+       <div class="space-acts"${space.builtIn && !devSourceEditable(space) ? ' hidden' : ''}>
+         <label class="sort-pick"${!canSort ? ' hidden' : ''}>
            <span>排序</span>
            <select id="sp-sort" title="侧栏与总览的页面顺序">
              ${SORT_KEYS.map(k => `<option value="${k}"${k === (space.sort ?? DEFAULT_SORT) ? ' selected' : ''}>${SORT_LABELS[k]}</option>`).join('')}
            </select>
          </label>
-         <button class="btn btn-new" id="sp-add">＋ 新建页面</button>
-         <button class="btn btn-ghost" id="sp-rename">重命名</button>
-         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost danger-text" id="sp-delete">删除空间</button>'}
+         <label class="switch-inline" title="自动按顺序推荐其他文章：在文章底部显示上一篇 / 下一篇"${!canSort ? ' hidden' : ''}>
+           <span>启用推荐</span>
+           <input type="checkbox" id="sp-recommend"${space.recommend ? ' checked' : ''}>
+           <span class="switch-ui" aria-hidden="true"></span>
+         </label>
+         <button class="btn btn-new" id="sp-add"${!canSort ? ' hidden' : ''}>＋ ${parent ? '新建子页面' : '新建页面'}</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost" id="sp-settings">空间设置</button>'}
+         <button class="btn btn-ghost" id="sp-rename"${!canSort ? ' hidden' : ''}>重命名</button>
+         ${space.builtIn && !devSourceEditable(space) ? '' : `<button class="btn btn-ghost danger-text" id="sp-delete"${!canSort ? ' hidden' : ''}>删除空间</button>`}
        </div>
      </div>
-     <div class="cards">${cards || ''}</div>
-     ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
+     <div class="cards"${parent ? ` data-parent="${esc(parent.slug)}"` : ''}>${cards}</div>
+     ${pages.length ? '' : `<p class="list-empty" style="padding:30px 0">${parent ? '此页面还没有子页面。' : pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
 
   el.article.hidden = false;
   decorate(el.article);
   $('#sp-sort').addEventListener('change', (e) => setSpaceSort(space, (e.target as HTMLSelectElement).value));
-  $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
+  // Same setting as the modal switch, offered where the sort picker already lives.
+  $('#sp-recommend').addEventListener('change', (e) =>
+    saveSpaceSettings(space, { recommend: (e.target as HTMLInputElement).checked }));
+  $('#sp-settings')?.addEventListener('click', () => spaceSettingsFlow(space));
+  $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, parent?.slug || null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
-  $('#sp-slug-edit')?.addEventListener('click', () => slugSpaceFlow(space));
   $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
+  const article = el.article as HTMLElement;
+  if (canSort) {
+    article.querySelectorAll<HTMLElement>('.cards').forEach(container => {
+      if ([...container.children].filter(child => child.classList.contains('space-page-card')).length > 1) {
+        setupCardDrag(space, container);
+      }
+    });
+  }
   renderAuthUI();
   renderSidebar(el.search.value);
+}
+
+/* ============================================================
+   Manual card ordering (drag)
+   ============================================================ */
+const CARD_DRAG_THRESHOLD = 4;
+
+/** Scroll a drag container near its vertical edges and recompute the drop target after each step. */
+function createDragAutoScroller(container: HTMLElement, onScroll: (x: number, y: number) => void) {
+  let x = 0, y = 0, frame = 0, lastTime = 0, remainder = 0, stopped = false;
+  const speed = () => {
+    const rect = container.getBoundingClientRect();
+    const top = Math.max(0, rect.top), bottom = Math.min(window.innerHeight, rect.bottom);
+    const edge = Math.min(56, (bottom - top) / 3);
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (edge <= 0 || maxScroll <= 0) return 0;
+    if (y < top + edge && container.scrollTop > 0) return -Math.min(1, (top + edge - y) / edge);
+    if (y > bottom - edge && container.scrollTop < maxScroll) return Math.min(1, (y - bottom + edge) / edge);
+    return 0;
+  };
+  const tick = (time: number) => {
+    frame = 0;
+    if (stopped) return;
+    const direction = speed();
+    if (!direction) { lastTime = 0; remainder = 0; return; }
+    const elapsed = lastTime ? Math.min(50, Math.max(0, time - lastTime)) : 1000 / 60;
+    lastTime = time;
+    if (remainder * direction < 0) remainder = 0;
+    // Accumulate subpixel steps: browsers that round scrollTop must still move near the edge.
+    remainder += direction * 18 * elapsed / (1000 / 60);
+    const step = Math.trunc(remainder);
+    if (step) {
+      const before = container.scrollTop;
+      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+      container.scrollTop = Math.max(0, Math.min(maxScroll, before + step));
+      const moved = container.scrollTop - before;
+      if (!moved) { lastTime = 0; remainder = 0; return; }
+      remainder -= moved;
+      onScroll(x, y);
+    }
+    if (!stopped && speed()) frame = requestAnimationFrame(tick);
+    else { lastTime = 0; remainder = 0; }
+  };
+  return {
+    update(nextX: number, nextY: number) {
+      x = nextX; y = nextY;
+      if (!stopped && !frame && speed()) frame = requestAnimationFrame(tick);
+    },
+    stop() {
+      stopped = true;
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+    },
+  };
+}
+
+/**
+ * Pointer-driven reordering for the space index cards, in the spirit of Yuque's card lists: the
+ * card lifts under the pointer, a dashed placeholder marks the drop slot and the other cards slide
+ * aside. Mouse users can drag anywhere on the card; touch and pen start from the grip, because a
+ * finger dragging the card body would fight page scrolling.
+ *
+ * Nothing is persisted until the pointer is released: the DOM is the preview, and the drop sends
+ * the new slug order to the space API (switching the space to manual sort on the first drag).
+ */
+function setupCardDrag(space, container: HTMLElement) {
+  const parentSlug = container.dataset.parent || null;
+  const cardsIn = () => [...container.children].filter((child): child is HTMLElement =>
+    child instanceof HTMLElement && child.classList.contains('space-page-card'));
+  let swallowClick = false;
+
+  // A drag ends with a click on the link under the pointer; swallow exactly that one, and never let
+  // a tap on the grip navigate.
+  container.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest?.('.cards') !== container) return;
+    if (target.closest?.('.card-grip')) { e.preventDefault(); e.stopPropagation(); return; }
+    if (!swallowClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowClick = false;
+  }, true);
+
+  container.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest?.('.cards') !== container || target.closest?.('.card-expand')) return;
+    const card = target.closest?.('.space-page-card[data-slug]') as HTMLElement | null;
+    if (!card || card.parentElement !== container) return;
+    const grip = target.closest?.('.card-grip');
+    if (!grip && e.pointerType && e.pointerType !== 'mouse') return;
+    if (grip) e.preventDefault();
+    startDrag(e, card, grip);
+  });
+
+  function startDrag(e, card, grip) {
+    const startX = e.clientX, startY = e.clientY;
+    let active = false;
+    let placeholder = null;
+    let offsetX = 0, offsetY = 0;
+    const scrollArea = container.closest('.scroll-area') as HTMLElement | null;
+    const autoScroll = scrollArea ? createDragAutoScroller(scrollArea, (x, y) => placePlaceholder(x, y)) : null;
+
+    const cleanup = (restore) => {
+      autoScroll?.stop();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      if (placeholder) {
+        if (restore) placeholder.replaceWith(card);
+        else placeholder.remove();
+        placeholder = null;
+      }
+      card.classList.remove('is-dragging');
+      card.style.cssText = '';
+      container.classList.remove('is-sorting');
+      document.body.classList.remove('is-card-dragging');
+      // If no click follows the drop, do not swallow the reader's next tap.
+      window.setTimeout(() => { swallowClick = false; }, 400);
+    };
+
+    const animate = (mutate) => {
+      const others = cardsIn().filter(el => el !== card);
+      const before = others.map(el => el.getBoundingClientRect());
+      mutate();
+      others.forEach((el, i) => {
+        const rect = el.getBoundingClientRect();
+        const dx = before[i].left - rect.left;
+        const dy = before[i].top - rect.top;
+        if (!dx && !dy) return;
+        el.style.transition = 'none';
+        el.style.transform = `translate(${dx}px, ${dy}px)`;
+        void el.offsetWidth;
+        requestAnimationFrame(() => {
+          el.style.transition = 'transform .18s cubic-bezier(.2, .7, .3, 1)';
+          el.style.transform = '';
+          window.setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 220);
+        });
+      });
+    };
+
+    const placePlaceholder = (x, y) => {
+      if (!placeholder) return;
+      let before = null;
+      for (const el of cardsIn()) {
+        if (el === card) continue;
+        const rect = el.getBoundingClientRect();
+        // Grid cards are laid out row-wise: inside a row compare x, otherwise compare y.
+        const sameRow = y >= rect.top && y <= rect.bottom;
+        const goesBefore = sameRow ? x < rect.left + rect.width / 2 : y < rect.top + rect.height / 2;
+        if (goesBefore) { before = el; break; }
+      }
+      if (before) {
+        if (placeholder.nextElementSibling !== before) animate(() => container.insertBefore(placeholder, before));
+      } else if (placeholder !== container.lastElementChild) {
+        animate(() => container.appendChild(placeholder));
+      }
+    };
+
+    const onMove = (ev) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < CARD_DRAG_THRESHOLD) return;
+        active = true;
+        const rect = card.getBoundingClientRect();
+        offsetX = startX - rect.left;
+        offsetY = startY - rect.top;
+        placeholder = document.createElement('div');
+        placeholder.className = 'card-placeholder';
+        placeholder.style.width = rect.width + 'px';
+        placeholder.style.height = rect.height + 'px';
+        card.insertAdjacentElement('afterend', placeholder);
+        card.style.width = rect.width + 'px';
+        card.style.height = rect.height + 'px';
+        card.classList.add('is-dragging');
+        container.classList.add('is-sorting');
+        document.body.classList.add('is-card-dragging');
+        swallowClick = true;
+        try { (grip || card).setPointerCapture?.(e.pointerId); } catch { /* optional */ }
+      }
+      ev.preventDefault();
+      card.style.left = (ev.clientX - offsetX) + 'px';
+      card.style.top = (ev.clientY - offsetY) + 'px';
+      placePlaceholder(ev.clientX, ev.clientY);
+      autoScroll?.update(ev.clientX, ev.clientY);
+    };
+
+    const onUp = (ev) => {
+      if (!active) { cleanup(false); return; }
+      // The placeholder marks where the card lands; read the resulting slug order before restoring it.
+      const order: string[] = [];
+      for (const child of container.children) {
+        if (child === placeholder) order.push(card.dataset.slug);
+        else if (child !== card && child instanceof HTMLElement && child.classList.contains('card')) order.push(child.dataset.slug);
+      }
+      cleanup(true);
+      if (ev.type !== 'pointercancel' && order.length) {
+        const current = spacePages(space.slug, null).map(p => p.slug);
+        saveSpaceOrder(space, buildSpaceOrder(space.slug, parentSlug, order), buildSpaceOrder(space.slug, null, current));
+      }
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+}
+
+/** True when two orders list the same slugs in the same sequence. */
+function sameOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((slug, i) => slug === b[i]);
+}
+
+/**
+ * Persist a manual order.
+ *
+ * A drop that lands the pages where they already were is a no-op for the reader, yet writing it
+ * would still move the space's `updatedAt` and re-sort every list that keys off it — so it is
+ * skipped and only a hint is shown.
+ */
+async function saveSpaceOrder(space, order, previous?: string[]) {
+  if (previous && sameOrder(previous, order)) { toast('排序无变化'); return; }
+  const changed = { order } as { sort?: SortKey; order: string[] };
+  if (space.sort !== 'manual') changed.sort = 'manual';
+  try {
+    const updated = await api<Space>('spaces/' + encodeURIComponent(space.slug), {
+      method: 'PUT', body: JSON.stringify(changed),
+    });
+    const i = S.spaces.findIndex(s => s.slug === space.slug);
+    if (i >= 0) S.spaces[i] = updated;
+    if (S.space?.slug === space.slug) S.space = updated;
+    await refreshTree();
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
+    toast('排序已更新 ✓');
+  } catch (err) {
+    toast(err.message, 3000);
+    if (S.space?.slug === space.slug) renderSpace(S.space);
+    else renderSidebar(el.search.value);
+  }
+}
+
+/* ============================================================
+   Manual ordering from the sidebar
+   ============================================================ */
+const SIDEBAR_DRAG_THRESHOLD = 4;
+
+/** Full DFS order of a space with one sibling group reordered, so the API gets a complete list. */
+function buildSpaceOrder(spaceSlug, parentSlug, siblingSlugs) {
+  const order = [];
+  const seen = new Set<string>();
+  const walk = (parent) => {
+    const kids = (parent || null) === (parentSlug || null)
+      ? siblingSlugs.map(slug => pageBySlug(slug)).filter(Boolean)
+      : spacePages(spaceSlug, parent);
+    for (const kid of kids) {
+      if (seen.has(kid.slug)) continue;
+      seen.add(kid.slug);
+      order.push(kid.slug);
+      walk(kid.slug);
+    }
+  };
+  walk(null);
+  return order;
+}
+
+/**
+ * Drag reordering in the sidebar.
+ *
+ * The sidebar is too narrow for a floating card, so the preview is an overlay insertion line
+ * (a two-pixel accent rule with a circular knob) plus a highlighted target row; a small ghost chip
+ * follows the pointer for context. Only siblings (same parent) are considered, so a drop never
+ * changes the tree structure — moving a page to a different parent stays in the row menu.
+ *
+ * A drag only starts from the row's grip handle. Pressing the row itself stays a normal link tap,
+ * which keeps the browser's own long-press link menu out of the gesture on touch devices.
+ */
+function setupSidebarDrag() {
+  let swallowClick = false;
+
+  el.list.addEventListener('click', (e) => {
+    if (!swallowClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowClick = false;
+  }, true);
+
+  el.list.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const grip = (e.target as HTMLElement).closest?.('.tree-grip');
+    if (!grip) return;
+    const row = grip.closest('.tree-row') as HTMLElement | null;
+    if (!row || !row.dataset.slug) return;
+    const space = spaceBySlug(row.dataset.space);
+    if (!space || (pageContentLocked(space) && !devSourceEditable(space))) return;
+    startDrag(e, row, space);
+  });
+
+  // The grip sits inside the row link, so keep the link callout from hijacking a slow press.
+  el.list.addEventListener('contextmenu', (e) => {
+    if ((e.target as HTMLElement).closest?.('.tree-grip')) e.preventDefault();
+  });
+
+  function startDrag(e, row, space) {
+    const page = pageBySlug(row.dataset.slug);
+    if (!page) return;
+    const startX = e.clientX, startY = e.clientY;
+    let active = false;
+    let ghost = null;
+    let marker = null;
+    let targetRow = null;
+    let dropBefore = false;
+    let lastX = startX, lastY = startY;
+    const autoScroll = createDragAutoScroller(el.list as HTMLElement, (x, y) => placeMarker(x, y));
+
+    const touchBlocker = (ev) => { if (active) ev.preventDefault(); };
+    // A slow press on the handle can still raise the browser's callout mid-drag; suppress it while
+    // the gesture owns the pointer.
+    const blockMenu = (ev) => { if (active) ev.preventDefault(); };
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      document.removeEventListener('touchmove', touchBlocker);
+      document.removeEventListener('contextmenu', blockMenu, true);
+      autoScroll.stop();
+      if (ghost) { ghost.remove(); ghost = null; }
+      if (marker) { marker.remove(); marker = null; }
+      if (highlightRow) { highlightRow.classList.remove('is-drop-target'); highlightRow = null; }
+      row.classList.remove('is-dragging');
+      document.body.classList.remove('is-row-dragging');
+      window.setTimeout(() => { swallowClick = false; }, 400);
+    };
+
+    const activate = () => {
+      active = true;
+      swallowClick = true;
+      row.classList.add('is-dragging');
+      document.body.classList.add('is-row-dragging');
+      ghost = document.createElement('div');
+      ghost.className = 'tree-drag-ghost';
+      ghost.textContent = page.title;
+      document.body.appendChild(ghost);
+      marker = document.createElement('div');
+      marker.className = 'tree-drop';
+      marker.setAttribute('aria-hidden', 'true');
+      el.list.appendChild(marker);
+
+    };
+
+    let highlightRow = null;
+
+    const placeMarker = (x, y) => {
+      if (!marker) return;
+      const parent = page.parent || '';
+      const siblings = [...el.list.querySelectorAll('.tree-row')]
+        .map(node => node as HTMLElement)
+        .filter(r => r !== row && r.dataset.space === space.slug && (r.dataset.parent || '') === parent);
+      if (!siblings.length) { targetRow = null; marker.hidden = true; return; }
+      targetRow = null;
+      dropBefore = false;
+      for (const candidate of siblings) {
+        const rect = candidate.getBoundingClientRect();
+        if (y < rect.top + rect.height / 2) { targetRow = candidate; dropBefore = true; break; }
+      }
+      if (!targetRow) {
+        targetRow = siblings[siblings.length - 1];
+        dropBefore = false;
+      }
+      // After the last sibling, the line belongs after that sibling's whole open subtree.
+      let edge = targetRow;
+      if (!dropBefore) {
+        const depth = Number(targetRow.dataset.depth || 0);
+        for (;;) {
+          const next = edge.nextElementSibling as HTMLElement | null;
+          if (!next || !next.classList.contains('tree-row') || next.dataset.space !== space.slug ||
+              Number(next.dataset.depth || 0) <= depth) break;
+          edge = next;
+        }
+      }
+      if (ghost) { ghost.style.left = x + 'px'; ghost.style.top = y + 'px'; }
+      // Yuque-style overlay: the list does not reflow while dragging. The line floats on the row
+      // boundary and the row it would land against is highlighted.
+      const listRect = el.list.getBoundingClientRect();
+      const anchorEl = targetRow.querySelector('.page-item');
+      const rowRect = targetRow.getBoundingClientRect();
+      const edgeRect = dropBefore ? rowRect : (edge as HTMLElement).getBoundingClientRect();
+      const indent = anchorEl ? anchorEl.getBoundingClientRect().left - listRect.left : 24;
+      const left = Math.max(12, indent - 2);
+      marker.hidden = false;
+      marker.style.top = (dropBefore ? edgeRect.top : edgeRect.bottom) - listRect.top + el.list.scrollTop - 1 + 'px';
+      marker.style.left = left + 'px';
+      marker.style.width = Math.max(24, listRect.width - left - 10) + 'px';
+      if (highlightRow !== edge) {
+        if (highlightRow) highlightRow.classList.remove('is-drop-target');
+        highlightRow = edge as HTMLElement;
+        highlightRow.classList.add('is-drop-target');
+      }
+    };
+
+    const onMove = (ev) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < SIDEBAR_DRAG_THRESHOLD) return;
+        activate();
+      }
+      ev.preventDefault();
+      lastX = ev.clientX;
+      lastY = ev.clientY;
+      if (ghost) { ghost.style.left = lastX + 'px'; ghost.style.top = lastY + 'px'; }
+      placeMarker(lastX, lastY);
+      autoScroll.update(lastX, lastY);
+    };
+
+    const onUp = (ev) => {
+      if (!active) { cleanup(); return; }
+      // `spacePages`/`buildSpaceOrder` take `null` for the root level; the DOM dataset stores ''.
+      const parent = page.parent || null;
+      const siblings = spacePages(space.slug, parent).map(p => p.slug).filter(slug => slug !== page.slug);
+      let index = siblings.length;
+      const targetSlug = targetRow && targetRow.dataset.slug;
+      const at = targetSlug ? siblings.indexOf(targetSlug) : -1;
+      if (at >= 0) index = dropBefore ? at : at + 1;
+      siblings.splice(index, 0, page.slug);
+      const order = buildSpaceOrder(space.slug, parent, siblings);
+      const current = buildSpaceOrder(space.slug, null, spacePages(space.slug, null).map(p => p.slug));
+      cleanup();
+      if (ev.type !== 'pointercancel' && order.length > 1) saveSpaceOrder(space, order, current);
+    };
+
+    // The grip sets `touch-action: none`, so a touch drag never scrolls the drawer; the blockers
+    // stay as a second line of defence for browsers that still emit a native gesture.
+    document.addEventListener('touchmove', touchBlocker, { passive: false });
+    document.addEventListener('contextmenu', blockMenu, true);
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
 }
 
 async function openPage(slug: string): Promise<void> {
@@ -1997,7 +2768,7 @@ async function route() {
     return;
   }
   if (segs.length === 1) {
-    if (!devSourceEditable(space) && space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
+    if (new URLSearchParams(location.search).get('view') !== 'children' && !devSourceEditable(space) && space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
     renderSpace(space);
     return;
   }
@@ -2013,6 +2784,11 @@ async function route() {
       return;
     }
     node = cand;
+  }
+  if (new URLSearchParams(location.search).get('view') === 'children') {
+    renderSpace(space);
+    $('.scroll-area')?.scrollTo?.({ top: 0 });
+    return;
   }
   await openPage(node.slug);
 }
@@ -2079,10 +2855,8 @@ rowMenu.addEventListener('click', e => {
   if (kind === 'space') {
     const sp = spaceBySlug(slug);
     if (!sp) return;
-    if (act === 'lock') lockSpaceFlow(sp);
-    if (pageContentLocked(sp)) return;
+    if (pageContentLocked(sp) && act !== 'settings') return;
     if (act === 'rename') renameSpaceFlow(sp);
-    if (act === 'slug') slugSpaceFlow(sp);
     if (act === 'settings') spaceSettingsFlow(sp);
     if (act === 'delete') deleteSpaceFlow(sp);
   } else {
@@ -2103,46 +2877,6 @@ document.addEventListener('click', e => {
 
 $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
-el.sourceEditor.addEventListener('input', markDirty);
-
-// Tab indents the Markdown surface instead of moving focus — code blocks and nested lists are
-// the common reason to reach for it. The operation is line-based: with a multi-line selection
-// every touched line is indented / outdented, never replaced by the two spaces (which would
-// silently delete the selection).
-el.sourceEditor.addEventListener('keydown', e => {
-  if (e.key !== 'Tab') return;
-  e.preventDefault();
-  const ta = el.sourceEditor;
-  const value = ta.value;
-  const selStart = ta.selectionStart;
-  const selEnd = ta.selectionEnd;
-
-  // The block spans whole lines: from the start of the caret's line to the end of the last
-  // selected line (a bare caret therefore touches exactly its own line).
-  const blockStart = value.lastIndexOf('\n', selStart - 1) + 1;
-  const breakAfter = value.indexOf('\n', selEnd);
-  const blockEnd = breakAfter === -1 ? value.length : breakAfter;
-  const lines = value.slice(blockStart, blockEnd).split('\n');
-
-  const replaced = e.shiftKey
-    ? lines.map(line => line.replace(/^ {1,4}/, ''))
-    : lines.map(line => '  ' + line);
-  const next = replaced.join('\n');
-  if (next === value.slice(blockStart, blockEnd)) return; // Shift+Tab with nothing to remove.
-
-  const hadSelection = selEnd > selStart;
-  ta.setRangeText(next, blockStart, blockEnd, 'preserve');
-  if (hadSelection) {
-    ta.setSelectionRange(blockStart, blockStart + next.length);
-  } else {
-    // Keep the caret on the same character, shifted by the first line's length change and
-    // clamped so an outdent cannot push it before the line start.
-    const caret = Math.max(blockStart, selStart + (replaced[0].length - lines[0].length));
-    ta.setSelectionRange(caret, caret);
-  }
-  markDirty();
-});
-
 // Global shortcuts
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
@@ -2180,6 +2914,7 @@ window.addEventListener('resize', () => {
 el.list.addEventListener('click', e => {
   if (e.target.closest('.page-item') || e.target.closest('.space-title')) toggleDrawer(false);
 });
+setupSidebarDrag();
 
 /* ============================================================
    Boot

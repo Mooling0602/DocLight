@@ -25,4 +25,6 @@ assert.equal(wordCount('## 标题'), 2);
 assert.equal(wordCount('```\nconst a = 1\n```'), 3);
 assert.equal(wordCount('看 [链接](https://example.com) 吧'), 4);
 assert.equal(wordCount('`npm install`'), 2);
+// The callout marker is syntax, not content; the body still counts.
+assert.equal(wordCount('> [!NOTE]\n> 注意'), 2);
 console.log('wordCount assertions passed');

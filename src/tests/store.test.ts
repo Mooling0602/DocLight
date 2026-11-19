@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readStore, writeStore, writeSpaces, sortPages, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore } from '../store.js';
-import type { Database, Page } from '../store.js';
+import type { Database, Page, PageFileSnapshot } from '../store.js';
 
 function page(slug: string, over: Partial<Page> = {}): Page {
   return {
@@ -67,7 +67,9 @@ try {
   assert.equal(fs.statSync(pageFile('alpha')).mtimeMs, mtimeBefore, '内容未变时不应重写文件');
 
   /* ---- Deleting a page removes its file, but only when the caller says so ---- */
-  writeStore(dir, db(page('alpha')), ['beta']);
+  const deleteSnapshot = new Map<string, PageFileSnapshot>();
+  readStore(dir, deleteSnapshot);
+  writeStore(dir, db(page('alpha')), ['beta'], { expectedRemoved: deleteSnapshot });
   assert.equal(fs.existsSync(pageFile('beta')), false, '调用方声明的删除应移除对应文件');
 
   /* ---- A write that simply omits a page must NOT delete it ---- */
@@ -79,7 +81,9 @@ try {
   assert.ok(fs.existsSync(pageFile('kept')), '未出现在 db 中的文件不应被当作孤儿删除');
 
   /* ---- Renaming a page moves the file when the old slug is declared ---- */
-  writeStore(dir, db(page('gamma')), ['alpha']);
+  const renameSnapshot = new Map<string, PageFileSnapshot>();
+  readStore(dir, renameSnapshot);
+  writeStore(dir, db(page('gamma')), ['alpha'], { expectedRemoved: renameSnapshot });
   assert.equal(fs.existsSync(pageFile('alpha')), false, '重命名后旧文件应消失');
   assert.equal(fs.existsSync(pageFile('gamma')), true, '重命名后应产生新文件');
 
@@ -162,6 +166,270 @@ try {
   fs.writeFileSync(pageFile('extra'), '---\ntitle: 额外\nspace: default\ncustom: 忽略我\n---\n\n正文', 'utf8');
   const withExtra = readStore(dir);
   assert.equal(withExtra.pages.find(p => p.slug === 'extra')!.title, '额外', '未知键不应影响解析');
+
+  /* ---- Ordinary saves preserve hand-written metadata and unrelated pages ---- */
+  const preserveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-preserve-'));
+  try {
+    writeStore(preserveDir, db(page('edit'), page('other')));
+    const editFile = path.join(preserveDir, 'pages', 'edit.md');
+    const otherFile = path.join(preserveDir, 'pages', 'other.md');
+    const original = '\uFEFF---\r\n# header\r\ntitle: Old # title comment\r\nspace: default\r\nparent: null\r\ncreatedAt: 1\r\nupdatedAt: 2\r\ncustom:\r\n  nested: [one, two] # custom comment\r\n---\r\n\r\nOld body\r\n';
+    const other = '---\ntitle: Other\nspace: default\ncustom: keep # comment\n---\n\nOther body\n\n';
+    fs.writeFileSync(editFile, original);
+    fs.writeFileSync(otherFile, other);
+    const snapshot = readStore(preserveDir);
+    const edited = snapshot.pages.find(p => p.slug === 'edit')!;
+    edited.title = 'New'; edited.parent = 'other'; edited.updatedAt = 3; edited.content = 'New body';
+    writeStore(preserveDir, snapshot);
+    const result = fs.readFileSync(editFile, 'utf8');
+    assert.match(result, /# header\r\ntitle: "New" # title comment/);
+    assert.match(result, /parent: "other"/);
+    assert.match(result, /updatedAt: 3/);
+    assert.match(result, /custom:\r\n  nested: \[one, two\] # custom comment/);
+    assert.ok(result.endsWith('---\r\n\r\nNew body\n'));
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), other, '无关页面必须逐字节保留');
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'edit')!.content, 'New body');
+
+    // Missing known keys are inserted only when their effective values really change.
+    const current = readStore(preserveDir);
+    const otherPage = current.pages.find(p => p.slug === 'other')!;
+    otherPage.parent = 'edit';
+    writeStore(preserveDir, current);
+    assert.match(fs.readFileSync(otherFile, 'utf8'), /custom: keep # comment\nparent: "edit"\n---/);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'other')!.parent, 'edit');
+
+    const broken = '---\ntitle: [broken\ncustom: keep\n---\n\nBody\n';
+    fs.writeFileSync(editFile, broken);
+    const brokenDb = readStore(preserveDir);
+    const brokenPage = brokenDb.pages.find(p => p.slug === 'edit')!;
+    brokenPage.content = 'Revised';
+    writeStore(preserveDir, brokenDb);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), broken.replace('Body\n', 'Revised\n'));
+    const changedBroken = readStore(preserveDir);
+    changedBroken.pages.find(p => p.slug === 'edit')!.title = 'Unsafe';
+    assert.throws(() => writeStore(preserveDir, changedBroken), /front matter/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), broken.replace('Body\n', 'Revised\n'));
+
+    const alias = '---\ntitle: &name Hello\nspace: default\ncustom: *name\n---\n\nBody\n';
+    fs.writeFileSync(editFile, alias);
+    const aliasDb = readStore(preserveDir);
+    aliasDb.pages.find(p => p.slug === 'edit')!.title = 'Changed';
+    aliasDb.pages.find(p => p.slug === 'other')!.title = 'Also changed';
+    const beforeRejected = fs.readFileSync(otherFile, 'utf8');
+    assert.throws(() => writeStore(preserveDir, aliasDb), /锚点或别名/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), alias);
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), beforeRejected, '拒绝不安全修改时不得先写入其他页面');
+
+    const unclosed = '---\ntitle: unfinished\n';
+    fs.writeFileSync(editFile, unclosed);
+    const unclosedDb = readStore(preserveDir);
+    assert.equal(unclosedDb.pages.find(p => p.slug === 'edit')!.unclosedFrontMatter, true, '未闭合的文件头应标记为不安全，供编辑器保护');
+    unclosedDb.pages.find(p => p.slug === 'edit')!.content = 'changed';
+    assert.throws(() => writeStore(preserveDir, unclosedDb), /结束围栏/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), unclosed);
+
+    fs.writeFileSync(editFile, '# Plain\n\nText\n');
+    const plain = readStore(preserveDir);
+    const plainPage = plain.pages.find(p => p.slug === 'edit')!;
+    plainPage.content = '# Plain\n\nChanged';
+    writeStore(preserveDir, plain);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'edit')!.content, '# Plain\n\nChanged');
+
+    // A slug change is explicit so the source file's handwritten metadata follows the page.
+    fs.writeFileSync(editFile, original);
+    const renamedFiles = new Map<string, PageFileSnapshot>();
+    const renamedDb = readStore(preserveDir, renamedFiles);
+    const renamedPage = renamedDb.pages.find(p => p.slug === 'edit')!;
+    renamedPage.slug = 'renamed'; renamedPage.updatedAt = 7;
+    writeStore(preserveDir, renamedDb, ['edit'], { rename: { from: 'edit', to: 'renamed' }, expectedRemoved: renamedFiles });
+    const renamedFile = path.join(preserveDir, 'pages', 'renamed.md');
+    assert.equal(fs.existsSync(editFile), false);
+    assert.match(fs.readFileSync(renamedFile, 'utf8'), /custom:\r\n  nested: \[one, two\] # custom comment/, '重命名应保留自定义元数据');
+    assert.match(fs.readFileSync(renamedFile, 'utf8'), /title: Old # title comment/);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'renamed')!.updatedAt, 7);
+  } finally { fs.rmSync(preserveDir, { recursive: true, force: true }); }
+
+  /* ---- A save reads unchanged pages only once and rechecks changed files before writing. ---- */
+  {
+    const snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-write-snapshot-'));
+    try {
+      writeStore(snapshotDir, db(page('first'), page('second'), page('third')));
+      const target = path.join(snapshotDir, 'pages', 'first.md');
+      const untouched = path.join(snapshotDir, 'pages', 'second.md');
+      const other = path.join(snapshotDir, 'pages', 'third.md');
+      const before = fs.readFileSync(untouched, 'utf8');
+      const snapshot = readStore(snapshotDir);
+      snapshot.pages.find(p => p.slug === 'first')!.content = '修改后的正文';
+      const counts = new Map<string, number>();
+      const originalRead = fs.readFileSync;
+      const originalOpen = fs.openSync;
+      const descriptorPaths = new Map<number, string>();
+      const trackOpen = (file: fs.PathLike, ...args: unknown[]) => {
+        const fd = (originalOpen as any)(file, ...args) as number;
+        if (typeof file === 'string') descriptorPaths.set(fd, file);
+        return fd;
+      };
+      const readPath = (file: fs.PathOrFileDescriptor) => typeof file === 'number' ? descriptorPaths.get(file) : file;
+      try {
+        (fs as any).openSync = trackOpen;
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          const name = readPath(file);
+          if (typeof name === 'string' && name.startsWith(path.join(snapshotDir, 'pages') + path.sep)) {
+            counts.set(name, (counts.get(name) || 0) + 1);
+          }
+          return (originalRead as any)(file, ...args);
+        };
+        writeStore(snapshotDir, snapshot);
+      } finally { (fs as any).readFileSync = originalRead; (fs as any).openSync = originalOpen; }
+      assert.equal(counts.get(target), 2, '修改页读取一次快照、一次冲突校验');
+      assert.equal(counts.get(untouched), 1, '未修改页不应重复读取');
+      assert.equal(counts.get(other), 1, '未修改页不应重复读取');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '未修改页逐字节不变');
+
+      const conflicted = readStore(snapshotDir);
+      conflicted.pages.find(p => p.slug === 'first')!.content = '不能覆盖外部修改';
+      const current = fs.readFileSync(target, 'utf8');
+      let targetReads = 0;
+      try {
+        (fs as any).openSync = trackOpen;
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          const contents = (originalRead as any)(file, ...args);
+          if (readPath(file) === target && ++targetReads === 2) return String(contents) + 'external change';
+          return contents;
+        };
+        assert.throws(() => writeStore(snapshotDir, conflicted), /页面文件已变化/, '预检期间外部修改必须拒绝');
+      } finally { (fs as any).readFileSync = originalRead; (fs as any).openSync = originalOpen; }
+      assert.equal(fs.readFileSync(target, 'utf8'), current, '冲突时不得写入目标');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '冲突时不得修改其他页面');
+
+      try {
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          if (file === target) throw Object.assign(new Error('simulated read error'), { code: 'EACCES' });
+          return (originalRead as any)(file, ...args);
+        };
+        assert.throws(() => writeStore(snapshotDir, conflicted), /无法读取页面/, '无法读取已有文件时不能覆盖');
+      } finally { (fs as any).readFileSync = originalRead; }
+      assert.equal(fs.readFileSync(target, 'utf8'), current, '读失败时目标必须原样保留');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '读失败时不得修改其他页面');
+    } finally { fs.rmSync(snapshotDir, { recursive: true, force: true }); }
+  }
+
+  /* ---- Deleted files are checked against the caller's snapshot and again before unlink. ---- */
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-delete-snapshot-'));
+    const setup = (name: string) => {
+      const fixture = path.join(root, name);
+      writeStore(fixture, db(page('remove'), page('keep')));
+      const snapshots = new Map<string, PageFileSnapshot>();
+      const state = readStore(fixture, snapshots);
+      const removedFile = path.join(fixture, 'pages', 'remove.md');
+      const keepFile = path.join(fixture, 'pages', 'keep.md');
+      return { fixture, snapshots, state, removedFile, keepFile };
+    };
+    try {
+      // The external write happened after the request read but before writeStore's own snapshot.
+      const early = setup('early');
+      const keepBefore = fs.readFileSync(early.keepFile, 'utf8');
+      const changed = fs.readFileSync(early.removedFile, 'utf8') + '\n外部修改\n';
+      fs.writeFileSync(early.removedFile, changed);
+      early.state.pages.find(p => p.slug === 'keep')!.title = '待写入';
+      early.state.pages = early.state.pages.filter(p => p.slug !== 'remove');
+      assert.throws(() => writeStore(early.fixture, early.state, ['remove']), /不在原始快照/, '直接调用也必须提供原始删除快照');
+      assert.throws(() => writeStore(early.fixture, early.state, ['remove'], { expectedRemoved: early.snapshots }), /待删除页面已变化/, '请求读取后的外部修改不得被删除');
+      assert.equal(fs.readFileSync(early.removedFile, 'utf8'), changed);
+      assert.equal(fs.readFileSync(early.keepFile, 'utf8'), keepBefore, '删除预检失败时不得写入其他页面');
+
+      // Same bytes in a different inode still represent a replaced file, not the one requested.
+      const replaced = setup('replaced');
+      const original = fs.readFileSync(replaced.removedFile, 'utf8');
+      const replacement = path.join(replaced.fixture, 'replacement.md');
+      fs.writeFileSync(replacement, original);
+      fs.renameSync(replacement, replaced.removedFile);
+      replaced.state.pages = replaced.state.pages.filter(p => p.slug !== 'remove');
+      assert.throws(() => writeStore(replaced.fixture, replaced.state, ['remove'], { expectedRemoved: replaced.snapshots }), /待删除页面已变化/, '同内容的同名替换也不得误删');
+      assert.equal(fs.readFileSync(replaced.removedFile, 'utf8'), original);
+
+      // A replacement between reading content and recording identity must not create a torn snapshot.
+      const torn = setup('torn');
+      const tornReplacement = path.join(torn.fixture, 'replacement.md');
+      fs.writeFileSync(tornReplacement, fs.readFileSync(torn.removedFile, 'utf8'));
+      const originalOpen = fs.openSync;
+      const originalFstat = fs.fstatSync;
+      let targetFd = -1;
+      let swapped = false;
+      const tornFiles = new Map<string, PageFileSnapshot>();
+      try {
+        (fs as any).openSync = (file: fs.PathLike, ...args: unknown[]) => {
+          const fd = (originalOpen as any)(file, ...args) as number;
+          if (file === torn.removedFile) targetFd = fd;
+          return fd;
+        };
+        (fs as any).fstatSync = (fd: number, ...args: unknown[]) => {
+          const stat = (originalFstat as any)(fd, ...args);
+          if (fd === targetFd && !swapped) { fs.renameSync(tornReplacement, torn.removedFile); swapped = true; }
+          return stat;
+        };
+        readStore(torn.fixture, tornFiles);
+      } finally { (fs as any).openSync = originalOpen; (fs as any).fstatSync = originalFstat; }
+      assert.equal(swapped, true, '测试应确实发生文件替换');
+      assert.equal(tornFiles.has('remove'), false, '被替换的文件不能形成混合内容和身份的快照');
+      torn.state.pages = torn.state.pages.filter(p => p.slug !== 'remove');
+      assert.throws(() => writeStore(torn.fixture, torn.state, ['remove'], { expectedRemoved: tornFiles }), /不在原始快照/);
+      assert.equal(fs.existsSync(torn.removedFile), true, '读取期间替换的新文件必须保留');
+
+      // If a rename source changes after the new file is installed, keep both and report partial work.
+      const late = setup('late');
+      const sourceBefore = fs.readFileSync(late.removedFile, 'utf8');
+      const targetFile = path.join(late.fixture, 'pages', 'renamed.md');
+      late.state.pages.find(p => p.slug === 'remove')!.slug = 'renamed';
+      const originalRename = fs.renameSync;
+      try {
+        (fs as any).renameSync = (from: fs.PathLike, to: fs.PathLike) => {
+          originalRename(from, to);
+          if (to === targetFile) fs.writeFileSync(late.removedFile, sourceBefore + '\n外部修改\n');
+        };
+        assert.throws(() => writeStore(late.fixture, late.state, ['remove'], {
+          rename: { from: 'remove', to: 'renamed' }, expectedRemoved: late.snapshots,
+        }), /部分更改可能已写入/, '后期冲突应说明重命名可能部分完成');
+      } finally { (fs as any).renameSync = originalRename; }
+      assert.match(fs.readFileSync(late.removedFile, 'utf8'), /外部修改/, '必须保留外部修改的旧文件');
+      assert.equal(fs.existsSync(targetFile), true, '不得悄悄删除已经写入的新文件');
+
+      const denied = setup('denied');
+      denied.state.pages = denied.state.pages.filter(p => p.slug !== 'remove');
+      const originalUnlink = fs.unlinkSync;
+      try {
+        (fs as any).unlinkSync = (file: fs.PathLike) => {
+          if (file === denied.removedFile) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+          return originalUnlink(file);
+        };
+        assert.throws(() => writeStore(denied.fixture, denied.state, ['remove'], { expectedRemoved: denied.snapshots }), /无法删除页面/, '删除失败不能报告成功');
+      } finally { (fs as any).unlinkSync = originalUnlink; }
+      assert.equal(fs.existsSync(denied.removedFile), true);
+      assert.throws(() => writeStore(denied.fixture, denied.state, ['remove'], { onlyCreate: true }), /仅创建模式不能删除/);
+      const deniedOpen = fs.openSync;
+      try {
+        (fs as any).openSync = (file: fs.PathLike, ...args: unknown[]) => {
+          if (file === denied.removedFile) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+          return (deniedOpen as any)(file, ...args);
+        };
+        assert.throws(() => writeStore(denied.fixture, denied.state, ['remove'], { expectedRemoved: denied.snapshots }), /待删除页面已变化或无法读取/, '不可读文件不能删除');
+      } finally { (fs as any).openSync = deniedOpen; }
+      assert.equal(fs.existsSync(denied.removedFile), true);
+
+      const partial = setup('partial');
+      partial.state.pages = [];
+      try {
+        (fs as any).unlinkSync = (file: fs.PathLike) => {
+          if (file === partial.keepFile) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+          return originalUnlink(file);
+        };
+        assert.throws(() => writeStore(partial.fixture, partial.state, ['remove', 'keep'], { expectedRemoved: partial.snapshots }), /部分更改可能已写入/, '部分删除后出错不得声称全部成功');
+      } finally { (fs as any).unlinkSync = originalUnlink; }
+      assert.equal(fs.existsSync(partial.removedFile), false, '先前成功的删除不会被虚假回滚');
+      assert.equal(fs.existsSync(partial.keepFile), true, '失败的删除必须保留原文件');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
 
   /* ---- A page pointing at an unknown space falls back instead of vanishing ---- */
   fs.writeFileSync(pageFile('orphan'), '---\ntitle: 孤儿\nspace: gone\n---\n\n正文', 'utf8');

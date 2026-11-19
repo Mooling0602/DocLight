@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TextDecoder, TextEncoder } from 'node:util';
 import { JSDOM } from 'jsdom';
+import { setSource, sourceView } from './source-editor-utils.js';
 
 const root = path.resolve(__dirname, '../..');
 const publicDir = path.join(root, 'public');
@@ -172,9 +173,8 @@ async function runtimeConflictTests(): Promise<void> {
       clickIn('#btn-edit');
       clickIn('#mode-toggle [data-mode=markdown]');
       const title = d.querySelector('#title-input') as HTMLInputElement;
-      const source = d.querySelector('#source-editor') as HTMLTextAreaElement;
       title.value = '草稿标题'; title.dispatchEvent(new w.Event('input', { bubbles: true }));
-      source.value = '# 草稿正文'; source.dispatchEvent(new w.Event('input', { bubbles: true }));
+      setSource(d, '# 草稿正文');
       if (mode === 'write') {
         clickIn('#btn-save');
       } else {
@@ -187,8 +187,8 @@ async function runtimeConflictTests(): Promise<void> {
       assert.equal(mutations, 1);
       assert.equal(trees, mode === 'write' ? 1 : 2);
       assert.equal(title.value, '草稿标题');
-      assert.equal(source.value, '# 草稿正文');
-      assert.equal(source.hidden, false);
+      assert.equal(sourceView(d).state.doc.toString(), '# 草稿正文');
+      assert.equal((d.querySelector('#source-panel') as HTMLElement).hidden, false);
       assert.equal((d.querySelector('#dirty-pill') as HTMLElement).hidden, false);
       assert.equal((d.querySelector('#edit-wrap') as HTMLElement).hidden, false);
       if (mode !== 'write') assert.match(d.querySelector('#toasts')?.textContent || '', /排序已更新/, '已成功的操作不能误报失败');
@@ -204,7 +204,7 @@ async function runtimeConflictTests(): Promise<void> {
         assert.match(notice.textContent || '', /重新加载.*草稿.*备份/);
         await wait(4400);
         assert.ok(d.querySelector('#runtime-conflict'), '提示不能随 toast 消失');
-        assert.equal(source.value, '# 草稿正文');
+        assert.equal(sourceView(d).state.doc.toString(), '# 草稿正文');
       }
     } finally { instance.window.close(); }
   }
@@ -214,21 +214,46 @@ async function main(): Promise<void> {
   try {
     window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
     await wait(100);
+    assert.ok($('#sp-settings').closest('.space-acts'), '未锁定时设置入口位于空间操作区域');
+    click('#sp-settings');
+    assert.match($('#modal-root h3').textContent || '', /空间设置/, '空间页面可以打开设置');
+    click('#modal-root [data-x=no]');
     await openSpaceMenu();
-    assert.match($('#menu-row [data-act=lock]').textContent || '', /锁定空间/, '侧栏菜单提供锁定入口');
-    click('#menu-row [data-act=lock]');
+    assert.equal(document.querySelector('#menu-row [data-act=lock]'), null, '侧栏菜单不再直接提供锁定入口');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /锁定空间/, '空间设置提供锁定入口');
+    ($<HTMLSelectElement>('#ss-sort')).value = 'title_asc';
+    click('#modal-root [data-x=slug]');
+    assert.match($('#toasts').textContent || '', /请先保存或放弃/, '未保存设置时不能直接编辑 slug');
+    assert.ok(document.querySelector('#ss-sort'), '未保存设置应保留');
+    click('#modal-root [data-x=lock]');
+    assert.match($('#toasts').textContent || '', /请先保存或放弃/, '未保存设置时不能直接锁定');
+    assert.equal(locked, false);
+    ($<HTMLSelectElement>('#ss-sort')).value = 'created_desc';
+    click('#modal-root [data-x=lock]');
     await wait();
     assert.equal($('#modal-root').hidden, false, '锁定应要求确认');
     submit();
     await wait(120);
     assert.equal(locked, true, '确认后应锁定空间');
     assert.ok(document.querySelector('.space-row .lock-badge'), '侧栏显示锁定状态');
+    assert.equal(document.querySelectorAll('#sp-settings').length, 1, '锁定空间只能有一个设置入口');
+    assert.equal($('#sp-settings').closest('[hidden]'), null, '设置入口应可见');
+    assert.ok($('#sp-settings').closest('.space-acts'), '锁定后设置入口仍位于空间操作区域');
+    assert.equal($('#sp-add').hidden, true, '锁定后新建入口隐藏');
+    assert.ok($('#sp-sort').closest('[hidden]'), '锁定后排序控件隐藏');
+    assert.ok($('#sp-recommend').closest('[hidden]'), '锁定后推荐控件隐藏');
+    click('#sp-settings');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间/, '锁定后空间页面仍能打开解锁设置');
+    assert.equal($<HTMLButtonElement>('#modal-root [data-x=slug]').disabled, true, '锁定时不能编辑空间 slug');
+    assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+    click('#modal-root [data-x=no]');
     assert.equal(document.querySelector('.space-row [title="在此空间新建页面"]'), null, '锁定后不能新建页面');
     assert.equal(document.querySelector('.tree-row [title="新建子页面"]'), null, '锁定后不能新建子页面');
     assert.equal(document.querySelector('.tree-row [title="更多操作"]'), null, '锁定后不能操作页面');
     await openSpaceMenu();
-    assert.match($('#menu-row [data-act=lock]').textContent || '', /解锁空间/, '菜单状态应更新为解锁');
-    assert.equal(document.querySelector('#menu-row [data-act=settings]'), null, '锁定空间不可修改设置');
+    assert.equal(document.querySelector('#menu-row [data-act=lock]'), null, '菜单不直接提供解锁入口');
+    assert.ok(document.querySelector('#menu-row [data-act=settings]'), '锁定空间仍可进入设置解锁');
     assert.equal(document.querySelector('#menu-row [data-act=delete]'), null, '锁定空间不可删除');
     click('.tree-row .page-item');
     await wait(100);
@@ -239,7 +264,14 @@ async function main(): Promise<void> {
     assert.equal($('#btn-more').hidden, true, '锁定页面不可通过页面菜单修改');
 
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     const pass = $<HTMLInputElement>('#modal-root input[type=password]');
     pass.value = 'wrong-password';
@@ -268,13 +300,18 @@ async function main(): Promise<void> {
     click('#btn-edit');
     click('#mode-toggle [data-mode=markdown]');
     const title = $<HTMLInputElement>('#title-input');
-    const source = $<HTMLTextAreaElement>('#source-editor');
     title.value = '未保存标题';
     title.dispatchEvent(new window.Event('input', { bubbles: true }));
-    source.value = '# 未保存草稿';
-    source.dispatchEvent(new window.Event('input', { bubbles: true }));
+    setSource(document, '# 未保存草稿');
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     submit();
     await wait(120);
@@ -283,14 +320,21 @@ async function main(): Promise<void> {
     assert.equal(badge.hidden, false, '编辑期间锁定应持续显示只读状态');
     assert.match(badge.textContent || '', /只读.*草稿保留.*解锁后可保存/);
     assert.equal(title.value, '未保存标题');
-    assert.equal(source.value, '# 未保存草稿');
-    assert.equal(source.hidden, false, '锁定不应切换编辑模式');
+    assert.equal(sourceView(document).state.doc.toString(), '# 未保存草稿');
+    assert.equal($<HTMLElement>('#source-panel').hidden, false, '锁定不应切换编辑模式');
     assert.equal($('#dirty-pill').hidden, false, '锁定不应清除未保存状态');
     click('#btn-save');
     await wait();
     assert.equal(calls.filter(c => c.url.includes('/api/pages/readable') && c.method === 'PUT').length, 0, '锁定时不得保存');
     await openSpaceMenu();
-    click('#menu-row [data-act=lock]');
+    click('#menu-row [data-act=settings]');
+    assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
+    if (locked) {
+      assert.equal($<HTMLSelectElement>('#ss-sort').disabled, true);
+      assert.equal($<HTMLInputElement>('#ss-recommend').disabled, true);
+      assert.equal($<HTMLButtonElement>('#modal-root [data-x=ok]').disabled, true);
+    }
+    click('#modal-root [data-x=lock]');
     await wait();
     $<HTMLInputElement>('#modal-root input[type=password]').value = password;
     submit();
@@ -298,7 +342,7 @@ async function main(): Promise<void> {
     assert.equal(locked, false);
     assert.equal(badge.hidden, true, '解锁后移除编辑器锁定提示');
     assert.equal(title.value, '未保存标题');
-    assert.equal(source.value, '# 未保存草稿');
+    assert.equal(sourceView(document).state.doc.toString(), '# 未保存草稿');
     click('#btn-save');
     await wait(120);
     const saves = calls.filter(c => c.url.includes('/api/pages/readable') && c.method === 'PUT');
@@ -316,7 +360,7 @@ async function main(): Promise<void> {
     await wait(100);
     assert.match($('#article .lock-badge').textContent || '', /永久只读/, '空间页显示永久只读');
     assert.equal($<HTMLElement>('.space-acts').hidden, true);
-    click('a.card[data-nav]');
+    click('.space-page-card > .card-link[data-nav]');
     await wait(100);
     assert.match($('#article .lock-badge').textContent || '', /永久只读/, '页面显示永久只读');
     assert.match($('#article').textContent || '', /随应用更新/, '内置页面不应显示固定模板日期');

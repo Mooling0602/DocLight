@@ -29,7 +29,7 @@
  *   PUT    /api/pages/:slug  update { title?, content?, slug?, space?, parent? }
  *   DELETE /api/pages/:slug  delete
  *   POST   /api/spaces       create { title, desc? }
- *   PUT    /api/spaces/:slug update { title?, desc?, slug? }
+ *   PUT    /api/spaces/:slug update { title?, desc?, sort?, order?, recommend?, slug? }
  *   DELETE /api/spaces/:slug delete
  *
  * Filing footer (see src/beian.ts), all optional:
@@ -48,9 +48,10 @@ import { injectFooter, readFooterOptions } from './beian.js';
 import { loadConfig, ensureConfigFile } from './config.js';
 import { htmlToMarkdown, sanitizeMarkdown } from './markdown.js';
 import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesIndexIsEmpty, recoverStore, isSortKey, SORT_KEYS, BUILT_IN_SLUG, isBuiltInPageSlug, editTemplatePage, editTemplateSpace, createTemplatePage, renameTemplatePage, deleteTemplateSubtree, deleteTemplateSpace, moveTemplatePageToSpace, moveDataPageToTemplate } from './store.js';
+import { removeFromOrder, renameInOrder } from './sort.js';
 import { recoverTemplateTransaction } from './template-transaction.js';
 import type { AppConfig } from './config.js';
-import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs } from './store.js';
+import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs, PageFileSnapshot } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -347,14 +348,14 @@ function readBuiltInTemplate(): Database | null {
   }
 }
 
-function readDb(): Database {
+function readDb(pageFiles?: Map<string, PageFileSnapshot>): Database {
   // Same condition as startup: an index that exists but names no spaces cannot classify the pages,
   // and `storeExists` alone accepts it. Without this, an index emptied while the server is running
   // (sync tool, hand edit) is read as "no spaces": every page collapses onto the fallback space and
   // the next ordinary save persists that, silently reassigning pages. It is also why such a request
   // would 404 on a space move — the target space no longer exists in memory.
   if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
-  const db = readStore(DATA_DIR);
+  const db = readStore(DATA_DIR, pageFiles);
   // The built-in marker is trusted only when constructed here, not when read from disk.
   for (const space of db.spaces) { delete space.builtIn; delete space.devEditable; }
   const template = readBuiltInTemplate();
@@ -367,6 +368,11 @@ function readDb(): Database {
     ...source, slug: templateVirtualSlug, builtIn: true, locked: true,
     ...(CONFIG.devMode ? { devEditable: true } : {}),
     home: source.home && slugs.has(source.home) ? virtualSlug(source.home) : null,
+    // The template index names source files, but the API speaks in virtual page slugs: translate
+    // the manual order the same way the pages themselves were translated, dropping stale entries.
+    ...(source.order && source.order.length
+      ? { order: source.order.filter(slug => slugs.has(slug)).map(virtualSlug) }
+      : {}),
   };
   const pages = sourcePages.map(p => ({
     ...p, slug: virtualSlug(p.slug), space: templateVirtualSlug,
@@ -581,6 +587,28 @@ function ensureAuthRecord(): AuthRecord {
 function hmacStored(storedHex: string, nonce: string): string {
   return crypto.createHmac('sha256', Buffer.from(storedHex, 'hex')).update(nonce).digest('hex');
 }
+/**
+ * Constant-time equality against a stored hex digest.
+ *
+ * The comparison always runs, even when the submitted value is not shaped like a SHA-256 digest,
+ * so malformed proofs also go through a fixed-length comparison. The shape check only decides
+ * the result, never whether the comparison happens.
+ */
+function digestMatches(expectedHex: string, submitted: string): boolean {
+  const shaped = /^[a-f0-9]{64}$/.test(submitted);
+  const equal = crypto.timingSafeEqual(Buffer.from(shaped ? submitted : expectedHex, 'hex'), Buffer.from(expectedHex, 'hex'));
+  return equal && shaped;
+}
+/**
+ * Constant-time equality of two account names.
+ *
+ * Both sides are hashed first: `timingSafeEqual` requires equal lengths, and comparing the names
+ * directly would leak the stored name's length and prefix through the thrown error and the timing.
+ */
+function sameName(expected: string, submitted: string): boolean {
+  const digest = (text: string) => crypto.createHash('sha256').update(text, 'utf8').digest();
+  return crypto.timingSafeEqual(digest(expected), digest(submitted));
+}
 function ipOf(req: IncomingMessage): string { return req.socket.remoteAddress || 'unknown'; }
 function rateLimited(req: IncomingMessage): boolean {
   const f = failLog.get(ipOf(req));
@@ -626,7 +654,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     return json(res, 200, {
       mode: a.user ? 'ready' : 'setup',
       authed: !!sess,
-      user: sess ? sess.user : (a.user || null), // prefill the login form (the challenge endpoint exposes this name anyway)
+      user: sess ? sess.user : null, // never expose the account name to anonymous callers
       salt: a.salt, iters: a.iters,
     });
   }
@@ -636,7 +664,9 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     purgeExpired();
     const nonce = crypto.randomBytes(16).toString('hex');
     nonces.set(nonce, Date.now() + 60e3);
-    return json(res, 200, { nonce, salt: a.salt, iters: a.iters, user: a.user });
+    // The challenge is handed out before authentication, so it must carry only
+    // what the client needs to derive the proof, never the account name.
+    return json(res, 200, { nonce, salt: a.salt, iters: a.iters });
   }
 
   if (req.method === 'POST' && action === 'setup') {
@@ -661,11 +691,13 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, parts: stri
     if (!exp || Date.now() > exp) return json(res, 400, { error: '挑战已过期，请重试' });
     nonces.delete(nonce); // one-shot to block replay
     if (!a.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
-    const expected = hmacStored(a.stored, nonce);
+    // Check both the account name and proof on every attempt without short-circuiting either
+    // comparison; wrong names and wrong passwords receive the same response.
     const proof = String(body.proof || '');
-    const ok = /^[a-f0-9]{64}$/.test(proof) &&
-      crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
-    if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
+    const name = typeof body.user === 'string' ? body.user.trim() : '';
+    const proofOk = digestMatches(hmacStored(a.stored, nonce), proof);
+    const nameOk = sameName(a.user, name);
+    if (!(proofOk && nameOk)) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
     failLog.delete(ipOf(req));
     return issueSession(res, a.user, basePath);
   }
@@ -702,7 +734,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
   if ((key === 'pages' || key === 'spaces') && req.method !== 'GET' && !getSession(req)) {
     return json(res, 401, { error: '请先登录后再修改', needAuth: true });
   }
-  const db = readDb();
+  // Deletions and page renames must be checked against the request's original read, not a later
+  // write-time snapshot that might already include an external edit.
+  const pageFiles = req.method === 'DELETE' || (key === 'pages' && req.method === 'PUT' && body.slug !== undefined)
+    ? new Map<string, PageFileSnapshot>() : undefined;
+  const db = readDb(pageFiles);
   const builtInSpace = db.spaces.find(s => s.builtIn)?.slug;
   const isLocked = (slug: string) => slug === builtInSpace || slug === BUILT_IN_SLUG || db.spaces.some(s => s.slug === slug && s.locked === true);
   const locked = () => json(res, 423, { error: '空间已锁定' });
@@ -746,9 +782,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (!auth.user) return json(res, 400, { error: '请先完成站长账号初始化，再解锁空间' });
         if (!auth.stored) return json(res, 500, { error: '鉴权记录损坏，请重新初始化' });
         const proof = String(body.proof || '');
-        const expected = hmacStored(auth.stored, nonce);
-        const ok = /^[a-f0-9]{64}$/.test(proof) &&
-          crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
+        // Same verifier as the login route, but the name is deliberately not required here: an
+        // unlock is authorized by the session plus a fresh password proof.
+        const ok = digestMatches(hmacStored(auth.stored, nonce), proof);
         if (!ok) { noteFail(req); return json(res, 401, { error: '用户名或密码错误' }); }
         failLog.delete(ipOf(req));
         delete space.locked;
@@ -765,8 +801,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       if (req.method === 'PUT') {
         if (idx < 0) return json(res, 404, { error: '空间不存在' });
         if (slug === builtInSpace && CONFIG.devMode) {
-          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['title', 'desc', 'sort', 'slug'].includes(k))) return locked();
-          const changes: { title?: string; desc?: string; sort?: SortKey | null; virtualSlug?: string } = {};
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['title', 'desc', 'sort', 'order', 'recommend', 'slug'].includes(k))) return locked();
+          const changes: { title?: string; desc?: string; sort?: SortKey | null; order?: string[] | null; recommend?: boolean | null; virtualSlug?: string } = {};
           if (body.slug !== undefined) {
             if (Object.keys(body).length !== 1 || typeof body.slug !== 'string' || (body.slug !== BUILT_IN_SLUG && (!SLUG_RE.test(body.slug) || body.slug === 'spaces' || body.slug === 'api'))) return json(res, 400, { error: '空间 slug 无效或不能与其他修改同时提交' });
             if (body.slug !== slug && (db.pages.some(p => p.slug === body.slug) || db.spaces.some(s => s.slug === body.slug))) return json(res, 409, { error: '该 slug 已被占用' });
@@ -787,6 +823,33 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           if (body.sort !== undefined) {
             if (body.sort !== null && !isSortKey(body.sort)) return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
             changes.sort = body.sort as SortKey | null;
+          }
+          if (body.recommend !== undefined) {
+            if (typeof body.recommend !== 'boolean') return json(res, 400, { error: 'recommend 参数必须为布尔值' });
+            // `false` is the default, so it clears the key instead of pinning it in the template.
+            changes.recommend = body.recommend ? true : null;
+          }
+          if (body.order !== undefined) {
+            if (!Array.isArray(body.order)) return json(res, 400, { error: 'order 必须是页面 slug 数组' });
+            // The browser knows the built-in pages by their virtual `doclight-default-…` names;
+            // the template index stores the source file names, so they are translated here.
+            const seen = new Set<string>();
+            const sourceOrder: string[] = [];
+            for (const item of body.order) {
+              if (typeof item !== 'string' || !isBuiltInPageSlug(item) || !db.pages.some(p => p.slug === item && p.space === builtInSpace)) {
+                return json(res, 400, { error: 'order 只能包含本空间内页面的 slug' });
+              }
+              if (seen.has(item)) return json(res, 400, { error: 'order 中不能出现重复的 slug' });
+              seen.add(item);
+              sourceOrder.push(item.slice(BUILT_IN_SLUG.length + 1));
+            }
+            changes.order = sourceOrder.length ? sourceOrder : null;
+          }
+          // Entering manual mode seeds the order from what was on screen, so the first drag starts
+          // from the current arrangement instead of an arbitrary one.
+          if (body.sort === 'manual' && changes.order === undefined) {
+            const seeded = db.pages.filter(p => p.space === slug).map(p => p.slug.slice(BUILT_IN_SLUG.length + 1));
+            changes.order = seeded.length ? seeded : null;
           }
           requireSeparateTemplate();
           editTemplateSpace(TEMPLATE_DIR, changes);
@@ -823,6 +886,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           else if (isSortKey(body.sort)) nextSort = body.sort;
           else return json(res, 400, { error: `sort 只能是 ${SORT_KEYS.join(' / ')} 或 null` });
         }
+        let nextRecommend: boolean | undefined;
+        if (body.recommend !== undefined) {
+          if (typeof body.recommend !== 'boolean') return json(res, 400, { error: 'recommend 参数必须为布尔值' });
+          nextRecommend = body.recommend;
+        }
+        let nextOrder: string[] | undefined;
+        if (body.order !== undefined) {
+          if (!Array.isArray(body.order)) return json(res, 400, { error: 'order 必须是页面 slug 数组' });
+          const seen = new Set<string>();
+          for (const item of body.order) {
+            if (typeof item !== 'string' || !db.pages.some(p => p.slug === item && p.space === slug)) {
+              return json(res, 400, { error: 'order 只能包含本空间内页面的 slug' });
+            }
+            if (seen.has(item)) return json(res, 400, { error: 'order 中不能出现重复的 slug' });
+            seen.add(item);
+          }
+          nextOrder = body.order as string[];
+        }
 
         if (nextSlug !== null) {
           const ns = nextSlug;
@@ -834,6 +915,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
         if (body.sort !== undefined) {
           if (nextSort === null) delete db.spaces[idx].sort;
           else db.spaces[idx].sort = nextSort;
+        }
+        if (nextRecommend !== undefined) {
+          // Only the enabled state is persisted: a disabled space keeps no `recommend` key.
+          if (nextRecommend) db.spaces[idx].recommend = true;
+          else delete db.spaces[idx].recommend;
+        }
+        if (nextOrder !== undefined) {
+          if (nextOrder.length) db.spaces[idx].order = nextOrder;
+          else delete db.spaces[idx].order;
+        }
+        // Entering manual mode seeds the order from the arrangement already on screen.
+        if (body.sort === 'manual' && nextOrder === undefined && !db.spaces[idx].order) {
+          db.spaces[idx].order = db.pages.filter(p => p.space === db.spaces[idx].slug).map(p => p.slug);
         }
         db.spaces[idx].updatedAt = Date.now();
         writeDb(db);
@@ -855,7 +949,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
             db.spaces.some(s => isLocked(s.slug) && s.home && removedPages.includes(s.home))) return locked();
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
-        writeDb(db, removedPages);
+        writeDb(db, removedPages, { expectedRemoved: pageFiles });
         return json(res, 200, { ok: true, removedSpace: spaceSlug, removedPages });
       }
     }
@@ -981,26 +1075,48 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           db.pages[idx].slug = ns;
           const sp = db.spaces.find(s => s.home === slug);
           if (sp) sp.home = ns;
+          // The manual order stores slugs, so a rename has to follow it. Leaving the old slug behind
+          // would drop the page out of the position the drag-and-drop editor gave it — it would
+          // sink to the end of the space — and keep a ghost entry that a later page could inherit.
+          const space = db.spaces.find(s => s.slug === db.pages[idx].space);
+          if (space) {
+            const ordered = renameInOrder(space.order, slug, ns);
+            if (ordered !== space.order) space.order = ordered;
+          }
         }
       }
       if (body.space !== undefined) {
         const ns = body.space || null;
         if (typeof ns !== 'string') return json(res, 400, { error: 'space 参数非法' });
         if (!db.spaces.some(s => s.slug === ns)) return json(res, 404, { error: '目标空间不存在' });
+        // A request may rename and move the same page; read the live slug so the order and home
+        // cleanups below match the name the page actually has by now.
+        const live = db.pages[idx].slug;
         const old = db.pages[idx].space;
         db.pages[idx].space = ns;
         const oldSp = db.spaces.find(s => s.slug === old);
-        if (oldSp && oldSp.home === slug) oldSp.home = null;
+        if (oldSp && old !== ns) {
+          if (oldSp.home === live) oldSp.home = null;
+          // Moving the page out of its space leaves its manual position behind; a stale entry would
+          // be rejected when the arrangement is re-submitted and could be inherited by a page later
+          // minted under the same slug. The target space appends it as a new, unarranged page.
+          const ordered = removeFromOrder(oldSp.order, [live]);
+          if (ordered !== oldSp.order) {
+            if (ordered) oldSp.order = ordered;
+            else delete oldSp.order;
+          }
+        }
       }
       if (body.parent !== undefined) {
         const parent = body.parent || null;
         if (parent !== null && typeof parent !== 'string') return json(res, 400, { error: 'parent 参数非法' });
-        if (parent === slug) return json(res, 400, { error: '不能移动到自身之下' });
+        const liveSlug = db.pages[idx].slug;
+        if (parent === slug || parent === liveSlug) return json(res, 400, { error: '不能移动到自身之下' });
         if (parent) {
           const pp = db.pages.find(p => p.slug === parent);
           if (!pp) return json(res, 404, { error: '目标父级不存在' });
           if (pp.space !== db.pages[idx].space) return json(res, 400, { error: '父级必须位于同一空间' });
-          if (descendantsOf(db.pages, slug).has(parent)) return json(res, 400, { error: '不能移动到自己的子页面之下' });
+          if (descendantsOf(db.pages, liveSlug).has(parent)) return json(res, 400, { error: '不能移动到自己的子页面之下' });
         }
         db.pages[idx].parent = parent;
       }
@@ -1013,7 +1129,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages[idx].updatedAt = Date.now();
       // A slug rename leaves the old file behind, so it is declared for removal here; the store
       // keeps it if the new slug happens to reuse the same name.
-      writeDb(db, renamed ? [slug] : []);
+      writeDb(db, renamed ? [slug] : [], renamed ? { rename: { from: slug, to: db.pages[idx].slug }, expectedRemoved: pageFiles } : {});
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'DELETE') {
@@ -1032,8 +1148,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages = db.pages.filter(p => !doomed.includes(p.slug));
       // Any space whose home was among the removed pages (the page itself or a descendant)
       // would otherwise keep a pointer to a slug that no longer resolves.
-      for (const sp of db.spaces) if (sp.home && doomed.includes(sp.home)) sp.home = null;
-      writeDb(db, doomed);
+      for (const sp of db.spaces) {
+        if (sp.builtIn) continue;
+        if (sp.home && doomed.includes(sp.home)) sp.home = null;
+        // Deleted pages also leave the manual order, for the same reason the renamed ones do: an
+        // entry naming a page that no longer exists is rejected when the arrangement is
+        // re-submitted, and a page later created under that slug would inherit the dead position.
+        const ordered = removeFromOrder(sp.order, doomed);
+        if (ordered !== sp.order) {
+          if (ordered) sp.order = ordered;
+          else delete sp.order;
+        }
+      }
+      writeDb(db, doomed, { expectedRemoved: pageFiles });
       return json(res, 200, { ok: true, removed: doomed });
     }
   }

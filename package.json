@@ -9,7 +9,7 @@
     "build:client": "tsc --project tsconfig.client.json && node scripts/build-client.mjs",
     "build:tests": "tsc --project tsconfig.tests.json",
     "start": "npm run build && node dist/server.js",
-    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/toolbar-layout.test.js && node dist/tests/markdown.test.js && node dist/tests/store.test.js && node dist/tests/migration.test.js && node dist/tests/edit-mode.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js && node dist/tests/space-sort.test.js && node dist/tests/space-lock.test.js && node dist/tests/space-lock-ui.test.js && node dist/tests/builtin-space.test.js && node dist/tests/app-version.test.js && node dist/tests/base-path.test.js && node dist/tests/base-path-ui.test.js && node dist/tests/dev-mode-ui.test.js && node dist/tests/dev-mode.test.js && node dist/tests/template-transaction.test.js"
+    "test": "npm run build && node dist/tests/wordcount.test.js && node dist/tests/theme-icon.test.js && node dist/tests/cancel-flow.test.js && node dist/tests/menu-toggle.test.js && node dist/tests/reading-width.test.js && node dist/tests/toolbar-layout.test.js && node dist/tests/markdown.test.js && node dist/tests/callouts.test.js && node dist/tests/store.test.js && node dist/tests/migration.test.js && node dist/tests/edit-mode.test.js && node dist/tests/beian.test.js && node dist/tests/config.test.js && node dist/tests/filing-badge.test.js && node dist/tests/http-footer.test.js && node dist/tests/space-slug.test.js && node dist/tests/space-api.test.js && node dist/tests/space-sort.test.js && node dist/tests/space-recommend.test.js && node dist/tests/space-manual-order.test.js && node dist/tests/space-lock.test.js && node dist/tests/auth-anonymous.test.js && node dist/tests/space-lock-ui.test.js && node dist/tests/login-dialog.test.js && node dist/tests/builtin-space.test.js && node dist/tests/app-version.test.js && node dist/tests/base-path.test.js && node dist/tests/base-path-ui.test.js && node dist/tests/dev-mode-ui.test.js && node dist/tests/dev-mode.test.js && node dist/tests/template-transaction.test.js && node dist/tests/page-rename-order.test.js && node dist/tests/page-cycle-ui.test.js"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -34,6 +34,12 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
     "dompurify": "^3.4.15",
     "marked": "^16.4.2",
     "smol-toml": "^1.8.0",
