@@ -1615,7 +1615,6 @@ async function refreshTree() {
     const tree = await api<TreeResponse>('tree');
     S.spaces = tree.spaces || S.spaces;
     S.pages = tree.pages || S.pages;
-    pruneExpandedSpaceCards();
     // The space index renders `sort`, so it has to point at the refetched record, not the old one.
     if (S.space) S.space = S.spaces.find(s => s.slug === S.space.slug) || S.space;
   } catch (err) {
@@ -1766,7 +1765,6 @@ async function slugSpaceFlow(space) {
     // Pages reference their space by slug, so the whole tree has to follow the rename.
     const newSlug = updated.slug;
     S.pages.forEach(p => { if (p.space === old) p.space = newSlug; });
-    pruneExpandedSpaceCards();
     if (S.page?.space === old) S.page.space = newSlug;
     const i = S.spaces.findIndex(s => s.slug === old);
     if (i >= 0) S.spaces[i] = updated;
@@ -1802,7 +1800,6 @@ async function deleteSpaceFlow(space) {
   try {
     const r = await api<DeleteSpaceResponse>('spaces/' + encodeURIComponent(space.slug), { method: 'DELETE' });
     S.pages = S.pages.filter(p => p.space !== space.slug);
-    pruneExpandedSpaceCards();
     S.spaces = S.spaces.filter(s => s.slug !== space.slug);
     toast(r.removedPages.length ? `已删除空间及 ${r.removedPages.length} 个页面` : '已删除空间');
     if (S.page && S.page.space === space.slug) { S.page = null; navigate('/'); }
@@ -1897,7 +1894,6 @@ async function slugFlow(pg: PageMeta | null = S.page) {
     S.pages.forEach(p => { if (p.parent === old) p.parent = newSlug; });
     const i = S.pages.findIndex(p => p.slug === old);
     if (i >= 0) { S.pages[i].slug = newSlug; S.pages[i].updatedAt = updated.updatedAt; }
-    pruneExpandedSpaceCards();
     await refreshTree();          // slug is the order's tie-break, so the rank can move
     toast('页面路径已更新 ✓');
     if (S.page?.slug === old) { S.page = updated; navigate(canonicalPath(newSlug)); }
@@ -1959,7 +1955,6 @@ async function moveFlow(pg: PageMeta | null = S.page) {
       });
       const i = S.pages.findIndex(p => p.slug === pg.slug);
       if (i >= 0) { S.pages[i].space = updated.space; S.pages[i].parent = updated.parent; }
-      pruneExpandedSpaceCards();
       // The moved page kept its old array slot, which reflects the *source* space's order; only
       // the server puts it in the right place among its new siblings.
       await refreshTree();
@@ -1991,7 +1986,6 @@ async function deleteFlow(pg: PageMeta | null = S.page) {
     await api('pages/' + encodeURIComponent(pg.slug), { method: 'DELETE' });
     const doomed = new Set([pg.slug, ...descendantSlugsOf(pg.slug)]);
     S.pages = S.pages.filter(p => !doomed.has(p.slug));
-    pruneExpandedSpaceCards();
     toast(kidCount ? `已删除 ${kidCount + 1} 个页面` : '已删除');
     if (S.page && doomed.has(S.page.slug)) { S.page = null; navigate('/'); }
     else {
@@ -2066,22 +2060,30 @@ function renderHome() {
   renderSidebar(el.search.value);
 }
 
-// Space-index expansion is independent from the sidebar and lasts for this browser session.
-const expandedSpaceCards = new Set<string>();
-const spaceCardKey = (space: string, slug: string) => JSON.stringify([space, slug]);
+// A query parameter distinguishes a page's child-card index from the page itself.
+const childCardsPath = (slug: string) => `${canonicalPath(slug)}?view=children`;
 
-/** Drop expansion state for pages removed, renamed, or moved to another space. */
-function pruneExpandedSpaceCards(): void {
-  if (!expandedSpaceCards.size) return;
-  const live = new Set(S.pages.map(p => spaceCardKey(p.space, p.slug)));
-  for (const key of expandedSpaceCards) if (!live.has(key)) expandedSpaceCards.delete(key);
+function cardIndexParent(space: Space): PageMeta | null {
+  if (new URLSearchParams(location.search).get('view') !== 'children') return null;
+  const path = withoutBase(location.pathname);
+  if (!path) return null;
+  let last: string;
+  try { last = decodeURIComponent(path.split('/').filter(Boolean).at(-1) || ''); }
+  catch { return null; }
+  const page = pageBySlug(last) as PageMeta | null;
+  return page && page.space === space.slug && canonicalPath(page.slug) === location.pathname ? page : null;
 }
 
 function renderSpace(space) {
   S.page = null; S.space = space;
+  const parent = cardIndexParent(space);
+  if (!parent && new URLSearchParams(location.search).get('view') === 'children'
+      && location.pathname !== canonicalPath(space.slug)) {
+    history.replaceState(null, '', childCardsPath(space.slug));
+  }
   collapsedSet.delete('s:' + space.slug);   // 进入空间索引时展开
-  document.title = space.title + ' · DocLight';
-  el.crumb.textContent = space.title;
+  document.title = (parent ? `${parent.title}的子页面 · ${space.title}` : space.title) + ' · DocLight';
+  el.crumb.textContent = parent ? parent.title : space.title;
   el.article.classList.remove('is-reading');
   el.editWrap.hidden = true;
   el.toolbarWrap.hidden = true;
@@ -2099,39 +2101,34 @@ function renderSpace(space) {
     siblings.push(page);
     childrenByParent.set(parent, siblings);
   }
-  const tops = childrenByParent.get(null) || [];
+  const pages = (childrenByParent.get(parent?.slug || null) || []).filter(p => p.slug !== parent?.slug);
+  const path = parent ? chainOf(parent.slug) : [];
+  const crumbs = parent ? path.map((node, index) => index === path.length - 1
+    ? `<span class="cur">${esc(node.title)}的子页面</span>`
+    : `<a data-nav href="${esc(childCardsPath(node.slug))}">${esc(node.title)}</a>`).join('<span aria-hidden="true"> / </span>')
+    : `<span class="cur">${esc(space.title)}</span>`;
   // Manual ordering is a write: locked spaces and the read-only built-in template get no grips.
   const canSort = !pageContentLocked(space) || devSourceEditable(space);
-  let cardGroupId = 0;
-  const renderCards = (pages, ancestors = new Set<string>()) => pages.map(p => {
-    if (ancestors.has(p.slug)) return '';
-    const children = (childrenByParent.get(p.slug) || []).filter(child => !ancestors.has(child.slug) && child.slug !== p.slug);
-    const key = spaceCardKey(space.slug, p.slug);
-    const open = children.length > 0 && expandedSpaceCards.has(key);
-    const groupId = `space-card-children-${cardGroupId++}`;
-    ancestors.add(p.slug);
-    const html = `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
+  const cards = pages.map(p => {
+    const children = (childrenByParent.get(p.slug) || []).filter(child => child.slug !== p.slug);
+    return `<div class="card space-page-card" data-slug="${esc(p.slug)}" draggable="false">
               ${canSort ? `<span class="card-grip" role="button" aria-label="拖动排序" title="拖动排序"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/></g></svg></span>` : ''}
               <a class="card-link" data-nav href="${esc(canonicalPath(p.slug))}" draggable="false">
                 <span class="t">${esc(p.title)}</span>
                 <span class="s">${children.length ? children.length + ' 个子页 · ' : ''}${space.builtIn ? '随应用更新' : `更新于 ${relTime(p.updatedAt)}`}</span>
               </a>
-              ${children.length ? `<button class="card-expand" type="button" aria-expanded="${open}" aria-controls="${groupId}" aria-label="${open ? '折叠' : '展开'}${esc(p.title)}的子页面"><span aria-hidden="true">${open ? '▾' : '▸'}</span> ${open ? '收起' : '查看'} ${children.length} 个子页面</button>
-                <div id="${groupId}" class="cards card-children" data-parent="${esc(p.slug)}"${open ? '' : ' hidden'}>${open ? renderCards(children, ancestors) : ''}</div>` : ''}
+              ${children.length ? `<a class="card-expand" data-nav href="${esc(childCardsPath(p.slug))}" aria-label="查看${esc(p.title)}的子页面">查看 ${children.length} 个子页面 <span aria-hidden="true">→</span></a>` : ''}
             </div>`;
-    ancestors.delete(p.slug);
-    return html;
   }).join('');
-  const cards = renderCards(tops);
 
   el.article.innerHTML =
-    `<div class="meta-row"><nav class="crumbs"><span class="cur">${esc(space.title)}</span></nav><span class="sep">·</span>
+    `<div class="meta-row"><nav class="crumbs" aria-label="页面层级">${crumbs}</nav><span class="sep">·</span>
        <span id="sp-slug" class="slug-chip">#${esc(space.slug)}</span>${devSourceEditable(space) ? '<span class="lock-badge">开发者模式：可编辑模板源码</span>' : pageContentLocked(space) ? `<span class="lock-badge">🔒 ${space.builtIn ? '内置空间，永久只读' : '空间已锁定，只读'}</span>` : ''}
      </div>
      <div class="space-head">
        <div>
-         <h1>${esc(space.title)}</h1>
-         ${space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
+         <h1>${parent ? `${esc(parent.title)}的子页面` : esc(space.title)}</h1>
+         ${!parent && space.desc ? `<p class="space-desc">${esc(space.desc)}</p>` : ''}
        </div>
        <div class="space-acts"${space.builtIn && !devSourceEditable(space) ? ' hidden' : ''}>
          <label class="sort-pick"${!canSort ? ' hidden' : ''}>
@@ -2145,14 +2142,14 @@ function renderSpace(space) {
            <input type="checkbox" id="sp-recommend"${space.recommend ? ' checked' : ''}>
            <span class="switch-ui" aria-hidden="true"></span>
          </label>
-         <button class="btn btn-new" id="sp-add"${!canSort ? ' hidden' : ''}>＋ 新建页面</button>
+         <button class="btn btn-new" id="sp-add"${!canSort ? ' hidden' : ''}>＋ ${parent ? '新建子页面' : '新建页面'}</button>
          ${space.builtIn && !devSourceEditable(space) ? '' : '<button class="btn btn-ghost" id="sp-settings">空间设置</button>'}
          <button class="btn btn-ghost" id="sp-rename"${!canSort ? ' hidden' : ''}>重命名</button>
          ${space.builtIn && !devSourceEditable(space) ? '' : `<button class="btn btn-ghost danger-text" id="sp-delete"${!canSort ? ' hidden' : ''}>删除空间</button>`}
        </div>
      </div>
-     <div class="cards">${cards || ''}</div>
-     ${tops.length ? '' : `<p class="list-empty" style="padding:30px 0">${pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
+     <div class="cards"${parent ? ` data-parent="${esc(parent.slug)}"` : ''}>${cards}</div>
+     ${pages.length ? '' : `<p class="list-empty" style="padding:30px 0">${parent ? '此页面还没有子页面。' : pageContentLocked(space) ? '此空间还没有页面。' : '此空间还没有页面，点击右上角「新建页面」开始创作。'}</p>`}`;
 
   el.article.hidden = false;
   decorate(el.article);
@@ -2161,19 +2158,10 @@ function renderSpace(space) {
   $('#sp-recommend').addEventListener('change', (e) =>
     saveSpaceSettings(space, { recommend: (e.target as HTMLInputElement).checked }));
   $('#sp-settings')?.addEventListener('click', () => spaceSettingsFlow(space));
-  $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, null));
+  $('#sp-add').addEventListener('click', () => createPageFlow(space.slug, parent?.slug || null));
   $('#sp-rename').addEventListener('click', () => renameSpaceFlow(space));
   $('#sp-delete')?.addEventListener('click', () => deleteSpaceFlow(space));
   const article = el.article as HTMLElement;
-  article.querySelectorAll('.card-expand').forEach(button => button.addEventListener('click', () => {
-    const card = button.parentElement as HTMLElement;
-    const slug = card.dataset.slug;
-    const key = spaceCardKey(space.slug, slug);
-    if (expandedSpaceCards.has(key)) expandedSpaceCards.delete(key); else expandedSpaceCards.add(key);
-    renderSpace(space);
-    const current = [...article.querySelectorAll<HTMLElement>('.space-page-card')].find(item => item.dataset.slug === slug);
-    current?.querySelector<HTMLButtonElement>(':scope > .card-expand')?.focus();
-  }));
   if (canSort) {
     article.querySelectorAll<HTMLElement>('.cards').forEach(container => {
       if ([...container.children].filter(child => child.classList.contains('space-page-card')).length > 1) {
@@ -2683,7 +2671,7 @@ async function route() {
     return;
   }
   if (segs.length === 1) {
-    if (!devSourceEditable(space) && space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
+    if (new URLSearchParams(location.search).get('view') !== 'children' && !devSourceEditable(space) && space.home && pageBySlug(space.home)) { await openPage(space.home); return; }
     renderSpace(space);
     return;
   }
@@ -2699,6 +2687,11 @@ async function route() {
       return;
     }
     node = cand;
+  }
+  if (new URLSearchParams(location.search).get('view') === 'children') {
+    renderSpace(space);
+    $('.scroll-area')?.scrollTo?.({ top: 0 });
+    return;
   }
   await openPage(node.slug);
 }

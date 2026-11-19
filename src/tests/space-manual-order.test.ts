@@ -202,7 +202,7 @@ async function main(): Promise<void> {
     window.close();
   }
 
-  /* ---- Nested cards expand independently and keep sibling drag ordering. ---- */
+  /* ---- Child cards live in their own navigable index and retain sibling drag ordering. ---- */
   {
     const { window, document, puts } = await boot('http://localhost:4173/default', false, [
       { slug: 'alpha_one', space: 'default', parent: 'alpha', title: '子一', createdAt: 2, updatedAt: 2 },
@@ -211,79 +211,67 @@ async function main(): Promise<void> {
     ]);
     await wait(120);
     const card = (slug: string) => document.querySelector<HTMLElement>(`.space-page-card[data-slug="${slug}"]`);
-    const toggle = (slug: string) => card(slug)!.querySelector<HTMLButtonElement>(':scope > .card-expand')!;
-    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'false', '子页面默认折叠');
-    assert.equal(card('alpha_one'), null, '折叠时不渲染子卡片');
-    toggle('alpha').click();
-    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'true');
-    assert.equal(document.activeElement, toggle('alpha'), '重新渲染后保留键盘焦点');
-    assert.ok(card('alpha_one') && card('alpha_two'), '展开后显示直接子页面');
-    assert.equal(card('alpha_grand'), null, '孙页面仍默认折叠');
-    toggle('alpha_one').click();
-    assert.ok(card('alpha_grand'), '支持逐层展开');
-    toggle('alpha').click();
-    assert.equal(card('alpha_one'), null, '折叠父页面隐藏整个子树');
-    toggle('alpha').click();
-    assert.ok(card('alpha_grand'), '重新展开时保留后代展开状态');
-    assert.equal(puts.length, 0, '展开和折叠不得修改页面或顺序');
-
-    // Reorder the two children only; the first child's expanded subtree follows it.
+    const enter = (slug: string) => card(slug)!.querySelector<HTMLAnchorElement>(':scope > .card-expand')!.click();
+    assert.equal(card('alpha_one'), null, '空间首页只显示顶层卡片');
+    enter('alpha');
+    await wait(50);
+    assert.equal(window.location.pathname + window.location.search, '/default/alpha?view=children');
+    assert.ok(card('alpha_one') && card('alpha_two'), '独立视图显示直接子页面');
+    assert.equal(card('alpha'), null, '子页面视图不嵌套父卡片');
+    assert.equal(card('alpha_grand'), null, '孙页面不会混入当前层');
+    assert.equal(document.querySelector('#article h1')?.textContent, '甲的子页面');
+    assert.equal(puts.length, 0, '浏览子页面不得写入');
+    enter('alpha_one');
+    await wait(50);
+    assert.ok(card('alpha_grand'), '可以逐层进入孙页面视图');
+    assert.equal(document.querySelectorAll('#article .crumbs a').length, 2, '面包屑应提供空间和父级入口');
+    document.querySelectorAll<HTMLAnchorElement>('#article .crumbs a')[1].click();
+    await wait(50);
+    assert.ok(card('alpha_one') && card('alpha_two'), '面包屑可返回父级卡片列表');
+    window.history.back();
+    await wait(80);
+    assert.ok(card('alpha_grand'), '浏览器后退恢复上一层视图');
+    window.history.forward();
+    await wait(80);
+    assert.ok(card('alpha_one') && card('alpha_two'), '浏览器前进恢复子页面列表');
     layoutCards(document);
     const first = card('alpha_one')!;
-    pointer(window, 'pointerdown', 30, 140, first.querySelector(':scope > .card-grip')!);
-    pointer(window, 'pointermove', 300, 500, window);
-    pointer(window, 'pointerup', 300, 500, window);
+    pointer(window, 'pointerdown', 30, 20, first.querySelector(':scope > .card-grip')!);
+    pointer(window, 'pointermove', 300, 240, window);
+    pointer(window, 'pointerup', 300, 240, window);
     await wait(160);
-    assert.deepEqual(puts[0].body, { sort: 'manual', order: ['alpha', 'alpha_two', 'alpha_one', 'alpha_grand', 'beta', 'gamma'] }, '子卡片拖动只排序同级并保留完整子树');
-    assert.equal(toggle('alpha').getAttribute('aria-expanded'), 'true', '排序后保持展开状态');
-    assert.ok(card('alpha_grand'), '排序后保持后代展开状态');
-    layoutCards(document);
-    const parent = card('alpha')!;
-    pointer(window, 'pointerdown', 30, 20, parent.querySelector(':scope > .card-grip')!);
-    pointer(window, 'pointermove', 300, 1000, window);
-    pointer(window, 'pointerup', 300, 1000, window);
-    await wait(160);
-    assert.deepEqual(puts[1].body, { order: ['beta', 'gamma', 'alpha', 'alpha_two', 'alpha_one', 'alpha_grand'] }, '展开时拖动父卡片仍只排序顶层并保留子树');
+    assert.deepEqual(puts[0].body, { sort: 'manual', order: ['alpha', 'alpha_two', 'alpha_one', 'alpha_grand', 'beta', 'gamma'] }, '子页面拖动只排序同级并保留完整子树');
+    assert.ok(card('alpha_two'), '排序后保持子页面视图');
     card('alpha_two')!.querySelector<HTMLAnchorElement>(':scope > .card-link')!.click();
     await wait(120);
-    assert.equal(document.title, '子二 · DocLight', '点击子卡片主体打开对应页面');
+    assert.equal(document.title, '子二 · DocLight', '点击卡片主体打开文章');
     window.close();
   }
 
-  /* ---- Refreshing the tree removes expansion state for deleted and recreated pages. ---- */
+  /* ---- A child index URL works when opened directly, including an empty index. ---- */
   {
-    const { window, document, pages } = await boot('http://localhost:4173/default', false, [
+    const { window, document } = await boot('http://localhost:4173/default/alpha?view=children', false, [
       { slug: 'alpha_child', space: 'default', parent: 'alpha', title: '子页', createdAt: 1, updatedAt: 1 },
     ]);
     await wait(120);
-    const toggle = () => document.querySelector<HTMLButtonElement>('.space-page-card[data-slug="alpha"] > .card-expand')!;
-    toggle().click();
-    const changeSort = async (value: string) => {
-      const select = document.querySelector<HTMLSelectElement>('#sp-sort')!;
-      select.value = value;
-      select.dispatchEvent(new window.Event('change', { bubbles: true }));
-      await wait(160);
-    };
-    await changeSort('created_asc');
-    assert.equal(toggle().getAttribute('aria-expanded'), 'true', '页面仍存在时刷新保留展开状态');
-    const removed = pages.filter(page => page.slug === 'alpha' || page.slug === 'alpha_child');
-    for (const page of removed) pages.splice(pages.indexOf(page), 1);
-    await changeSort('updated_desc');
-    assert.equal(document.querySelector('.space-page-card[data-slug="alpha"]'), null);
-    pages.push(...removed);
-    await changeSort('title_asc');
-    assert.equal(toggle().getAttribute('aria-expanded'), 'false', '删除后重建同名页面不应继承旧展开状态');
+    assert.ok(document.querySelector('.space-page-card[data-slug="alpha_child"]'), '直接打开地址应显示子页面卡片');
+    assert.equal(document.querySelector('.space-page-card[data-slug="beta"]'), null);
     window.close();
+    const empty = await boot('http://localhost:4173/default/beta?view=children');
+    await wait(120);
+    assert.match(empty.document.querySelector('#article')?.textContent || '', /此页面还没有子页面/);
+    empty.window.close();
   }
 
-  /* ---- Read-only spaces still expose expansion but never sorting. ---- */
+  /* ---- Read-only spaces still expose child indexes but never sorting. ---- */
   {
     const { window, document } = await boot('http://localhost:4173/default', true, [
       { slug: 'locked_child', space: 'default', parent: 'alpha', title: '只读子页', createdAt: 1, updatedAt: 1 },
     ]);
     await wait(120);
-    document.querySelector<HTMLButtonElement>('.space-page-card[data-slug="alpha"] > .card-expand')!.click();
-    assert.ok(document.querySelector('.space-page-card[data-slug="locked_child"] > .card-link'), '只读空间也可展开子页面');
+    document.querySelector<HTMLAnchorElement>('.space-page-card[data-slug="alpha"] > .card-expand')!.click();
+    await wait(50);
+    assert.ok(document.querySelector('.space-page-card[data-slug="locked_child"] > .card-link'), '只读空间也可查看子页面');
     assert.equal(document.querySelectorAll('#article .card-grip').length, 0, '只读空间的子页面也不能拖动');
     window.close();
   }
@@ -565,13 +553,6 @@ async function main(): Promise<void> {
     assert.match(rule('.card-grip'), /touch-action:\s*none/, '触摸拖动时不应触发滚动');
     assert.match(rule('body.is-card-dragging .article'), /animation:\s*none/, '拖动时文章入场动画不能改变固定定位参照');
     assert.match(rule('body.is-card-dragging .article'), /transform:\s*none\s*!important/, '拖动时文章不得建立固定定位包含块');
-    const ancestorRule = rule('body.is-card-dragging .card:has(.card.is-dragging)');
-    assert.match(ancestorRule, /transform:\s*none\s*!important/, '拖动时祖先卡片不得建立固定定位包含块');
-    assert.match(ancestorRule, /transition:\s*none\s*!important/, '祖先变换不得在拖动期间继续过渡');
-    const dom = new JSDOM(`<style>${css}</style><body class="is-card-dragging"><div class="card" id="ancestor"><div class="card is-dragging"></div></div><div class="card" id="other"></div></body>`);
-    assert.equal(dom.window.getComputedStyle(dom.window.document.querySelector('#ancestor')!).transform, 'none', '拖动中祖先的 transform 应为 none');
-    assert.equal(dom.window.document.querySelector('#other')!.matches('body.is-card-dragging .card:has(.card.is-dragging)'), false, '无关卡片不受祖先规则影响');
-    dom.window.close();
     assert.match(rule('.card.is-dragging'), /position:\s*fixed/, '拖动中的卡片应脱离文档流跟随指针');
     assert.match(rule('.card.is-dragging'), /box-shadow:\s*var\(--shadow-lg\)/, '拖动中的卡片应有抬起阴影');
     assert.match(rule('.card-placeholder'), /border:\s*1.5px dashed/, '放置位应使用虚线占位');
