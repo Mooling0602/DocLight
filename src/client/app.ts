@@ -8,6 +8,7 @@ import { htmlToMarkdown, markdownToHtml } from '../markdown.js';
 import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS, pageNeighbors } from '../sort.js';
 import type { SortKey } from '../sort.js';
 import { createMarkdownEditor } from './source-editor.js';
+import { SourceDraft } from './source-draft.js';
 
 interface Space {
   slug: string;
@@ -1125,10 +1126,13 @@ const SOURCE_WRAP_KEY = 'doclight-markdown-wrap';
 let sourceWrap = true;
 try { sourceWrap = localStorage.getItem(SOURCE_WRAP_KEY) !== 'off'; } catch { /* default on */ }
 let sourceView: ReturnType<typeof createMarkdownEditor> | null = null;
+let sourceGeneration = 0;
+const sourceDraft = new SourceDraft();
 let markdownDraft = '';
 let visualBaseline = '';
 
 function destroySourceEditor() {
+  sourceGeneration++;
   sourceView?.destroy();
   sourceView = null;
 }
@@ -1163,7 +1167,7 @@ function placeCaretEnd(node) {
 /** Read the document from whichever surface is active, in Markdown form. */
 function currentMarkdown(): string {
   return S.editMode === 'markdown'
-    ? sourceView?.view.state.doc.toString() ?? markdownDraft
+    ? sourceDraft.read(markdownDraft)
     : el.editor.innerHTML === visualBaseline ? markdownDraft : htmlToMarkdown(el.editor.innerHTML);
 }
 
@@ -1204,7 +1208,14 @@ function setEditMode(mode: EditMode, focus = true) {
   } else {
     if (!sourceView || sourceView.view.state.doc.toString() !== markdown) {
       destroySourceEditor();
-      sourceView = createMarkdownEditor(el.sourceEditor, markdown, sourceWrap, markDirty);
+      sourceDraft.clear();
+      const generation = sourceGeneration;
+      sourceView = createMarkdownEditor(el.sourceEditor, markdown, sourceWrap, document => {
+        if (S.editMode !== 'markdown' || generation !== sourceGeneration) return;
+        sourceDraft.update(document);
+        markDirty();
+      });
+      sourceDraft.update(sourceView.view.state.doc);
     } else {
       sourceView.view.requestMeasure();
     }
@@ -1246,6 +1257,7 @@ function enterEdit(focus = true) {
   // Keep the original body until the visual surface actually changes; merely opening the
   // editor or changing the title must not normalise hand-written Markdown.
   destroySourceEditor();
+  sourceDraft.clear();
   markdownDraft = S.page.content || '';
   S.editMode = 'visual';
   el.editor.innerHTML = renderMarkdown(markdownDraft);

@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
+import { Text } from '@codemirror/state';
+import { SourceDraft } from '../client/source-draft.js';
 import { setSource, sourceView } from './source-editor-utils.js';
 
 const root = path.resolve(__dirname, '../..');
@@ -61,6 +63,16 @@ const click = (selector: string) => $(selector).dispatchEvent(new window.MouseEv
 const visible = (selector: string) => !$(selector).hasAttribute('hidden');
 
 async function main(): Promise<void> {
+  // The immutable draft survives a missing view, including a deliberate empty document.
+  const retained = new SourceDraft();
+  assert.equal(retained.read('fallback'), 'fallback');
+  retained.update(Text.of(['新稿', '', '尾行']));
+  assert.equal(retained.read('旧稿'), '新稿\n\n尾行', '丢失视图时必须使用最近一次文档');
+  retained.update(Text.of(['']));
+  assert.equal(retained.read('旧稿'), '', '空文档也是有效草稿，不能回退');
+  retained.clear();
+  assert.equal(retained.read('新页面'), '新页面', '清除后不得泄漏上一个页面的草稿');
+
   window.eval(fs.readFileSync(path.join(publicDir, 'app.js'), 'utf8'));
   await wait(80);
 
@@ -139,6 +151,10 @@ async function main(): Promise<void> {
   assert.equal($('#source-wrap-toggle').getAttribute('aria-pressed'), 'false', '切换模式后应保留换行偏好');
   keptView.contentDOM.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
   assert.equal(keptView.state.doc.toString(), '# 源码标题\n\n- 甲\n- 乙', '模式切换后撤销仍可恢复最近一次源码编辑');
+  setSource(document, '');
+  click('#mode-toggle [data-mode="visual"]');
+  click('#mode-toggle [data-mode="markdown"]');
+  assert.equal(sourceView(document).state.doc.toString(), '', '清空正文并切换模式不得恢复旧草稿');
   setSource(document, '---\n\n# 最终标题\n\n最终正文。');
   sourceView(document).contentDOM.dispatchEvent(new window.KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
   await wait(60);
@@ -185,6 +201,21 @@ async function main(): Promise<void> {
   assert.equal(puts.length, 3, '可视化保存应再发出一次 PUT');
   assert.equal(puts[2].content, '可视化 **加粗**', '可视化模式保存应序列化为 Markdown');
 
+  // A hidden, stale source view must never overwrite a later visual draft.
+  click('#btn-edit');
+  click('#mode-toggle [data-mode="markdown"]');
+  setSource(document, '旧源码');
+  const hiddenView = sourceView(document);
+  click('#mode-toggle [data-mode="visual"]');
+  $('#editor').innerHTML = '<p>新的可视化内容</p>';
+  $('#editor').dispatchEvent(new window.Event('input', { bubbles: true }));
+  hiddenView.dispatch({ changes: { from: hiddenView.state.doc.length, insert: '迟到事件' } });
+  click('#mode-toggle [data-mode="markdown"]');
+  assert.equal(sourceView(document).state.doc.toString(), '新的可视化内容', '隐藏的旧视图不得覆盖可视化草稿');
+  click('#btn-save');
+  await wait(60);
+  assert.equal(puts[3].content, '新的可视化内容');
+
   // An unterminated file header is ambiguous with a Markdown rule: keep it readable, but do not
   // expose it as editable body or let the user accidentally write back partial metadata.
   unclosedFrontMatter = true;
@@ -195,7 +226,7 @@ async function main(): Promise<void> {
   await wait(20);
   assert.equal($('#edit-wrap').hidden, true, '未闭合的元数据不能进入编辑器');
   assert.match($('#toasts').textContent || '', /元数据围栏未闭合/);
-  assert.equal(puts.length, 3, '阻止编辑时不得提交正文');
+  assert.equal(puts.length, 4, '阻止编辑时不得提交正文');
 
   // The source editor belongs to the page rather than a bordered, vertically scrolling box.
   const css = fs.readFileSync(path.join(publicDir, 'style.css'), 'utf8');

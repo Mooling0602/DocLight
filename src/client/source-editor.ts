@@ -1,5 +1,5 @@
 /* Markdown source editor; the document is the page body, never its storage front matter. */
-import { Compartment, EditorState } from '@codemirror/state';
+import { Compartment, EditorState, type Text } from '@codemirror/state';
 import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers, placeholder } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { HighlightStyle, indentUnit, syntaxHighlighting } from '@codemirror/language';
@@ -17,7 +17,7 @@ const markdownHighlight = HighlightStyle.define([
 ]);
 
 /** The caller owns the view lifecycle and carries the body across editor modes. */
-export function createMarkdownEditor(parent: HTMLElement, text: string, wrap: boolean, onChange: () => void) {
+export function createMarkdownEditor(parent: HTMLElement, text: string, wrap: boolean, onChange: (document: Text) => void) {
   const wrapping = new Compartment();
   const view = new EditorView({
     parent,
@@ -31,7 +31,7 @@ export function createMarkdownEditor(parent: HTMLElement, text: string, wrap: bo
         wrapping.of(wrap ? EditorView.lineWrapping : []),
         placeholder('# 标题\n\n用 Markdown 写下正文……'),
         EditorView.contentAttributes.of({ 'aria-label': 'Markdown 源码编辑区', spellcheck: 'false' }),
-        EditorView.updateListener.of(update => { if (update.docChanged) onChange(); }),
+        EditorView.updateListener.of(update => { if (update.docChanged) onChange(update.state.doc); }),
       ],
     }),
   });

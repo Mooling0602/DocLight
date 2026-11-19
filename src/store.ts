@@ -264,6 +264,11 @@ export function sortPages(pages: Page[], key: SortKey = DEFAULT_SORT): Page[] {
 
 /** Read the whole store from disk. Missing pieces degrade to empty rather than throwing. */
 export function readStore(dataDir: string): Database {
+  return readStoreSnapshot(dataDir);
+}
+
+/** Optionally retain the UTF-8 source text read alongside its decoded page metadata. */
+function readStoreSnapshot(dataDir: string, rawFiles?: Map<string, string>): Database {
   let spaces: Space[] = [];
   try {
     const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
@@ -302,6 +307,7 @@ export function readStore(dataDir: string): Database {
     let raw = '';
     let stat: fs.Stats | null = null;
     try { raw = fs.readFileSync(full, 'utf8'); stat = fs.statSync(full); } catch { continue; }
+    rawFiles?.set(slug, raw);
     const { meta, body, unclosedFrontMatter } = splitFrontMatter(raw);
     const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
     pages.push({
@@ -892,7 +898,9 @@ export function writeStore(
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
-  const existing = new Map(readStore(dataDir).pages.map(page => [page.slug, page]));
+  // Compare against the same source text and stat-derived defaults used to build the snapshot.
+  const rawFiles = new Map<string, string>();
+  const existing = new Map(readStoreSnapshot(dataDir, rawFiles).pages.map(page => [page.slug, page]));
   if (options.rename) {
     const { from, to } = options.rename;
     if (options.onlyCreate || !SLUG_RE.test(from) || !SLUG_RE.test(to) || from === to
@@ -901,7 +909,7 @@ export function writeStore(
       throw sourceError('无法安全重命名页面文件');
     }
   }
-  const pending: Array<{ file: string; next: string }> = [];
+  const pending: Array<{ file: string; next: string; sourceFile?: string; sourceRaw?: string; newFile: boolean }> = [];
   const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
   for (const page of db.pages) {
     // The slug becomes a file name, so it is validated here rather than trusted from the caller.
@@ -923,18 +931,34 @@ export function writeStore(
     let next: string;
     const sourceSlug = options.rename?.to === page.slug ? options.rename.from : page.slug;
     const sourceFile = path.join(dir, `${sourceSlug}.md`);
+    const raw = rawFiles.get(sourceSlug);
     if (fs.existsSync(sourceFile)) {
       const previous = existing.get(sourceSlug);
-      if (!previous) throw sourceError(`无法读取页面 ${sourceSlug}.md，已拒绝覆盖`);
-      next = updatePageFile(fs.readFileSync(sourceFile, 'utf8'), page, previous);
-    } else if (sourceSlug !== page.slug) {
-      throw sourceError('页面源文件不存在，已拒绝重命名');
+      if (!previous || raw === undefined) throw sourceError(`无法读取页面 ${sourceSlug}.md，已拒绝覆盖`);
+      next = updatePageFile(raw, page, previous);
+    } else if (raw !== undefined || sourceSlug !== page.slug) {
+      throw sourceError('页面源文件已变化，已拒绝覆盖');
     } else {
       next = joinFrontMatter(page);
     }
-    if (!sameContent(file, next)) pending.push({ file, next });
+    // Existing pages have already been read for the snapshot; avoid reading unchanged pages again.
+    const newFile = sourceSlug !== page.slug || raw === undefined;
+    if (newFile || next !== raw) {
+      pending.push({ file, next, ...(raw === undefined ? {} : { sourceFile, sourceRaw: raw }), newFile });
+    }
   }
 
+  // Recheck only pages that will change, so external edits during preparation are not silently
+  // overwritten. This is not a cross-process transaction; a later race remains possible.
+  for (const { file, sourceFile, sourceRaw, newFile } of pending) {
+    if (newFile && fs.existsSync(file)) throw sourceError('页面目标文件已存在，已拒绝覆盖');
+    if (sourceFile) {
+      let current: string;
+      try { current = fs.readFileSync(sourceFile, 'utf8'); }
+      catch { throw sourceError('页面源文件无法读取，已拒绝覆盖'); }
+      if (current !== sourceRaw) throw sourceError('页面文件已变化，请重新加载后重试');
+    }
+  }
   // Validate every page before writing any of them or deleting a renamed page.
   for (const { file, next } of pending) writeAtomic(file, next);
 

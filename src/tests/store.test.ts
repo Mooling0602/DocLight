@@ -244,6 +244,60 @@ try {
     assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'renamed')!.updatedAt, 7);
   } finally { fs.rmSync(preserveDir, { recursive: true, force: true }); }
 
+  /* ---- A save reads unchanged pages only once and rechecks changed files before writing. ---- */
+  {
+    const snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-write-snapshot-'));
+    try {
+      writeStore(snapshotDir, db(page('first'), page('second'), page('third')));
+      const target = path.join(snapshotDir, 'pages', 'first.md');
+      const untouched = path.join(snapshotDir, 'pages', 'second.md');
+      const other = path.join(snapshotDir, 'pages', 'third.md');
+      const before = fs.readFileSync(untouched, 'utf8');
+      const snapshot = readStore(snapshotDir);
+      snapshot.pages.find(p => p.slug === 'first')!.content = '修改后的正文';
+      const counts = new Map<string, number>();
+      const originalRead = fs.readFileSync;
+      try {
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          if (typeof file === 'string' && file.startsWith(path.join(snapshotDir, 'pages') + path.sep)) {
+            counts.set(file, (counts.get(file) || 0) + 1);
+          }
+          return (originalRead as any)(file, ...args);
+        };
+        writeStore(snapshotDir, snapshot);
+      } finally { (fs as any).readFileSync = originalRead; }
+      assert.equal(counts.get(target), 2, '修改页读取一次快照、一次冲突校验');
+      assert.equal(counts.get(untouched), 1, '未修改页不应重复读取');
+      assert.equal(counts.get(other), 1, '未修改页不应重复读取');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '未修改页逐字节不变');
+
+      const conflicted = readStore(snapshotDir);
+      conflicted.pages.find(p => p.slug === 'first')!.content = '不能覆盖外部修改';
+      const current = fs.readFileSync(target, 'utf8');
+      let targetReads = 0;
+      try {
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          const contents = (originalRead as any)(file, ...args);
+          if (file === target && ++targetReads === 2) return String(contents) + 'external change';
+          return contents;
+        };
+        assert.throws(() => writeStore(snapshotDir, conflicted), /页面文件已变化/, '预检期间外部修改必须拒绝');
+      } finally { (fs as any).readFileSync = originalRead; }
+      assert.equal(fs.readFileSync(target, 'utf8'), current, '冲突时不得写入目标');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '冲突时不得修改其他页面');
+
+      try {
+        (fs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+          if (file === target) throw Object.assign(new Error('simulated read error'), { code: 'EACCES' });
+          return (originalRead as any)(file, ...args);
+        };
+        assert.throws(() => writeStore(snapshotDir, conflicted), /无法读取页面/, '无法读取已有文件时不能覆盖');
+      } finally { (fs as any).readFileSync = originalRead; }
+      assert.equal(fs.readFileSync(target, 'utf8'), current, '读失败时目标必须原样保留');
+      assert.equal(fs.readFileSync(untouched, 'utf8'), before, '读失败时不得修改其他页面');
+    } finally { fs.rmSync(snapshotDir, { recursive: true, force: true }); }
+  }
+
   /* ---- A page pointing at an unknown space falls back instead of vanishing ---- */
   fs.writeFileSync(pageFile('orphan'), '---\ntitle: 孤儿\nspace: gone\n---\n\n正文', 'utf8');
   const orphan = readStore(dir).pages.find(p => p.slug === 'orphan')!;
