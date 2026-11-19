@@ -216,6 +216,39 @@ async function main(): Promise<void> {
   await wait(60);
   assert.equal(puts[3].content, '新的可视化内容');
 
+  // Opening the link prompt steals focus and may discard the browser's selection.
+  click('#btn-edit');
+  const editor = $('#editor');
+  editor.innerHTML = '<p>选中的文字</p>';
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(editor.querySelector('p')!);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  let commandUrl = '';
+  (document as any).execCommand = (command: string, _ui: boolean, value: string) => {
+    assert.equal(document.activeElement, editor, '执行链接命令时焦点应回到编辑区');
+    assert.equal(selection.toString(), '选中的文字', '执行链接命令时应恢复弹窗前的选区');
+    assert.equal(command, 'createLink');
+    commandUrl = value;
+    const selected = selection.getRangeAt(0);
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', value);
+    anchor.appendChild(selected.extractContents());
+    selected.insertNode(anchor);
+    return true;
+  };
+  click('#toolbar [data-cmd="createlink"]');
+  selection.removeAllRanges(); // Simulate the selection being lost to the modal input.
+  const linkInput = $('#modal-root input') as HTMLInputElement;
+  linkInput.value = 'https://example.com/?a=1&b=2';
+  click('#modal-root [data-x="ok"]');
+  await wait(20);
+  assert.equal(commandUrl, 'https://example.com/?a=1&b=2', '浏览器命令应接收未转义的 URL');
+  assert.equal(editor.querySelector('a')?.getAttribute('href'), commandUrl);
+  click('#mode-toggle [data-mode="markdown"]');
+  assert.match(sourceView(document).state.doc.toString(), /\[选中的文字\]\(https:\/\/example\.com\/\?a=1&b=2\)/, '链接应序列化到 Markdown');
+
   // An unterminated file header is ambiguous with a Markdown rule: keep it readable, but do not
   // expose it as editable body or let the user accidentally write back partial metadata.
   unclosedFrontMatter = true;

@@ -1387,8 +1387,10 @@ function surroundInlineCode() {
 async function cmdLink() {
   el.editor.focus();
   const sel = getSelection();
-  const text = sel.rangeCount ? sel.getRangeAt(0).toString() : '';
-  const existing = sel.rangeCount && sel.anchorNode?.parentElement?.closest('a');
+  const range = sel?.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+  if (!range || !el.editor.contains(range.commonAncestorContainer)) return;
+  const text = range.toString();
+  const existing = sel.anchorNode?.parentElement?.closest('a');
   const url = await promptModal({
     title: '插入链接',
     label: text ? `将为「${text.slice(0, 24)}」添加超链接` : '选中文本后再点击工具栏，可直接给文字加链接',
@@ -1399,15 +1401,26 @@ async function cmdLink() {
   if (url === null) return;
   const finalUrl = normalizeUrl(url);
   if (!finalUrl) { toast('请输入有效的链接地址'); return; }
-  if (existing) {
+  // The prompt focuses its input, so restore the editor selection before using browser commands.
+  if (el.editWrap.hidden || S.editMode !== 'visual' || !el.editor.contains(range.commonAncestorContainer)) {
+    toast('编辑位置已失效，请重新选择文本');
+    return;
+  }
+  el.editor.focus();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  if (existing && el.editor.contains(existing)) {
     existing.setAttribute('href', finalUrl);
   } else if (text.trim()) {
-    document.execCommand('createLink', false, esc(finalUrl));
+    if (!document.execCommand('createLink', false, finalUrl)) { toast('插入链接失败'); return; }
     const a = sel.anchorNode?.parentElement?.closest('a');
     if (a) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
   } else {
-    document.execCommand('insertHTML', false,
-      `<a href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">${esc(finalUrl)}</a>&nbsp;`);
+    if (!document.execCommand('insertHTML', false,
+      `<a href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">${esc(finalUrl)}</a>&nbsp;`)) {
+      toast('插入链接失败');
+      return;
+    }
   }
   markDirty();
 }
