@@ -335,6 +335,8 @@ async function main(): Promise<void> {
   assert.doesNotMatch(cssRule('.source-editor .cm-scroller'), /max-height/, '源码区不得设置独立的竖向滚动高度');
   assert.match(cssRule('.source-editor .cm-scroller'), /overflow-x:\s*auto/, '关闭换行后长行仍可横向滚动');
   assert.doesNotMatch(cssRule('.source-editor .cm-editor .cm-gutters'), /padding/, '行号区不能重复叠加正文的上内边距');
+  assert.match(cssRule('.source-editor .cm-editor .cm-gutters'), /background:\s*var\(--bg\)/, '行号区背景应遮住横向滚动到其下方的正文并融入页面');
+  assert.match(cssRule('.source-editor .cm-editor .cm-gutters'), /border:\s*0/, '行号区不应引入外框');
 
   console.log('edit mode assertions passed');
 }

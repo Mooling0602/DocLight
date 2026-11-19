@@ -542,8 +542,9 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
 .source-editor .cm-scroller { overflow-x: auto; overflow-y: hidden; font: inherit; }
 .source-editor .cm-content { min-height: 56vh; padding: 8px 0; caret-color: var(--accent); }
 .source-editor .cm-line { padding: 0 10px; }
-/* CodeMirror already aligns the gutter with content padding; extra vertical padding doubles it. */
-.source-editor .cm-editor .cm-gutters { background: transparent; color: var(--text-3); border: 0; }
+/* Match the page background so horizontally scrolled text cannot show through the sticky gutter.
+   CodeMirror already aligns the gutter with content padding; extra vertical padding doubles it. */
+.source-editor .cm-editor .cm-gutters { background: var(--bg); color: var(--text-3); border: 0; }
 .source-editor .cm-lineNumbers .cm-gutterElement { padding: 0 10px; min-width: 3em; }
 .source-editor .cm-activeLine, .source-editor .cm-activeLineGutter { background: var(--accent-soft); }
 .source-editor .cm-placeholder { color: var(--text-3); }
