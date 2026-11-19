@@ -51,6 +51,8 @@ export interface Page {
   title: string;
   /** Page body as Markdown. */
   content: string;
+  /** The file begins with an ambiguous, unterminated metadata fence; never edit it in the UI. */
+  unclosedFrontMatter?: true;
   createdAt: number;
   updatedAt: number;
 }
@@ -128,7 +130,7 @@ function titleFromBody(body: string, fallback: string): string {
  * Split a page file into front matter and body. A file without a leading `---` fence is all
  * body, which makes hand-written notes just work.
  */
-function splitFrontMatter(raw: string): { meta: FrontMatter; body: string } {
+function splitFrontMatter(raw: string): { meta: FrontMatter; body: string; unclosedFrontMatter?: true } {
   const text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   if (!text.startsWith(FRONT_MATTER_FENCE + '\n') && text.trim() !== FRONT_MATTER_FENCE) {
     return { meta: {}, body: text };
@@ -139,7 +141,7 @@ function splitFrontMatter(raw: string): { meta: FrontMatter; body: string } {
   for (let i = 1; i < lines.length; i++) {
     if (lines[i].trim() === FRONT_MATTER_FENCE) { end = i; break; }
   }
-  if (end < 0) return { meta: {}, body: text }; // No closing fence: treat the whole file as body.
+  if (end < 0) return { meta: {}, body: text, unclosedFrontMatter: true }; // Ambiguous: keep readable, but refuse edits.
   let meta: FrontMatter = {};
   try {
     const parsed = YAML.parse(lines.slice(1, end).join('\n'));
@@ -163,8 +165,73 @@ function joinFrontMatter(page: Page): string {
     updatedAt: page.updatedAt,
   };
   const yaml = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-  const body = page.content.replace(/\s+$/, '');
-  return `${FRONT_MATTER_FENCE}\n${yaml}\n${FRONT_MATTER_FENCE}\n\n${body}\n`;
+  // The final newline is the file terminator; all whitespace in the body is user content.
+  return `${FRONT_MATTER_FENCE}\n${yaml}\n${FRONT_MATTER_FENCE}\n\n${page.content}\n`;
+}
+
+type PageMetaKey = 'title' | 'space' | 'parent' | 'createdAt' | 'updatedAt';
+const PAGE_META_KEYS: PageMetaKey[] = ['title', 'space', 'parent', 'createdAt', 'updatedAt'];
+
+/** Patch only changed metadata and preserve the original YAML and body when they did not change. */
+function updatePageFile(raw: string, page: Page, previous: Page): string {
+  const changed = PAGE_META_KEYS.filter(key => page[key] !== previous[key]);
+  const bodyChanged = page.content !== previous.content;
+  if (!changed.length && !bodyChanged) return raw;
+
+  const opening = /^(\uFEFF?---\r?\n)/.exec(raw);
+  if (!opening) {
+    // A fence without a terminating newline is an incomplete front matter, not an ordinary note.
+    if (raw.replace(/^\uFEFF/, '').trim() === '---') throw sourceError('页面 front matter 缺少结束围栏');
+    return joinFrontMatter(page);
+  }
+  const closing = /^[ \t]*---[ \t]*(?:\r?\n|$)/gm;
+  closing.lastIndex = opening[0].length;
+  const fence = closing.exec(raw);
+  if (!fence) throw sourceError('页面 front matter 缺少结束围栏');
+  const yamlText = raw.slice(opening[0].length, fence.index);
+  let nextYaml = yamlText;
+  if (changed.length) {
+    const doc = YAML.parseDocument(yamlText, { uniqueKeys: true });
+    if (doc.errors.length || !YAML.isMap(doc.contents) || doc.contents.flow) {
+      throw sourceError('页面 front matter 无法安全修改');
+    }
+    let references = false;
+    YAML.visit(doc, (_key, node) => {
+      if (YAML.isAlias(node) || (YAML.isNode(node) && 'anchor' in node && node.anchor)) references = true;
+    });
+    if (references) throw sourceError('页面 front matter 含锚点或别名，无法安全修改');
+    const edits: Array<{ start: number; end: number; value: string }> = [];
+    const missing: PageMetaKey[] = [];
+    for (const key of changed) {
+      const node = doc.get(key, true);
+      if (node === undefined) { missing.push(key); continue; }
+      if (!YAML.isScalar(node) || !node.range || node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') {
+        throw sourceError(`页面 front matter 的 ${key} 无法安全修改`);
+      }
+      edits.push({ start: node.range[0], end: node.range[1], value: JSON.stringify(page[key]) });
+    }
+    for (const edit of edits.sort((a, b) => b.start - a.start)) {
+      nextYaml = nextYaml.slice(0, edit.start) + edit.value + nextYaml.slice(edit.end);
+    }
+    if (missing.length) {
+      const eol = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
+      if (nextYaml && !nextYaml.endsWith('\n')) nextYaml += eol;
+      nextYaml += missing.map(key => `${key}: ${JSON.stringify(page[key])}${eol}`).join('');
+    }
+    const verified = YAML.parseDocument(nextYaml, { uniqueKeys: true });
+    if (verified.errors.length || !YAML.isMap(verified.contents)) throw sourceError('修改后的 front matter 无效');
+    const expected = doc.toJS() as Record<string, unknown>;
+    for (const key of changed) expected[key] = page[key];
+    if (!isDeepStrictEqual(expected, verified.toJS())) throw sourceError('修改 front matter 会改变其他字段，已拒绝');
+  }
+  const prefix = opening[0] + nextYaml + fence[0];
+  if (!bodyChanged) return prefix + raw.slice(fence.index + fence[0].length);
+  // Preserve the existing optional blank separator; only the editor-owned body is replaced.
+  const oldBody = raw.slice(fence.index + fence[0].length);
+  const separator = oldBody.startsWith('\r\n') ? '\r\n' : oldBody.startsWith('\n') ? '\n' : '';
+  const eol = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
+  // A closing fence at EOF needs a newline before any body can follow it.
+  return prefix + (fence[0].endsWith('\n') ? '' : eol) + separator + page.content + '\n';
 }
 
 /* ------------------------------------------------------------ ordering */
@@ -235,7 +302,7 @@ export function readStore(dataDir: string): Database {
     let raw = '';
     let stat: fs.Stats | null = null;
     try { raw = fs.readFileSync(full, 'utf8'); stat = fs.statSync(full); } catch { continue; }
-    const { meta, body } = splitFrontMatter(raw);
+    const { meta, body, unclosedFrontMatter } = splitFrontMatter(raw);
     const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
     pages.push({
       slug,
@@ -245,6 +312,7 @@ export function readStore(dataDir: string): Database {
       // The file ends with one trailing newline; drop it so the in-memory body matches what
       // the editor saves (Turndown trims), keeping the content stable across save cycles.
       content: body.replace(/\n$/, ''),
+      ...(unclosedFrontMatter ? { unclosedFrontMatter } : {}),
       createdAt: num(meta.createdAt, fallbackTime),
       updatedAt: num(meta.updatedAt, fallbackTime),
     });
@@ -799,6 +867,8 @@ export interface WriteOptions {
   onlyCreate?: boolean;
   /** Leave existing pages in locked spaces byte-for-byte unchanged during ordinary writes. */
   preserveLocked?: boolean;
+  /** Explicit source and destination for a page slug rename, preserving its original metadata. */
+  rename?: { from: string; to: string };
 }
 
 /**
@@ -822,6 +892,16 @@ export function writeStore(
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
+  const existing = new Map(readStore(dataDir).pages.map(page => [page.slug, page]));
+  if (options.rename) {
+    const { from, to } = options.rename;
+    if (options.onlyCreate || !SLUG_RE.test(from) || !SLUG_RE.test(to) || from === to
+        || !existing.has(from) || db.pages.some(page => page.slug === from)
+        || !db.pages.some(page => page.slug === to) || fs.existsSync(path.join(dir, `${to}.md`))) {
+      throw sourceError('无法安全重命名页面文件');
+    }
+  }
+  const pending: Array<{ file: string; next: string }> = [];
   const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
   for (const page of db.pages) {
     // The slug becomes a file name, so it is validated here rather than trusted from the caller.
@@ -840,9 +920,23 @@ export function writeStore(
     if (options.onlyCreate && fs.existsSync(file)) continue;
     // Serializing the entire tree can normalize unrelated files; a locked page must stay untouched.
     if (lockedSpaces.has(page.space) && fs.existsSync(file)) continue;
-    const next = joinFrontMatter(page);
-    if (!sameContent(file, next)) writeAtomic(file, next);
+    let next: string;
+    const sourceSlug = options.rename?.to === page.slug ? options.rename.from : page.slug;
+    const sourceFile = path.join(dir, `${sourceSlug}.md`);
+    if (fs.existsSync(sourceFile)) {
+      const previous = existing.get(sourceSlug);
+      if (!previous) throw sourceError(`无法读取页面 ${sourceSlug}.md，已拒绝覆盖`);
+      next = updatePageFile(fs.readFileSync(sourceFile, 'utf8'), page, previous);
+    } else if (sourceSlug !== page.slug) {
+      throw sourceError('页面源文件不存在，已拒绝重命名');
+    } else {
+      next = joinFrontMatter(page);
+    }
+    if (!sameContent(file, next)) pending.push({ file, next });
   }
+
+  // Validate every page before writing any of them or deleting a renamed page.
+  for (const { file, next } of pending) writeAtomic(file, next);
 
   for (const slug of new Set(removed)) {
     // A slug that is still live wins: a rename that reuses a name must not delete the new file.

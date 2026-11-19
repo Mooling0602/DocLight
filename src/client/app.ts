@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { htmlToMarkdown, markdownToHtml } from '../markdown.js';
 import { DEFAULT_SORT, SORT_KEYS, SORT_LABELS, pageNeighbors } from '../sort.js';
 import type { SortKey } from '../sort.js';
+import { createMarkdownEditor } from './source-editor.js';
 
 interface Space {
   slug: string;
@@ -34,6 +35,7 @@ interface PageMeta {
 
 interface Page extends PageMeta {
   content: string;
+  unclosedFrontMatter?: true;
 }
 
 interface TreeResponse {
@@ -330,6 +332,8 @@ const el = {
   editWrap: $('#edit-wrap'),
   editor: $('#editor'),
   sourceEditor: $('#source-editor'),
+  sourcePanel: $('#source-panel'),
+  sourceWrapToggle: $('#source-wrap-toggle'),
   modeToggle: $('#mode-toggle'),
   editHint: $('#edit-hint'),
   titleInput: $('#title-input'),
@@ -1062,6 +1066,7 @@ function recommendFooter(space, page) {
 }
 
 function renderArticle(page) {
+  destroySourceEditor();
   const space = spaceBySlug(page.space);
   const locked = pageContentLocked(space);
   const chain = chainOf(page.slug);
@@ -1116,6 +1121,31 @@ function renderArticle(page) {
 /* ============================================================
    Editor core
    ============================================================ */
+const SOURCE_WRAP_KEY = 'doclight-markdown-wrap';
+let sourceWrap = true;
+try { sourceWrap = localStorage.getItem(SOURCE_WRAP_KEY) !== 'off'; } catch { /* default on */ }
+let sourceView: ReturnType<typeof createMarkdownEditor> | null = null;
+let markdownDraft = '';
+let visualBaseline = '';
+
+function destroySourceEditor() {
+  sourceView?.destroy();
+  sourceView = null;
+}
+
+function renderSourceWrap() {
+  el.sourceWrapToggle.setAttribute('aria-pressed', String(sourceWrap));
+  el.sourceWrapToggle.textContent = `自动换行：${sourceWrap ? '开' : '关'}`;
+}
+
+el.sourceWrapToggle.addEventListener('click', () => {
+  sourceWrap = !sourceWrap;
+  try { localStorage.setItem(SOURCE_WRAP_KEY, sourceWrap ? 'on' : 'off'); } catch { /* preference is optional */ }
+  sourceView?.setWrap(sourceWrap);
+  renderSourceWrap();
+});
+renderSourceWrap();
+
 function markDirty() {
   if (!S.dirty) { S.dirty = true; el.dirtyPill.hidden = false; }
 }
@@ -1133,8 +1163,8 @@ function placeCaretEnd(node) {
 /** Read the document from whichever surface is active, in Markdown form. */
 function currentMarkdown(): string {
   return S.editMode === 'markdown'
-    ? el.sourceEditor.value
-    : htmlToMarkdown(el.editor.innerHTML);
+    ? sourceView?.view.state.doc.toString() ?? markdownDraft
+    : el.editor.innerHTML === visualBaseline ? markdownDraft : htmlToMarkdown(el.editor.innerHTML);
 }
 
 /** Reflect the active mode on the segmented control, visually and for assistive tech. */
@@ -1147,7 +1177,7 @@ function renderModeToggle(mode: EditMode) {
 }
 
 /**
- * Switch between the visual (contenteditable) and Markdown (textarea) surfaces without
+ * Switch between the visual and Markdown surfaces without
  * losing edits. Both surfaces describe the same Markdown document, so the outgoing one is
  * serialised first and the incoming one is rebuilt from it. Kept idempotent: selecting the
  * already-active mode does nothing, so a stray click cannot reflow the document.
@@ -1156,22 +1186,29 @@ function setEditMode(mode: EditMode, focus = true) {
   if (S.editMode === mode) return;
   // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
   const markdown = currentMarkdown();
+  markdownDraft = markdown;
   S.editMode = mode;
 
   const visual = mode === 'visual';
   el.editor.hidden = !visual;
-  el.sourceEditor.hidden = visual;
+  el.sourcePanel.hidden = visual;
   // The formatting toolbar only makes sense for the WYSIWYG surface; Markdown is edited raw.
   el.toolbarWrap.hidden = !visual;
   el.editHint.innerHTML = visual ? EDIT_HINTS.visual : EDIT_HINTS.markdown;
 
   if (visual) {
     el.editor.innerHTML = renderMarkdown(markdown);
+    visualBaseline = el.editor.innerHTML;
     if (focus) placeCaretEnd(el.editor);
     setTimeout(() => refreshToolbarState(), 50);
   } else {
-    el.sourceEditor.value = markdown;
-    if (focus) el.sourceEditor.focus();
+    if (!sourceView || sourceView.view.state.doc.toString() !== markdown) {
+      destroySourceEditor();
+      sourceView = createMarkdownEditor(el.sourceEditor, markdown, sourceWrap, markDirty);
+    } else {
+      sourceView.view.requestMeasure();
+    }
+    if (focus) sourceView.view.focus();
   }
   renderModeToggle(mode);
 }
@@ -1192,6 +1229,7 @@ function renderEditorLockStatus() {
 
 function enterEdit(focus = true) {
   if (!S.page) return;
+  if (S.page.unclosedFrontMatter) { toast('页面开头的元数据围栏未闭合，请先检查原始文件；为保护内容，暂不能编辑。', 6000); return; }
   if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
   // The editor always goes full width, unaffected by the reading-view cap
@@ -1205,13 +1243,15 @@ function enterEdit(focus = true) {
   renderAuthUI();
   el.titleInput.value = S.page.title;
 
-  // Both surfaces are seeded from the stored Markdown so a mode switch right after opening
-  // the editor has a valid document on either side.
+  // Keep the original body until the visual surface actually changes; merely opening the
+  // editor or changing the title must not normalise hand-written Markdown.
+  destroySourceEditor();
+  markdownDraft = S.page.content || '';
   S.editMode = 'visual';
-  el.editor.innerHTML = renderMarkdown(S.page.content);
-  el.sourceEditor.value = S.page.content || '';
+  el.editor.innerHTML = renderMarkdown(markdownDraft);
+  visualBaseline = el.editor.innerHTML;
   el.editor.hidden = false;
-  el.sourceEditor.hidden = true;
+  el.sourcePanel.hidden = true;
   el.toolbarWrap.hidden = false;
   el.editHint.innerHTML = EDIT_HINTS.visual;
   renderModeToggle('visual');
@@ -2012,6 +2052,7 @@ function dispatchPageAction(action: string, page: PageMeta | null = S.page): voi
    Views: space overview / space index / article
    ============================================================ */
 function renderHome() {
+  destroySourceEditor();
   S.page = null; S.space = null;
   document.title = 'DocLight · 空间总览';
   el.crumb.textContent = '';
@@ -2075,6 +2116,7 @@ function cardIndexParent(space: Space): PageMeta | null {
 }
 
 function renderSpace(space) {
+  destroySourceEditor();
   S.page = null; S.space = space;
   const parent = cardIndexParent(space);
   if (!parent && new URLSearchParams(location.search).get('view') === 'children'
@@ -2780,46 +2822,6 @@ document.addEventListener('click', e => {
 
 $('#title-input').addEventListener('input', markDirty);
 el.editor.addEventListener('input', markDirty);
-el.sourceEditor.addEventListener('input', markDirty);
-
-// Tab indents the Markdown surface instead of moving focus — code blocks and nested lists are
-// the common reason to reach for it. The operation is line-based: with a multi-line selection
-// every touched line is indented / outdented, never replaced by the two spaces (which would
-// silently delete the selection).
-el.sourceEditor.addEventListener('keydown', e => {
-  if (e.key !== 'Tab') return;
-  e.preventDefault();
-  const ta = el.sourceEditor;
-  const value = ta.value;
-  const selStart = ta.selectionStart;
-  const selEnd = ta.selectionEnd;
-
-  // The block spans whole lines: from the start of the caret's line to the end of the last
-  // selected line (a bare caret therefore touches exactly its own line).
-  const blockStart = value.lastIndexOf('\n', selStart - 1) + 1;
-  const breakAfter = value.indexOf('\n', selEnd);
-  const blockEnd = breakAfter === -1 ? value.length : breakAfter;
-  const lines = value.slice(blockStart, blockEnd).split('\n');
-
-  const replaced = e.shiftKey
-    ? lines.map(line => line.replace(/^ {1,4}/, ''))
-    : lines.map(line => '  ' + line);
-  const next = replaced.join('\n');
-  if (next === value.slice(blockStart, blockEnd)) return; // Shift+Tab with nothing to remove.
-
-  const hadSelection = selEnd > selStart;
-  ta.setRangeText(next, blockStart, blockEnd, 'preserve');
-  if (hadSelection) {
-    ta.setSelectionRange(blockStart, blockStart + next.length);
-  } else {
-    // Keep the caret on the same character, shifted by the first line's length change and
-    // clamped so an outdent cannot push it before the line start.
-    const caret = Math.max(blockStart, selStart + (replaced[0].length - lines[0].length));
-    ta.setSelectionRange(caret, caret);
-  }
-  markDirty();
-});
-
 // Global shortcuts
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;

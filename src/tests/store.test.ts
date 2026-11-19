@@ -163,6 +163,87 @@ try {
   const withExtra = readStore(dir);
   assert.equal(withExtra.pages.find(p => p.slug === 'extra')!.title, '额外', '未知键不应影响解析');
 
+  /* ---- Ordinary saves preserve hand-written metadata and unrelated pages ---- */
+  const preserveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doclight-preserve-'));
+  try {
+    writeStore(preserveDir, db(page('edit'), page('other')));
+    const editFile = path.join(preserveDir, 'pages', 'edit.md');
+    const otherFile = path.join(preserveDir, 'pages', 'other.md');
+    const original = '\uFEFF---\r\n# header\r\ntitle: Old # title comment\r\nspace: default\r\nparent: null\r\ncreatedAt: 1\r\nupdatedAt: 2\r\ncustom:\r\n  nested: [one, two] # custom comment\r\n---\r\n\r\nOld body\r\n';
+    const other = '---\ntitle: Other\nspace: default\ncustom: keep # comment\n---\n\nOther body\n\n';
+    fs.writeFileSync(editFile, original);
+    fs.writeFileSync(otherFile, other);
+    const snapshot = readStore(preserveDir);
+    const edited = snapshot.pages.find(p => p.slug === 'edit')!;
+    edited.title = 'New'; edited.parent = 'other'; edited.updatedAt = 3; edited.content = 'New body';
+    writeStore(preserveDir, snapshot);
+    const result = fs.readFileSync(editFile, 'utf8');
+    assert.match(result, /# header\r\ntitle: "New" # title comment/);
+    assert.match(result, /parent: "other"/);
+    assert.match(result, /updatedAt: 3/);
+    assert.match(result, /custom:\r\n  nested: \[one, two\] # custom comment/);
+    assert.ok(result.endsWith('---\r\n\r\nNew body\n'));
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), other, '无关页面必须逐字节保留');
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'edit')!.content, 'New body');
+
+    // Missing known keys are inserted only when their effective values really change.
+    const current = readStore(preserveDir);
+    const otherPage = current.pages.find(p => p.slug === 'other')!;
+    otherPage.parent = 'edit';
+    writeStore(preserveDir, current);
+    assert.match(fs.readFileSync(otherFile, 'utf8'), /custom: keep # comment\nparent: "edit"\n---/);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'other')!.parent, 'edit');
+
+    const broken = '---\ntitle: [broken\ncustom: keep\n---\n\nBody\n';
+    fs.writeFileSync(editFile, broken);
+    const brokenDb = readStore(preserveDir);
+    const brokenPage = brokenDb.pages.find(p => p.slug === 'edit')!;
+    brokenPage.content = 'Revised';
+    writeStore(preserveDir, brokenDb);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), broken.replace('Body\n', 'Revised\n'));
+    const changedBroken = readStore(preserveDir);
+    changedBroken.pages.find(p => p.slug === 'edit')!.title = 'Unsafe';
+    assert.throws(() => writeStore(preserveDir, changedBroken), /front matter/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), broken.replace('Body\n', 'Revised\n'));
+
+    const alias = '---\ntitle: &name Hello\nspace: default\ncustom: *name\n---\n\nBody\n';
+    fs.writeFileSync(editFile, alias);
+    const aliasDb = readStore(preserveDir);
+    aliasDb.pages.find(p => p.slug === 'edit')!.title = 'Changed';
+    aliasDb.pages.find(p => p.slug === 'other')!.title = 'Also changed';
+    const beforeRejected = fs.readFileSync(otherFile, 'utf8');
+    assert.throws(() => writeStore(preserveDir, aliasDb), /锚点或别名/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), alias);
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), beforeRejected, '拒绝不安全修改时不得先写入其他页面');
+
+    const unclosed = '---\ntitle: unfinished\n';
+    fs.writeFileSync(editFile, unclosed);
+    const unclosedDb = readStore(preserveDir);
+    assert.equal(unclosedDb.pages.find(p => p.slug === 'edit')!.unclosedFrontMatter, true, '未闭合的文件头应标记为不安全，供编辑器保护');
+    unclosedDb.pages.find(p => p.slug === 'edit')!.content = 'changed';
+    assert.throws(() => writeStore(preserveDir, unclosedDb), /结束围栏/);
+    assert.equal(fs.readFileSync(editFile, 'utf8'), unclosed);
+
+    fs.writeFileSync(editFile, '# Plain\n\nText\n');
+    const plain = readStore(preserveDir);
+    const plainPage = plain.pages.find(p => p.slug === 'edit')!;
+    plainPage.content = '# Plain\n\nChanged';
+    writeStore(preserveDir, plain);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'edit')!.content, '# Plain\n\nChanged');
+
+    // A slug change is explicit so the source file's handwritten metadata follows the page.
+    fs.writeFileSync(editFile, original);
+    const renamedDb = readStore(preserveDir);
+    const renamedPage = renamedDb.pages.find(p => p.slug === 'edit')!;
+    renamedPage.slug = 'renamed'; renamedPage.updatedAt = 7;
+    writeStore(preserveDir, renamedDb, ['edit'], { rename: { from: 'edit', to: 'renamed' } });
+    const renamedFile = path.join(preserveDir, 'pages', 'renamed.md');
+    assert.equal(fs.existsSync(editFile), false);
+    assert.match(fs.readFileSync(renamedFile, 'utf8'), /custom:\r\n  nested: \[one, two\] # custom comment/, '重命名应保留自定义元数据');
+    assert.match(fs.readFileSync(renamedFile, 'utf8'), /title: Old # title comment/);
+    assert.equal(readStore(preserveDir).pages.find(p => p.slug === 'renamed')!.updatedAt, 7);
+  } finally { fs.rmSync(preserveDir, { recursive: true, force: true }); }
+
   /* ---- A page pointing at an unknown space falls back instead of vanishing ---- */
   fs.writeFileSync(pageFile('orphan'), '---\ntitle: 孤儿\nspace: gone\n---\n\n正文', 'utf8');
   const orphan = readStore(dir).pages.find(p => p.slug === 'orphan')!;

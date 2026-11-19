@@ -143,6 +143,15 @@ async function main(): Promise<void> {
     assert.equal(validMove.status, 200, '允许改路径并移到无关页面之下');
     assert.equal(validMove.body.parent, 'other_node');
     assert.deepEqual(dataSpace('cycle_test').order, ['renamed_root', 'child_node', 'grandchild_node', 'other_node']);
+    const broken = await api('pages', 'POST', { title: 'Broken header', space: 'cycle_test' });
+    assert.equal(broken.status, 201);
+    const brokenFile = path.join(data, 'pages', `${broken.body.slug}.md`);
+    const brokenRaw = '---\ntitle: incomplete\n';
+    fs.writeFileSync(brokenFile, brokenRaw);
+    assert.equal((await api(`pages/${broken.body.slug}`)).body.unclosedFrontMatter, true, 'API 应提示编辑器保护未闭合的元数据');
+    assert.equal((await api(`pages/${broken.body.slug}`, 'PUT', { content: 'replacement' })).status, 409, '服务端也必须拒绝覆盖不安全的元数据');
+    assert.equal(fs.readFileSync(brokenFile, 'utf8'), brokenRaw, '被拒绝的保存不得修改原文件');
+    assert.equal((await api(`pages/${broken.body.slug}`, 'DELETE')).status, 200, '验证后移除临时损坏页面，避免干扰后续模板事务');
 
     /* ---- ordinary space: rename keeps the manual position ------------------- */
     assert.equal((await api('spaces', 'POST', { title: 'Alpha' })).status, 201);
@@ -155,6 +164,15 @@ async function main(): Promise<void> {
     assert.deepEqual(ordered.body.order, ['page_c', 'page_a', 'page_b']);
     assert.deepEqual(await served('alpha'), ['page_c', 'page_a', 'page_b'], '手动顺序先要在界面上生效');
 
+    // Ordinary page metadata is not part of the editor body, and survives path edits.
+    const sourceFile = path.join(data, 'pages', 'page_a.md');
+    const sourceRaw = fs.readFileSync(sourceFile, 'utf8').replace('\n---\n\n', '\ncustom: keep # hand-written metadata\n---\n\n');
+    fs.writeFileSync(sourceFile, sourceRaw);
+    assert.doesNotMatch((await api('pages/page_a')).body.content, /custom: keep/, '元数据不能进入编辑正文');
+    const exactBody = '# 更新正文\n\n末尾硬换行  \n\n';
+    assert.equal((await api('pages/page_a', 'PUT', { content: exactBody })).status, 200);
+    assert.match(fs.readFileSync(sourceFile, 'utf8'), /custom: keep # hand-written metadata/, '保存正文应保留手写元数据');
+    assert.equal((await api('pages/page_a')).body.content, exactBody, '保存后应保留 Markdown 尾部空格和空行');
     // The regression: page_a sits between page_c and page_b, so the renamed page must stay there.
     const renamed = await api('pages/page_a', 'PUT', { slug: 'page_a2' });
     assert.equal(renamed.status, 200);
@@ -163,6 +181,7 @@ async function main(): Promise<void> {
     assert.deepEqual(await served('alpha'), ['page_c', 'page_a2', 'page_b'], '侧边栏顺序在改名后保持不变');
     assert.equal(fs.existsSync(path.join(data, 'pages', 'page_a.md')), false, '旧页面文件已删除');
     assert.ok(fs.existsSync(path.join(data, 'pages', 'page_a2.md')), '新页面文件已写入');
+    assert.match(fs.readFileSync(path.join(data, 'pages', 'page_a2.md'), 'utf8'), /custom: keep # hand-written metadata/, '页面路径修改应保留自定义元数据和注释');
 
     // Moving within the same space must not remove the page from its manual order.
     assert.equal((await api('pages/page_a2', 'PUT', { space: 'alpha', parent: null })).status, 200);

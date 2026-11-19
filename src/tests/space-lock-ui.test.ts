@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TextDecoder, TextEncoder } from 'node:util';
 import { JSDOM } from 'jsdom';
+import { setSource, sourceView } from './source-editor-utils.js';
 
 const root = path.resolve(__dirname, '../..');
 const publicDir = path.join(root, 'public');
@@ -172,9 +173,8 @@ async function runtimeConflictTests(): Promise<void> {
       clickIn('#btn-edit');
       clickIn('#mode-toggle [data-mode=markdown]');
       const title = d.querySelector('#title-input') as HTMLInputElement;
-      const source = d.querySelector('#source-editor') as HTMLTextAreaElement;
       title.value = '草稿标题'; title.dispatchEvent(new w.Event('input', { bubbles: true }));
-      source.value = '# 草稿正文'; source.dispatchEvent(new w.Event('input', { bubbles: true }));
+      setSource(d, '# 草稿正文');
       if (mode === 'write') {
         clickIn('#btn-save');
       } else {
@@ -187,8 +187,8 @@ async function runtimeConflictTests(): Promise<void> {
       assert.equal(mutations, 1);
       assert.equal(trees, mode === 'write' ? 1 : 2);
       assert.equal(title.value, '草稿标题');
-      assert.equal(source.value, '# 草稿正文');
-      assert.equal(source.hidden, false);
+      assert.equal(sourceView(d).state.doc.toString(), '# 草稿正文');
+      assert.equal((d.querySelector('#source-panel') as HTMLElement).hidden, false);
       assert.equal((d.querySelector('#dirty-pill') as HTMLElement).hidden, false);
       assert.equal((d.querySelector('#edit-wrap') as HTMLElement).hidden, false);
       if (mode !== 'write') assert.match(d.querySelector('#toasts')?.textContent || '', /排序已更新/, '已成功的操作不能误报失败');
@@ -204,7 +204,7 @@ async function runtimeConflictTests(): Promise<void> {
         assert.match(notice.textContent || '', /重新加载.*草稿.*备份/);
         await wait(4400);
         assert.ok(d.querySelector('#runtime-conflict'), '提示不能随 toast 消失');
-        assert.equal(source.value, '# 草稿正文');
+        assert.equal(sourceView(d).state.doc.toString(), '# 草稿正文');
       }
     } finally { instance.window.close(); }
   }
@@ -300,11 +300,9 @@ async function main(): Promise<void> {
     click('#btn-edit');
     click('#mode-toggle [data-mode=markdown]');
     const title = $<HTMLInputElement>('#title-input');
-    const source = $<HTMLTextAreaElement>('#source-editor');
     title.value = '未保存标题';
     title.dispatchEvent(new window.Event('input', { bubbles: true }));
-    source.value = '# 未保存草稿';
-    source.dispatchEvent(new window.Event('input', { bubbles: true }));
+    setSource(document, '# 未保存草稿');
     await openSpaceMenu();
     click('#menu-row [data-act=settings]');
     assert.match($('#modal-root [data-x=lock]').textContent || '', /解锁空间|锁定空间/);
@@ -322,8 +320,8 @@ async function main(): Promise<void> {
     assert.equal(badge.hidden, false, '编辑期间锁定应持续显示只读状态');
     assert.match(badge.textContent || '', /只读.*草稿保留.*解锁后可保存/);
     assert.equal(title.value, '未保存标题');
-    assert.equal(source.value, '# 未保存草稿');
-    assert.equal(source.hidden, false, '锁定不应切换编辑模式');
+    assert.equal(sourceView(document).state.doc.toString(), '# 未保存草稿');
+    assert.equal($<HTMLElement>('#source-panel').hidden, false, '锁定不应切换编辑模式');
     assert.equal($('#dirty-pill').hidden, false, '锁定不应清除未保存状态');
     click('#btn-save');
     await wait();
@@ -344,7 +342,7 @@ async function main(): Promise<void> {
     assert.equal(locked, false);
     assert.equal(badge.hidden, true, '解锁后移除编辑器锁定提示');
     assert.equal(title.value, '未保存标题');
-    assert.equal(source.value, '# 未保存草稿');
+    assert.equal(sourceView(document).state.doc.toString(), '# 未保存草稿');
     click('#btn-save');
     await wait(120);
     const saves = calls.filter(c => c.url.includes('/api/pages/readable') && c.method === 'PUT');

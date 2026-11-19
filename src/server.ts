@@ -1125,7 +1125,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages[idx].updatedAt = Date.now();
       // A slug rename leaves the old file behind, so it is declared for removal here; the store
       // keeps it if the new slug happens to reuse the same name.
-      writeDb(db, renamed ? [slug] : []);
+      writeDb(db, renamed ? [slug] : [], renamed ? { rename: { from: slug, to: db.pages[idx].slug } } : {});
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'DELETE') {

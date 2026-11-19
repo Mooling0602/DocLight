@@ -343,7 +343,7 @@ async function successfulLoginResumesFlow(): Promise<void> {
     assert.equal(app.counts('/api/auth/challenge'), 1);
     assert.equal(app.counts('/api/auth/login'), 1);
     assert.equal(app.modalOpen(), false);
-    assert.equal(app.get<HTMLTextAreaElement>('#source-editor').value, '<p>指南正文</p>', '编辑区由页面内容填充');
+    assert.match(app.get<HTMLElement>('#editor').textContent || '', /指南正文/, '编辑区由页面内容填充');
 
     // The name travels with the challenge answer, and it is the only thing added to the wire.
     const body = app.loginBodies()[0];

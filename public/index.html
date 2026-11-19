@@ -162,7 +162,10 @@
       <section id="edit-wrap" class="container edit-wrap" hidden>
         <input id="title-input" type="text" placeholder="设置页面标题" maxlength="120" autocomplete="off">
         <div id="editor" contenteditable="true" spellcheck="false" aria-label="文档编辑区"></div>
-        <textarea id="source-editor" class="source-editor" spellcheck="false" aria-label="Markdown 源码编辑区" placeholder="# 标题&#10;&#10;用 Markdown 写下正文……" hidden></textarea>
+        <div id="source-panel" class="source-panel" hidden>
+          <div class="source-controls"><span>Markdown 正文 · 页面元数据由系统管理</span><button type="button" id="source-wrap-toggle" class="btn btn-ghost" aria-pressed="true">自动换行：开</button></div>
+          <div id="source-editor" class="source-editor"></div>
+        </div>
         <p class="edit-hint" id="edit-hint">Enter 换行 · 代码块内 <kbd>Tab</kbd> 缩进 · <kbd>Ctrl/⌘ S</kbd> 随时保存 · 粘贴内容将自动清理排版</p>
       </section>
 

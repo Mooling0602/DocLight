@@ -531,23 +531,23 @@ h2:hover .heading-anchor, h3:hover .heading-anchor { opacity: 1; }
   pointer-events: none;
 }
 
-/* Markdown source surface: shares the visual editor's metrics so hot-switching does not
-   jump. Monospace and a real scrollbar (content may be long and lines must not wrap away). */
-.source-editor {
-  display: block; width: 100%; min-height: 56vh;
-  font: 14px/1.75 ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
-  color: var(--text);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  padding: 16px 18px;
-  outline: none; resize: vertical;
-  tab-size: 2;
-  caret-color: var(--accent);
-  transition: border-color .2s ease, background-color .25s ease;
-}
-.source-editor:focus { border-color: var(--accent); }
-.source-editor::placeholder { color: var(--text-3); }
+/* A real code editor keeps line numbers, wrapping and the input surface in one layout. */
+.source-panel { min-width: 0; }
+.source-controls { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; margin-bottom: 8px; color: var(--text-3); font-size: 12px; }
+.source-controls .btn { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+.source-editor { min-width: 0; }
+.source-editor .cm-editor { min-height: 56vh; color: var(--text); font: 14px/1.75 ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace; }
+.source-editor .cm-editor.cm-focused { outline: none; }
+/* Let the surrounding page scroll vertically; the editor only scrolls sideways for long lines. */
+.source-editor .cm-scroller { overflow-x: auto; overflow-y: hidden; font: inherit; }
+.source-editor .cm-content { min-height: 56vh; padding: 8px 0; caret-color: var(--accent); }
+.source-editor .cm-line { padding: 0 10px; }
+/* CodeMirror already aligns the gutter with content padding; extra vertical padding doubles it. */
+.source-editor .cm-editor .cm-gutters { background: transparent; color: var(--text-3); border: 0; }
+.source-editor .cm-lineNumbers .cm-gutterElement { padding: 0 10px; min-width: 3em; }
+.source-editor .cm-activeLine, .source-editor .cm-activeLineGutter { background: var(--accent-soft); }
+.source-editor .cm-placeholder { color: var(--text-3); }
+.source-editor .cm-cursor { border-left-color: var(--accent); }
 
 .edit-hint { font-size: 12.5px; color: var(--text-3); margin-top: 26px; }
 
