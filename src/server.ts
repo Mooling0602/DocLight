@@ -51,7 +51,7 @@ import { readStore, writeStore, writeSpaces, mergeSpaces, storeExists, spacesInd
 import { removeFromOrder, renameInOrder } from './sort.js';
 import { recoverTemplateTransaction } from './template-transaction.js';
 import type { AppConfig } from './config.js';
-import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs } from './store.js';
+import type { Database, Page, Space, WriteOptions, SortKey, TemplateDirs, PageFileSnapshot } from './store.js';
 
 interface AuthRecord {
   user: string | null;
@@ -348,14 +348,14 @@ function readBuiltInTemplate(): Database | null {
   }
 }
 
-function readDb(): Database {
+function readDb(pageFiles?: Map<string, PageFileSnapshot>): Database {
   // Same condition as startup: an index that exists but names no spaces cannot classify the pages,
   // and `storeExists` alone accepts it. Without this, an index emptied while the server is running
   // (sync tool, hand edit) is read as "no spaces": every page collapses onto the fallback space and
   // the next ordinary save persists that, silently reassigning pages. It is also why such a request
   // would 404 on a space move — the target space no longer exists in memory.
   if (!storeExists(DATA_DIR) || spacesIndexIsEmpty(DATA_DIR)) ensureData();
-  const db = readStore(DATA_DIR);
+  const db = readStore(DATA_DIR, pageFiles);
   // The built-in marker is trusted only when constructed here, not when read from disk.
   for (const space of db.spaces) { delete space.builtIn; delete space.devEditable; }
   const template = readBuiltInTemplate();
@@ -734,7 +734,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
   if ((key === 'pages' || key === 'spaces') && req.method !== 'GET' && !getSession(req)) {
     return json(res, 401, { error: '请先登录后再修改', needAuth: true });
   }
-  const db = readDb();
+  // Deletions and page renames must be checked against the request's original read, not a later
+  // write-time snapshot that might already include an external edit.
+  const pageFiles = req.method === 'DELETE' || (key === 'pages' && req.method === 'PUT' && body.slug !== undefined)
+    ? new Map<string, PageFileSnapshot>() : undefined;
+  const db = readDb(pageFiles);
   const builtInSpace = db.spaces.find(s => s.builtIn)?.slug;
   const isLocked = (slug: string) => slug === builtInSpace || slug === BUILT_IN_SLUG || db.spaces.some(s => s.slug === slug && s.locked === true);
   const locked = () => json(res, 423, { error: '空间已锁定' });
@@ -945,7 +949,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
             db.spaces.some(s => isLocked(s.slug) && s.home && removedPages.includes(s.home))) return locked();
         db.pages = db.pages.filter(p => p.space !== spaceSlug);
         db.spaces.splice(idx, 1);
-        writeDb(db, removedPages);
+        writeDb(db, removedPages, { expectedRemoved: pageFiles });
         return json(res, 200, { ok: true, removedSpace: spaceSlug, removedPages });
       }
     }
@@ -1125,7 +1129,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
       db.pages[idx].updatedAt = Date.now();
       // A slug rename leaves the old file behind, so it is declared for removal here; the store
       // keeps it if the new slug happens to reuse the same name.
-      writeDb(db, renamed ? [slug] : [], renamed ? { rename: { from: slug, to: db.pages[idx].slug } } : {});
+      writeDb(db, renamed ? [slug] : [], renamed ? { rename: { from: slug, to: db.pages[idx].slug }, expectedRemoved: pageFiles } : {});
       return json(res, 200, db.pages[idx]);
     }
     if (req.method === 'DELETE') {
@@ -1156,7 +1160,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, pathname: st
           else delete sp.order;
         }
       }
-      writeDb(db, doomed);
+      writeDb(db, doomed, { expectedRemoved: pageFiles });
       return json(res, 200, { ok: true, removed: doomed });
     }
   }

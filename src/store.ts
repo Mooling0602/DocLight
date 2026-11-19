@@ -262,13 +262,22 @@ export function sortPages(pages: Page[], key: SortKey = DEFAULT_SORT): Page[] {
 
 /* ------------------------------------------------------------ read */
 
+/** Original file contents and identity captured during a store read. */
+export interface PageFileSnapshot { raw: string; stat: fs.Stats }
+
+function samePageFile(a: fs.Stats, b: fs.Stats): boolean {
+  return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino
+    && a.mode === b.mode && a.nlink === b.nlink && a.size === b.size
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+}
+
 /** Read the whole store from disk. Missing pieces degrade to empty rather than throwing. */
-export function readStore(dataDir: string): Database {
-  return readStoreSnapshot(dataDir);
+export function readStore(dataDir: string, files?: Map<string, PageFileSnapshot>): Database {
+  return readStoreSnapshot(dataDir, undefined, files);
 }
 
 /** Optionally retain the UTF-8 source text read alongside its decoded page metadata. */
-function readStoreSnapshot(dataDir: string, rawFiles?: Map<string, string>): Database {
+function readStoreSnapshot(dataDir: string, rawFiles?: Map<string, string>, files?: Map<string, PageFileSnapshot>): Database {
   let spaces: Space[] = [];
   try {
     const parsed = JSON.parse(fs.readFileSync(spacesFile(dataDir), 'utf8'));
@@ -306,8 +315,24 @@ function readStoreSnapshot(dataDir: string, rawFiles?: Map<string, string>): Dat
     const full = path.join(pagesDir(dataDir), entry.name);
     let raw = '';
     let stat: fs.Stats | null = null;
-    try { raw = fs.readFileSync(full, 'utf8'); stat = fs.statSync(full); } catch { continue; }
+    try {
+      if (files) {
+        // Bind the text and file identity to the same open file, then confirm the path still names it.
+        const fd = fs.openSync(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try {
+          const before = fs.fstatSync(fd);
+          raw = fs.readFileSync(fd, 'utf8');
+          const after = fs.fstatSync(fd);
+          if (!samePageFile(before, after) || !samePageFile(after, fs.lstatSync(full))) continue;
+          stat = after;
+        } finally { fs.closeSync(fd); }
+      } else {
+        raw = fs.readFileSync(full, 'utf8');
+        stat = fs.statSync(full);
+      }
+    } catch { continue; }
     rawFiles?.set(slug, raw);
+    if (stat) files?.set(slug, { raw, stat });
     const { meta, body, unclosedFrontMatter } = splitFrontMatter(raw);
     const fallbackTime = stat ? Math.round(stat.mtimeMs) : Date.now();
     pages.push({
@@ -875,6 +900,9 @@ export interface WriteOptions {
   preserveLocked?: boolean;
   /** Explicit source and destination for a page slug rename, preserving its original metadata. */
   rename?: { from: string; to: string };
+  /** Original files captured by readStore when the caller decided which pages to remove.
+   * Existing files cannot be removed without this snapshot. */
+  expectedRemoved?: ReadonlyMap<string, PageFileSnapshot>;
 }
 
 /**
@@ -883,7 +911,8 @@ export interface WriteOptions {
  * and file watchers.
  *
  * `removed` lists the slugs the caller itself deleted or renamed. Only those files are
- * unlinked — never "every file the incoming db happens not to mention". That distinction is
+ * unlinked — never "every file the incoming db happens not to mention". Existing removed files
+ * require the original `readStore` snapshot in `options.expectedRemoved`. That distinction is
  * what keeps a write from destroying data it never saw: a page whose file could not be read
  * is absent from `db`, and a migration write carries only the pages in its snapshot,
  * so neither may be treated as an authoritative statement that the other files are unwanted.
@@ -895,6 +924,8 @@ export function writeStore(
   options: WriteOptions = {},
 ): void {
   const dir = pagesDir(dataDir);
+  const removedSlugs = [...new Set(removed)];
+  if (options.onlyCreate && removedSlugs.length) throw sourceError('仅创建模式不能删除页面');
   fs.mkdirSync(dir, { recursive: true });
 
   const wanted = new Set<string>();
@@ -904,10 +935,11 @@ export function writeStore(
   if (options.rename) {
     const { from, to } = options.rename;
     if (options.onlyCreate || !SLUG_RE.test(from) || !SLUG_RE.test(to) || from === to
-        || !existing.has(from) || db.pages.some(page => page.slug === from)
-        || !db.pages.some(page => page.slug === to) || fs.existsSync(path.join(dir, `${to}.md`))) {
+        || db.pages.some(page => page.slug === from) || !db.pages.some(page => page.slug === to)) {
       throw sourceError('无法安全重命名页面文件');
     }
+    if (!existing.has(from)) throw sourceError('页面源文件不存在或无法读取，已拒绝重命名');
+    if (fs.existsSync(path.join(dir, `${to}.md`))) throw sourceError('页面目标文件已存在，已拒绝覆盖');
   }
   const pending: Array<{ file: string; next: string; sourceFile?: string; sourceRaw?: string; newFile: boolean }> = [];
   const lockedSpaces = new Set(options.preserveLocked ? db.spaces.filter(s => s.locked === true).map(s => s.slug) : []);
@@ -936,7 +968,9 @@ export function writeStore(
       const previous = existing.get(sourceSlug);
       if (!previous || raw === undefined) throw sourceError(`无法读取页面 ${sourceSlug}.md，已拒绝覆盖`);
       next = updatePageFile(raw, page, previous);
-    } else if (raw !== undefined || sourceSlug !== page.slug) {
+    } else if (sourceSlug !== page.slug) {
+      throw sourceError('页面源文件不存在，已拒绝重命名');
+    } else if (raw !== undefined) {
       throw sourceError('页面源文件已变化，已拒绝覆盖');
     } else {
       next = joinFrontMatter(page);
@@ -947,6 +981,47 @@ export function writeStore(
       pending.push({ file, next, ...(raw === undefined ? {} : { sourceFile, sourceRaw: raw }), newFile });
     }
   }
+
+  // A write-time snapshot cannot establish what the caller originally chose to delete.
+  const expectedRemoved = options.expectedRemoved;
+  const removals: Array<{ file: string; expected: PageFileSnapshot }> = [];
+  for (const slug of removedSlugs) {
+    // A slug that is still live wins: a rename that reuses a name must not delete the new file.
+    if (wanted.has(slug) || !SLUG_RE.test(slug)) continue;
+    const file = path.join(dir, `${slug}.md`);
+    const expected = expectedRemoved?.get(slug);
+    if (!expected) {
+      try { fs.lstatSync(file); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw sourceError('待删除页面无法读取，已拒绝删除');
+      }
+      throw sourceError('待删除页面不在原始快照中，已拒绝删除');
+    }
+    removals.push({ file, expected });
+  }
+
+  const verifyRemoval = ({ file, expected }: { file: string; expected: PageFileSnapshot }, partial: boolean) => {
+    try {
+      const before = fs.lstatSync(file);
+      if (!samePageFile(expected.stat, before)) throw new Error('file changed');
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      let raw: string;
+      try {
+        const opened = fs.fstatSync(fd);
+        if (!samePageFile(before, opened)) throw new Error('file changed');
+        raw = fs.readFileSync(fd, 'utf8');
+        if (!samePageFile(opened, fs.fstatSync(fd))) throw new Error('file changed');
+      } finally { fs.closeSync(fd); }
+      const after = fs.lstatSync(file);
+      if (samePageFile(before, after) && raw === expected.raw) return;
+    } catch { /* A missing or unreadable file is also a conflict. */ }
+    throw sourceError(partial
+      ? '待删除页面已变化或无法读取，原文件未删除；部分更改可能已写入，请检查后重试'
+      : '待删除页面已变化或无法读取，已拒绝删除');
+  };
+  // Validate every removal before writing anything. Check again immediately before each unlink.
+  for (const removal of removals) verifyRemoval(removal, false);
 
   // Recheck only pages that will change, so external edits during preparation are not silently
   // overwritten. This is not a cross-process transaction; a later race remains possible.
@@ -962,10 +1037,17 @@ export function writeStore(
   // Validate every page before writing any of them or deleting a renamed page.
   for (const { file, next } of pending) writeAtomic(file, next);
 
-  for (const slug of new Set(removed)) {
-    // A slug that is still live wins: a rename that reuses a name must not delete the new file.
-    if (wanted.has(slug) || !SLUG_RE.test(slug)) continue;
-    try { fs.unlinkSync(path.join(dir, `${slug}.md`)); } catch { /* best effort */ }
+  // Path verification and unlink are separate operations; non-cooperating external writers can
+  // still race in between. This is not a cross-process transaction or an atomic conditional unlink.
+  let removedCount = 0;
+  for (const removal of removals) {
+    const partial = pending.length > 0 || removedCount > 0;
+    verifyRemoval(removal, partial);
+    try { fs.unlinkSync(removal.file); }
+    catch { throw sourceError(partial
+      ? '无法删除页面；部分更改可能已写入，请检查后重试'
+      : '无法删除页面，请检查文件状态后重试'); }
+    removedCount++;
   }
 
   // The index obeys the same rule as the page files: under `onlyCreate` a *usable* existing
