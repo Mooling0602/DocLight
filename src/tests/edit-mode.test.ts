@@ -320,9 +320,12 @@ async function main(): Promise<void> {
   for (const view of ['renderArticle', 'renderHome', 'renderSpace']) {
     const start = clientSource.indexOf(`function ${view}(`);
     assert.notEqual(start, -1);
-    const end = clientSource.indexOf("el.editor.innerHTML = '';", start);
-    assert.notEqual(end, -1);
-    assert.match(clientSource.slice(start, end), /clearVisualSelection\(\);\s*$/, `${view} 应在清空编辑区时释放选区`);
+    const functionEnd = clientSource.indexOf('\n}', start);
+    assert.notEqual(functionEnd, -1);
+    const body = clientSource.slice(start, functionEnd);
+    const clearDom = body.indexOf("el.editor.innerHTML = '';");
+    assert.notEqual(clearDom, -1, `${view} 应清空编辑区`);
+    assert.match(body.slice(0, clearDom), /\bclearVisualSelection\(\)/, `${view} 应在清空编辑区之前释放选区`);
   }
 
   // The source editor belongs to the page rather than a bordered, vertically scrolling box.
