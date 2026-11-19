@@ -16,8 +16,9 @@ updatedAt: 1787769399198
 - 🛡 修复了账号登录系统存在的一些问题
 - 💬 初步支持 GitHub alerts 标注块，详见[《可视化编辑指南》](/doclight-default/doclight-default-guide)
 - 📄 Markdown 编辑器使用 [CodeMirror](https://codemirror.net/) 重构，可以获得更好的编辑体验
+- 📎 修复了可视化编辑时无法插入链接的问题
 - 📝 支持对页面进行手动排序，可以在空间页面或侧边栏拖动手柄调整
-- 👀 其他底层稳定性改进
+- 👀 其他底层稳定性改进和问题修复
 
 ## v1.2.0 · 持续打磨
 
