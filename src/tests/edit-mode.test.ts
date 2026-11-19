@@ -226,6 +226,7 @@ async function main(): Promise<void> {
   selection.removeAllRanges();
   selection.addRange(range);
   let commandUrl = '';
+  const originalExecCommand = Object.getOwnPropertyDescriptor(document, 'execCommand');
   (document as any).execCommand = (command: string, _ui: boolean, value: string) => {
     assert.equal(document.activeElement, editor, '执行链接命令时焦点应回到编辑区');
     assert.equal(selection.toString(), '选中的文字', '执行链接命令时应恢复弹窗前的选区');
@@ -246,8 +247,61 @@ async function main(): Promise<void> {
   await wait(20);
   assert.equal(commandUrl, 'https://example.com/?a=1&b=2', '浏览器命令应接收未转义的 URL');
   assert.equal(editor.querySelector('a')?.getAttribute('href'), commandUrl);
+
   click('#mode-toggle [data-mode="markdown"]');
   assert.match(sourceView(document).state.doc.toString(), /\[选中的文字\]\(https:\/\/example\.com\/\?a=1&b=2\)/, '链接应序列化到 Markdown');
+  click('#mode-toggle [data-mode="visual"]');
+
+  // Losing focus must not move a later insertion to the start of the document.
+  editor.innerHTML = '<p>第一行</p><p>第二行内容</p>';
+  (editor as HTMLElement).focus();
+  const secondLine = editor.querySelectorAll('p')[1].firstChild!;
+  const caretBeforeBlur = document.createRange();
+  caretBeforeBlur.setStart(secondLine, 3);
+  caretBeforeBlur.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(caretBeforeBlur);
+  (document as any).execCommand = (command: string) => {
+    assert.equal(command, 'insertHTML');
+    assert.equal(document.activeElement, editor);
+    assert.equal(selection.getRangeAt(0).startContainer, secondLine);
+    assert.equal(selection.getRangeAt(0).startOffset, 3, '失焦后应恢复原来的光标位置');
+    return true;
+  };
+  ($('#title-input') as HTMLInputElement).focus();
+  selection.removeAllRanges();
+  const resetRange = document.createRange();
+  resetRange.selectNodeContents(editor);
+  resetRange.collapse(true);
+  selection.addRange(resetRange);
+  click('#toolbar [data-cmd="createlink"]');
+  ($('#modal-root input') as HTMLInputElement).value = 'https://example.com/';
+  click('#modal-root [data-x="ok"]');
+  await wait(20);
+  if (originalExecCommand) Object.defineProperty(document, 'execCommand', originalExecCommand);
+  else delete (document as any).execCommand;
+
+  // A caret inside the editor is valid even when no text is selected.
+  const caret = document.createRange();
+  caret.selectNodeContents(editor.querySelector('p')!);
+  caret.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(caret);
+  click('#toolbar [data-cmd="createlink"]');
+  assert.equal($('#modal-root').hasAttribute('hidden'), false, '编辑区内的光标应能打开链接弹窗');
+  click('#modal-root [data-x="no"]');
+  await wait(0);
+
+  // Simulate the browser exposing no selection even after focusing the editor.
+  const originalGetSelection = window.getSelection;
+  window.getSelection = () => null;
+  click('#toolbar [data-cmd="createlink"]');
+  window.getSelection = originalGetSelection;
+  assert.match($('#toasts').textContent || '', /请先将光标放在编辑区内/);
+  assert.equal($('#modal-root').hasAttribute('hidden'), true, '没有有效选区时不应打开弹窗');
+
+  click('#mode-toggle [data-mode="markdown"]');
+  assert.match(sourceView(document).state.doc.toString(), /第二行内容/);
 
   // An unterminated file header is ambiguous with a Markdown rule: keep it readable, but do not
   // expose it as editable body or let the user accidentally write back partial metadata.

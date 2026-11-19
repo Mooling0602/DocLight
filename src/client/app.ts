@@ -1130,6 +1130,19 @@ let sourceGeneration = 0;
 const sourceDraft = new SourceDraft();
 let markdownDraft = '';
 let visualBaseline = '';
+let savedVisualRange: Range | null = null;
+let visualGeneration = 0;
+
+function rememberVisualSelection() {
+  const sel = getSelection();
+  if (el.editWrap.hidden || S.editMode !== 'visual' || !sel?.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (el.editor.contains(range.startContainer) && el.editor.contains(range.endContainer)) {
+    savedVisualRange = range.cloneRange();
+  }
+}
+
+el.editor.addEventListener('blur', rememberVisualSelection);
 
 function destroySourceEditor() {
   sourceGeneration++;
@@ -1188,6 +1201,8 @@ function renderModeToggle(mode: EditMode) {
  */
 function setEditMode(mode: EditMode, focus = true) {
   if (S.editMode === mode) return;
+  savedVisualRange = null;
+  visualGeneration++;
   // Capture before flipping the flag, otherwise the reader would consult the wrong surface.
   const markdown = currentMarkdown();
   markdownDraft = markdown;
@@ -1243,6 +1258,8 @@ function enterEdit(focus = true) {
   if (S.page.unclosedFrontMatter) { toast('页面开头的元数据围栏未闭合，请先检查原始文件；为保护内容，暂不能编辑。', 6000); return; }
   if (pageContentLocked(spaceBySlug(S.page.space))) { toast('空间已锁定，请先解锁'); return; }
   S.dirty = false;
+  savedVisualRange = null;
+  visualGeneration++;
   // The editor always goes full width, unaffected by the reading-view cap
   el.article.classList.remove('is-reading');
   el.article.hidden = true;
@@ -1357,6 +1374,7 @@ function refreshToolbarState() {
 }
 
 document.addEventListener('selectionchange', () => {
+  if (document.activeElement === el.editor) rememberVisualSelection();
   if (!el.editWrap.hidden) requestAnimationFrame(refreshToolbarState);
 });
 
@@ -1385,12 +1403,17 @@ function surroundInlineCode() {
 }
 
 async function cmdLink() {
-  el.editor.focus();
   const sel = getSelection();
-  const range = sel?.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
-  if (!range || !el.editor.contains(range.commonAncestorContainer)) return;
+  const currentRange = document.activeElement === el.editor && sel?.rangeCount ? sel.getRangeAt(0) : null;
+  const range = (currentRange || savedVisualRange)?.cloneRange();
+  if (!sel || !range || !el.editor.contains(range.startContainer) || !el.editor.contains(range.endContainer)) {
+    toast('请先将光标放在编辑区内');
+    return;
+  }
+  const generation = visualGeneration;
   const text = range.toString();
-  const existing = sel.anchorNode?.parentElement?.closest('a');
+  const start = range.startContainer;
+  const existing = (start.nodeType === Node.ELEMENT_NODE ? start as Element : start.parentElement)?.closest('a');
   const url = await promptModal({
     title: '插入链接',
     label: text ? `将为「${text.slice(0, 24)}」添加超链接` : '选中文本后再点击工具栏，可直接给文字加链接',
@@ -1402,7 +1425,8 @@ async function cmdLink() {
   const finalUrl = normalizeUrl(url);
   if (!finalUrl) { toast('请输入有效的链接地址'); return; }
   // The prompt focuses its input, so restore the editor selection before using browser commands.
-  if (el.editWrap.hidden || S.editMode !== 'visual' || !el.editor.contains(range.commonAncestorContainer)) {
+  if (generation !== visualGeneration || el.editWrap.hidden || S.editMode !== 'visual' ||
+      !el.editor.contains(range.startContainer) || !el.editor.contains(range.endContainer)) {
     toast('编辑位置已失效，请重新选择文本');
     return;
   }
@@ -1544,7 +1568,7 @@ $('#toolbar').addEventListener('click', async e => {
     if (tip) toast(tip, 1400);
   }
   const cmd = btn.dataset.cmd;
-  el.editor.focus();
+  if (cmd !== 'createlink') el.editor.focus();
 
   switch (cmd) {
     case 'inlinecode': surroundInlineCode(); break;
