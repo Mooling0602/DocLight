@@ -805,7 +805,6 @@ svg.sf-badge { color: var(--text-3); }
   background: var(--accent);
   pointer-events: none;
   z-index: 5;
-  transition: top .1s ease, left .1s ease, width .1s ease;
 }
 .tree-drop::before {
   content: '';

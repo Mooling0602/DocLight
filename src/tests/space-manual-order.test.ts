@@ -341,6 +341,39 @@ async function main(): Promise<void> {
     window.close();
   }
 
+  /* ---- Rounded scroll offsets must not stall a pointer just inside the edge. ---- */
+  {
+    let frames!: ReturnType<typeof mockFrames>;
+    const { window, document, puts } = await boot('http://localhost:4173/default', false, [], w => { frames = mockFrames(w); });
+    await wait(120);
+    const area = document.querySelector<HTMLElement>('.scroll-area')!;
+    let scrollTop = 30;
+    Object.defineProperties(area, {
+      clientHeight: { value: 300 }, scrollHeight: { value: 600 },
+      scrollTop: { get: () => scrollTop, set: value => { scrollTop = Math.round(value); } },
+    });
+    area.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    layoutCards(document);
+    const card = document.querySelector<HTMLElement>('.space-page-card[data-slug="alpha"]')!;
+    pointer(window, 'pointerdown', 30, 20, card.querySelector('.card-grip')!);
+    pointer(window, 'pointermove', 30, 245, window); // one pixel inside the 56px bottom edge
+    frames.step(12);
+    assert.ok(scrollTop > 30, '滚动位置被取整时，停在底部边缘仍应持续向下滚动');
+    const bottom = scrollTop;
+    pointer(window, 'pointermove', 30, 55, window); // one pixel inside the top edge
+    frames.step(12);
+    assert.ok(scrollTop < bottom, '反向后应丢弃先前余量并持续向上滚动');
+    pointer(window, 'pointermove', 30, 150, window);
+    const centered = scrollTop;
+    frames.step(12);
+    assert.equal(scrollTop, centered, '离开边缘时应停止');
+    pointer(window, 'pointercancel', 30, 150, window);
+    frames.step(12);
+    assert.equal(scrollTop, centered, '取消后不得继续滚动');
+    assert.equal(puts.length, 0);
+    window.close();
+  }
+
   /* ---- Sidebar autoscroll updates both the target and its content-relative indicator. ---- */
   {
     let frames!: ReturnType<typeof mockFrames>;
@@ -545,6 +578,7 @@ async function main(): Promise<void> {
     assert.match(rule('.tree-drop'), /height:\s*2px/, '插入指示应为一条细线');
     assert.match(rule('.tree-drop'), /background:\s*var\(--accent\)/, '插入线应使用强调色');
     assert.match(rule('.tree-drop'), /position:\s*absolute/, '插入线应悬浮覆盖，不占据布局');
+    assert.doesNotMatch(rule('.tree-drop'), /transition\s*:/, '插入线不得因位置过渡落后于实际拖拽目标');
     assert.match(rule('.tree-drop::before'), /width:\s*18px/, '插入线左端应有圆形拖动标记');
     assert.match(rule('.tree-drop::before'), /border:\s*2px solid var\(--accent\)/, '圆形标记应有描边');
     assert.match(rule('.tree-row.is-drop-target'), /background:\s*var\(--bg-hover\)/, '目标行应高亮');

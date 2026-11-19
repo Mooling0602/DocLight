@@ -2192,7 +2192,7 @@ const CARD_DRAG_THRESHOLD = 4;
 
 /** Scroll a drag container near its vertical edges and recompute the drop target after each step. */
 function createDragAutoScroller(container: HTMLElement, onScroll: (x: number, y: number) => void) {
-  let x = 0, y = 0, frame = 0, lastTime = 0, stopped = false;
+  let x = 0, y = 0, frame = 0, lastTime = 0, remainder = 0, stopped = false;
   const speed = () => {
     const rect = container.getBoundingClientRect();
     const top = Math.max(0, rect.top), bottom = Math.min(window.innerHeight, rect.bottom);
@@ -2207,16 +2207,24 @@ function createDragAutoScroller(container: HTMLElement, onScroll: (x: number, y:
     frame = 0;
     if (stopped) return;
     const direction = speed();
-    if (!direction) { lastTime = 0; return; }
+    if (!direction) { lastTime = 0; remainder = 0; return; }
     const elapsed = lastTime ? Math.min(50, Math.max(0, time - lastTime)) : 1000 / 60;
     lastTime = time;
-    const before = container.scrollTop;
-    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-    container.scrollTop = Math.max(0, Math.min(maxScroll, before + direction * 18 * elapsed / (1000 / 60)));
-    if (container.scrollTop === before) { lastTime = 0; return; }
-    onScroll(x, y);
+    if (remainder * direction < 0) remainder = 0;
+    // Accumulate subpixel steps: browsers that round scrollTop must still move near the edge.
+    remainder += direction * 18 * elapsed / (1000 / 60);
+    const step = Math.trunc(remainder);
+    if (step) {
+      const before = container.scrollTop;
+      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+      container.scrollTop = Math.max(0, Math.min(maxScroll, before + step));
+      const moved = container.scrollTop - before;
+      if (!moved) { lastTime = 0; remainder = 0; return; }
+      remainder -= moved;
+      onScroll(x, y);
+    }
     if (!stopped && speed()) frame = requestAnimationFrame(tick);
-    else lastTime = 0;
+    else { lastTime = 0; remainder = 0; }
   };
   return {
     update(nextX: number, nextY: number) {
